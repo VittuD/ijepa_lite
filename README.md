@@ -260,6 +260,14 @@ For Hugging Face datasets, you’d typically create a tiny custom Dataset wrappe
 
 ---
 
+# TODOs
+- [ ] Add HF ImageNet 128x128 dataset
+- [ ] Add more mask related logging metrics (e.g. mask distribution stats)
+- [ ] Add non-linear probe eval (e.g. Attentive Probing)
+- [ ] Use Python `logging` module instead of print statements
+
+---
+
 ## License
 
 MIT License (see `LICENSE` file).
