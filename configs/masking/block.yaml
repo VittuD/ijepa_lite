@@ -1,0 +1,4 @@
+name: block
+target_ratio: 0.25
+context_ratio: 0.75
+block_area_ratio: [0.10, 0.35]

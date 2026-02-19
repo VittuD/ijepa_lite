@@ -1,0 +1,43 @@
+# @package _global_
+defaults:
+  - /task: pretrain
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: imagenet
+  - /masking: block
+  - /loss: vanilla
+  - /optim: adamw
+  - /sched: warmup_cosine
+  - /train: pretrain
+  - _self_
+
+model:
+  arch: vit_base_16
+  image_size: 224
+  patch_size: 16
+  embed_dim: 768
+  num_heads: 12
+  depth: 12
+  ema_momentum: [0.996, 0.996]
+
+predictor:
+  depth: 4
+  num_heads: 12
+
+masking:
+  target_ratio: 0.25
+  context_ratio: 0.75
+
+data:
+  root: ${oc.env:IMAGENET_ROOT,/path/to/imagenet}
+  batch_size: 256
+  num_workers: 8
+
+optim:
+  lr: 1.5e-4
+  weight_decay: 0.05
+
+train:
+  epochs: 100
+  log_every: 50
+  save_every_epochs: 1

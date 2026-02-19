@@ -1,0 +1,37 @@
+# @package _global_
+defaults:
+  - /task: linear_probe
+  - /model: vit_torchvision
+  - /data: stl10
+  - /train: eval_linear
+  - _self_
+
+compile: true   # non-default
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+
+data:
+  root: ${oc.env:STL10_ROOT,/scratch/ijepa_lite/data}
+  train_split: train
+  val_split: test
+  batch_size: 256
+  num_workers: 4
+  download: true
+
+task:
+  sched:
+    name: step
+    step_size: 150
+    gamma: 0.1
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,/scratch/ijepa_lite/outputs/2026-02-18/22-03-01_stl10_vits_ps8_comp4/rank0/checkpoints/last.pt}
+
+train:
+  epochs: 500
+  lr: 0.1
+  weight_decay: 0.0

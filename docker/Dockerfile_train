@@ -1,0 +1,33 @@
+FROM eidos-service.di.unito.it/vitturini/ijepa-lite:base
+
+ARG UID=1030
+ARG USER=devuser
+
+# Create user and project area on scratch (so outputs/checkpoints land on scratch)
+RUN useradd -m -u ${UID} ${USER} && \
+    mkdir -p /scratch/ijepa_lite/ijepa-lite && \
+    mkdir -p /scratch/ijepa_lite/wandb && \
+    chown -R ${USER}:${USER} /scratch/ijepa_lite
+
+USER ${USER}
+WORKDIR /scratch/ijepa_lite/ijepa-lite
+
+# Copy the whole repo into the image (for cluster training you typically want a self-contained train image)
+COPY --chown=${USER}:${USER} . /scratch/ijepa_lite/ijepa-lite
+
+# Install project in editable mode so Hydra can find configs via the repo layout
+RUN pip install --no-cache-dir -e .
+
+# Training entrypoint that decides between python vs torchrun
+COPY --chown=${USER}:${USER} docker/entrypoint_train.sh /usr/local/bin/entrypoint_train.sh
+RUN chmod +x /usr/local/bin/entrypoint_train.sh
+
+# Useful defaults
+ENV PYTHONUNBUFFERED=1 \
+    HYDRA_FULL_ERROR=1 \
+    WANDB_DIR=/scratch/ijepa_lite/wandb
+
+ENTRYPOINT ["/usr/local/bin/entrypoint_train.sh"]
+
+# Default: pretrain debug (override in swarm service command)
+CMD ["task=pretrain", "experiment=debug", "logger=wandb"]

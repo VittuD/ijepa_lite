@@ -1,0 +1,12 @@
+.vscode/
+
+# Ignore pycaches
+__pycache__/
+*.pyc
+src/ijepa_lite.egg-info/
+
+# Ignore data
+data/
+
+# Ignore outputs
+outputs/

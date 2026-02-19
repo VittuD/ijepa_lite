@@ -1,0 +1,4 @@
+# Optional file you can reference manually; Hydra settings are already set in configs/config.yaml.
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${exp_name}

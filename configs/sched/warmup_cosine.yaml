@@ -1,0 +1,2 @@
+warmup_epochs: 10
+min_lr: 1e-6

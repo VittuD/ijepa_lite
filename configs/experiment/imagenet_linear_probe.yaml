@@ -1,0 +1,28 @@
+# @package _global_
+defaults:
+  - /task: linear_probe
+  - /model: vit_torchvision
+  - /data: imagenet
+  - /train: eval_linear
+  - _self_
+
+model:
+  arch: vit_base_16
+  image_size: 224
+  patch_size: 16
+  embed_dim: 768
+  num_heads: 12
+  depth: 12
+
+data:
+  root: ${oc.env:IMAGENET_ROOT,/path/to/imagenet}
+  batch_size: 256
+  num_workers: 8
+
+task:
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
+
+train:
+  epochs: 50
+  lr: 0.1
+  weight_decay: 0.0

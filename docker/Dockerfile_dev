@@ -1,0 +1,15 @@
+FROM eidos-service.di.unito.it/vitturini/ijepa-lite:base
+
+ARG UID=1030
+ARG USER=devuser
+
+# Create user and a scratch area (you can rename /scratch/ijepa_lite if you prefer)
+RUN useradd -m -u ${UID} ${USER} && \
+    mkdir -p /scratch/ijepa_lite && \
+    chown -R ${USER}:${USER} /scratch/ijepa_lite
+
+USER ${USER}
+WORKDIR /scratch/ijepa_lite
+
+# Dev container stays alive
+ENTRYPOINT ["tail", "-f", "/dev/null"]

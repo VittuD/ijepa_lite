@@ -1,0 +1,64 @@
+# @package _global_
+defaults:
+  - /task: pretrain
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: stl10
+  - /masking: multiblock
+  - /loss: vanilla
+  - /optim: adamw
+  - /sched: warmup_cosine
+  - /train: pretrain
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+  ema_momentum: [0.996, 1.0]
+
+predictor:
+  depth: 2
+  num_heads: 6
+
+masking:
+  num_target_blocks: 4
+  target_ratio: 0.65
+  context_ratio: 0.30
+  allow_overlap: false
+  tgt_scale:  [0.15, 0.35]
+  tgt_aspect: [0.75, 1.50]
+  ctx_scale:  [0.85, 1.00]
+  ctx_aspect: [0.75, 1.50]
+
+data:
+  root: /scratch/ijepa_lite/data
+  pretrain_split: unlabeled
+  download: true
+  batch_size: 512
+  num_workers: 10
+  prefetch_factor: 4
+
+loss:
+  kind: smooth_l1
+
+optim:
+  lr: 6e-4
+  weight_decay: 1e-5
+  final_weight_decay: 1e-5
+  betas: [0.9, 0.95]
+  eps: 1e-8
+
+sched:
+  warmup_epochs: 4
+  min_lr: 1e-6
+
+train:
+  epochs: 400
+  amp: true
+  grad_clip_norm: 1.0
+  log_every: 50
+  save_every_epochs: 10

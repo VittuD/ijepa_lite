@@ -1,0 +1,28 @@
+# @package _global_
+defaults:
+  - /task: linear_probe
+  - /model: vit_torchvision
+  - /data: cifar10
+  - /train: eval_linear
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 32
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 8
+
+data:
+  root: ${oc.env:CIFAR10_ROOT,/scratch/ijepa_lite/data}
+  batch_size: 512
+  num_workers: 4
+
+task:
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
+
+train:
+  epochs: 50
+  lr: 0.1
+  weight_decay: 0.0

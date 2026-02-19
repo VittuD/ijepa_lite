@@ -1,0 +1,12 @@
+data/
+outputs/
+multirun/
+checkpoints/
+wandb/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.ipynb_checkpoints/
+.git/

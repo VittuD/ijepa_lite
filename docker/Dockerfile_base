@@ -1,0 +1,15 @@
+# Base NVIDIA CUDA image with PyTorch and Python pre-installed
+FROM eidos-service.di.unito.it/eidos-base-pytorch:2.5.1
+
+# System utils commonly needed on clusters
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git tree bash ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy only requirements for layer caching
+COPY requirements.txt /workspace/requirements.txt
+
+# Install Python deps (kept minimal & generic)
+RUN pip install --no-cache-dir -r /workspace/requirements.txt
+
+WORKDIR /workspace

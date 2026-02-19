@@ -1,0 +1,11 @@
+name: wandb
+project: ijepa-lite
+entity: null
+mode: online   # online | offline | disabled
+tags: []
+notes: null
+
+group: ${exp_name}
+run_name: ${exp_name}_${now:%m%d_%H%M%S}_r${oc.env:RANK,0}
+
+log_model: false

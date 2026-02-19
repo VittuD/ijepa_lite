@@ -1,0 +1,2 @@
+normalize: false
+kind: mse   # mse | smooth_l1 | cosine_mse

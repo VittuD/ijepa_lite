@@ -1,0 +1,28 @@
+defaults:
+  # pick a sane default so you can run without specifying experiment
+  - experiment: debug
+  - logger: wandb
+  - _self_
+
+# derived from Hydra's selected experiment name (always exists)
+exp_name: ${hydra:runtime.choices.experiment}
+
+seed: 0
+device: cuda
+compile: false
+resume: null
+
+distributed:
+  backend: nccl
+  timeout_minutes: 30
+  find_unused_parameters: false
+
+hydra:
+  output_subdir: .hydra
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${exp_name}/rank${oc.env:RANK,0}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}_${exp_name}
+    subdir: ${hydra.job.num}/rank${oc.env:RANK,0}
+  job:
+    chdir: true

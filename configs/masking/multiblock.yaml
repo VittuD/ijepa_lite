@@ -1,0 +1,12 @@
+name: multiblock
+
+target_ratio: 0.25
+context_ratio: 0.75
+num_target_blocks: 4
+allow_overlap: false
+
+ctx_scale:  [0.85, 1.00]
+ctx_aspect: [0.75, 1.50]
+
+tgt_scale:  [0.15, 0.20]
+tgt_aspect: [0.75, 1.50]

@@ -1,0 +1,13 @@
+name: linear_probe
+
+# Path to a pretraining checkpoint produced by this repo (checkpoints/last.pt in rank0 dir)
+pretrained_ckpt: null
+
+# Which encoder weights to use from the JEPA checkpoint
+# - context: online encoder
+# - target: EMA encoder
+encoder: target
+
+# Feature pooling from patch tokens
+pool: mean   # mean | cls (cls not available in current vit wrapper)
+amp: true
