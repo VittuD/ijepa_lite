@@ -5,8 +5,9 @@ __pycache__/
 *.pyc
 src/ijepa_lite.egg-info/
 
-# Ignore data
-data/
+# Ignore datasets
+datasets/
 
 # Ignore outputs
 outputs/
+slurm/

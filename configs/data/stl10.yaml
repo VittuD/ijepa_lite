@@ -1,0 +1,18 @@
+name: stl10
+root: data
+
+# STL10 supports: train | test | unlabeled | train+unlabeled
+# For self-supervised pretraining, use unlabeled (or train+unlabeled)
+pretrain_split: unlabeled
+
+# For supervised evaluation (linear probe)
+train_split: train
+val_split: test
+
+download: true
+
+batch_size: 128
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+persistent_workers: true
