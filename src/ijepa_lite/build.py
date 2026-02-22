@@ -17,9 +17,11 @@ from ijepa_lite.data.transforms import (
     build_pretrain_transform,
 )
 from ijepa_lite.engine.checkpoint import load_checkpoint_if_available
+from ijepa_lite.losses.per_token import PerTokenLoss
 from ijepa_lite.losses.vanilla import VanillaTokenLoss
 from ijepa_lite.masking.block_mask import BlockMaskGenerator
 from ijepa_lite.masking.multiblock_mask import MultiBlockMaskGenerator
+from ijepa_lite.masking.ste_linear import LinearSTEScorer
 from ijepa_lite.models.ijepa import IJEPAModel
 from ijepa_lite.models.predictor import Predictor
 from ijepa_lite.models.vit_tokens import build_torchvision_vit_tokens
@@ -28,7 +30,7 @@ from ijepa_lite.utils.seed import seed_worker
 
 
 def _build_masker(cfg):
-    name = str(cfg.masking.name)
+    name = str(cfg.masking.spatial)
 
     if name == "block":
         area = cfg.masking.block_area_ratio  # [min, max]
@@ -73,22 +75,16 @@ def build_callbacks(cfg):
     save_every = int(
         getattr(cfg.train, "save_every", getattr(cfg.train, "save_every_epochs", 1))
     )
-    ckpt_dir = str(getattr(cfg.train, "ckpt_dir", "checkpoints"))
-    ckpt_name = str(getattr(cfg.train, "ckpt_name", "last.pt"))
-
     cbs.append(
         CheckpointCallback(
             save_every=save_every,
-            ckpt_dir=ckpt_dir,
-            ckpt_name=ckpt_name,
+            ckpt_dir=str(getattr(cfg.train, "ckpt_dir", "checkpoints")),
+            ckpt_name=str(getattr(cfg.train, "ckpt_name", "last.pt")),
         )
     )
 
-    # Optional logger (W&B)
     logger_cfg = getattr(cfg, "logger", None)
-    logger_name = (
-        str(getattr(logger_cfg, "name", "none")).lower() if logger_cfg else "none"
-    )
+    logger_name = str(getattr(logger_cfg, "name", "none")).lower() if logger_cfg else "none"
 
     if logger_name == "wandb":
         # Lazy import so logger=none doesn't require wandb installed.
@@ -153,12 +149,37 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         num_patches=num_patches,
     )
 
-    loss_fn = VanillaTokenLoss(
-        normalize=bool(getattr(cfg.loss, "normalize", False)),
-        kind=str(getattr(cfg.loss, "kind", "mse")),
-    )
-
     ema_m = float(cfg.model.ema_momentum[0])
+
+    # ------------------------------------------------------------------
+    # Optional learnable mask scorer
+    # cfg.masking.target controls the target selection strategy:
+    #   "random"     — disabled (default, positions from collate)
+    #   "ste_linear" — LinearSTEScorer (linear projection + STE)
+    # ------------------------------------------------------------------
+    target_name = str(getattr(cfg.masking, "target", "random")).lower()
+    mask_scorer: torch.nn.Module | None = None
+
+    if target_name == "ste_linear":
+        mask_scorer = LinearSTEScorer(feat_dim=int(cfg.model.embed_dim))
+    elif target_name not in ("random", "none", ""):
+        raise ValueError(
+            f"Unknown masking.target={target_name!r}. "
+            "Expected 'random' or 'ste_linear'."
+        )
+
+    # When the scorer is active we need per-token errors → PerTokenLoss.
+    # When it is disabled we keep VanillaTokenLoss so existing configs and
+    # checkpoints are completely unaffected.
+    normalize = bool(getattr(cfg.loss, "normalize", False))
+    kind = str(getattr(cfg.loss, "kind", "mse"))
+
+    if mask_scorer is not None:
+        loss_fn = PerTokenLoss(normalize=normalize, kind=kind)
+    else:
+        loss_fn = VanillaTokenLoss(normalize=normalize, kind=kind)
+
+    lm_loss_weight = float(getattr(cfg.masking, "lm_loss_weight", 1.0))
 
     return IJEPAModel(
         context_encoder=context,
@@ -167,6 +188,8 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         loss_fn=loss_fn,
         ema_momentum=ema_m,
         mask_generator=None,
+        mask_scorer=mask_scorer,
+        lm_loss_weight=lm_loss_weight,
     )
 
 
@@ -215,13 +238,32 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     betas = tuple(float(x) for x in cfg.optim.betas)
     eps = float(cfg.optim.eps)
 
-    opt = torch.optim.AdamW(
-        (p for p in model.parameters() if p.requires_grad),
-        lr=lr,
-        betas=betas,
-        eps=eps,
-        weight_decay=wd_start,
-    )
+    # ------------------------------------------------------------------
+    # Split parameters into two groups so the scorer W can have its own
+    # LR and weight decay independently of the rest of the model.
+    # When no scorer is present, scorer_params will be empty and the
+    # optimizer behaves exactly as before.
+    # ------------------------------------------------------------------
+    scorer_params = [
+        p for n, p in model.named_parameters()
+        if p.requires_grad and "mask_scorer" in n
+    ]
+    jepa_params = [
+        p for n, p in model.named_parameters()
+        if p.requires_grad and "mask_scorer" not in n
+    ]
+
+    lm_lr = float(getattr(cfg.masking, "lm_lr", lr))
+
+    param_groups = [{"params": jepa_params, "lr": lr, "weight_decay": wd_start}]
+    if scorer_params:
+        param_groups.append({
+            "params": scorer_params,
+            "lr": lm_lr,
+            "weight_decay": 0.0,   # W is a single vector; WD is not meaningful
+        })
+
+    opt = torch.optim.AdamW(param_groups, betas=betas, eps=eps)
 
     sched = None
     if getattr(cfg, "sched", None) is not None:
@@ -238,6 +280,8 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
                 cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
                 return (min_lr / lr) + (1.0 - (min_lr / lr)) * cosine
 
+            # LambdaLR multiplies each group's base LR by the returned factor,
+            # so both groups are scaled by the same schedule.
             sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=_lr_lambda)
         elif name == "none":
             sched = None
@@ -264,7 +308,7 @@ def build_linear_probe_model(cfg) -> torch.nn.Module:
             "target_encoder." if prefer in ("target", "ema") else "context_encoder."
         )
 
-        enc_sd = {k[len(prefix) :]: v for k, v in sd.items() if k.startswith(prefix)}
+        enc_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
         if not enc_sd:
             enc_sd = sd
 

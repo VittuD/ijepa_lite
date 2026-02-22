@@ -90,6 +90,8 @@ def train(
 
     # ------------------------------------------------------------------
     # WD schedule (no-op when wd_start == wd_end or wd_start is None)
+    # Only applies to the main JEPA param group (index 0); the scorer
+    # param group (index 1, when present) uses weight_decay=0 always.
     # ------------------------------------------------------------------
     _wd_start = wd_start if wd_start is not None else 0.0
     _wd_end = wd_end if wd_end is not None else _wd_start
@@ -114,6 +116,11 @@ def train(
 
         model.train()
         loss_meter = AverageMeter()
+
+        # Accumulates selection counts across log_every steps for heatmap logging.
+        # Shape is (N,) where N = num_patches; lazily initialised on first batch.
+        _heatmap_acc: torch.Tensor | None = None
+        _heatmap_steps: int = 0
 
         for batch in loader:
             images = batch["images"].to(device, non_blocking=True)
@@ -155,13 +162,14 @@ def train(
             scaler.update()
 
             # ----------------------------------------------------------
-            # WD cosine schedule
+            # WD cosine schedule — only the first param group (JEPA params)
             # ----------------------------------------------------------
             if _do_wd_sched:
                 new_wd = _cosine_wd(
                     _wd_start, _wd_end, state["global_step"], total_steps
                 )
                 for pg in optimizer.param_groups:
+                    # Scorer group has weight_decay=0.0 and must stay at 0.
                     if pg.get("weight_decay", 0.0) > 0.0:
                         pg["weight_decay"] = new_wd
 
@@ -175,6 +183,22 @@ def train(
             core.update_target()
 
             loss_meter.update(float(loss.item()), n=images.size(0))
+
+            # ----------------------------------------------------------
+            # Heatmap accumulation (only when scorer is active)
+            # ----------------------------------------------------------
+            if "target_idx" in out:
+                tidx = out["target_idx"]              # (B, k)
+                N = core.target_encoder.vit.encoder.pos_embedding.shape[1] - 1
+                if _heatmap_acc is None:
+                    _heatmap_acc = torch.zeros(N, device=tidx.device)
+                # Scatter-add: count how many times each patch was selected
+                _heatmap_acc.scatter_add_(
+                    0,
+                    tidx.reshape(-1),
+                    torch.ones(tidx.numel(), device=tidx.device),
+                )
+                _heatmap_steps += 1
 
             if do_log:
                 sum_t = torch.tensor(loss_meter.sum, device=device)
@@ -199,6 +223,13 @@ def train(
                     {k: float(v) for k, v in out.get("mask_stats", {}).items()}
                 )
 
+                # ----------------------------------------------------------
+                # Learnable masking losses (only present when scorer is active)
+                # ----------------------------------------------------------
+                if out.get("lm_loss") is not None:
+                    extra["train/jepa_loss"] = float(out["jepa_loss"])
+                    extra["train/lm_loss"] = float(out["lm_loss"])
+
                 if gnorm is not None:
                     extra["train/grad_norm"] = gnorm
 
@@ -208,6 +239,12 @@ def train(
                     )
                     extra["ema/momentum"] = float(core.ema_momentum)
 
+                    # Log scorer LR separately when a second param group exists
+                    if len(optimizer.param_groups) > 1:
+                        extra["train/scorer_lr"] = float(
+                            optimizer.param_groups[1]["lr"]
+                        )
+
                     if _do_wd_sched:
                         extra["train/weight_decay"] = float(
                             next(
@@ -216,6 +253,31 @@ def train(
                                 if pg.get("weight_decay", 0.0) > 0.0
                             )
                         )
+
+                    # --------------------------------------------------
+                    # Heatmap image logging (wandb only, scorer path)
+                    # --------------------------------------------------
+                    if _heatmap_acc is not None and _heatmap_steps > 0:
+                        try:
+                            import wandb
+                            import math as _math
+                            grid = int(_math.isqrt(_heatmap_acc.numel()))
+                            if grid * grid == _heatmap_acc.numel():
+                                hmap = _heatmap_acc.cpu().float()
+                                hmap = hmap / (hmap.max() + 1e-8)   # normalise to [0,1]
+                                hmap_grid = hmap.reshape(grid, grid).numpy()
+                                wandb.log(
+                                    {"mask/selection_heatmap": wandb.Image(
+                                        hmap_grid,
+                                        caption=f"step {state['global_step']}"
+                                    )},
+                                    step=state["global_step"],
+                                )
+                        except ImportError:
+                            pass  # wandb not available, skip image logging
+                        # Reset for next window
+                        _heatmap_acc.zero_()
+                        _heatmap_steps = 0
 
                     callbacks.on_step_end(
                         cfg=cfg,
