@@ -210,7 +210,7 @@ class IJEPAModel(nn.Module):
         # _scores is a tensor used later for correlation; exclude it from the
         # scalar stats dict so it doesn't reach the logger.
         if self.mask_scorer is not None and tgt_idx.dim() == 2:
-            mask_stats.update({k: v for k, v in scorer_stats.items() if not k.startswith("_")})
+            mask_stats.update({k: v for k, v in scorer_stats.items() if not k.startswith("_")})  # _scores_centered excluded
 
         # ------------------------------------------------------------------
         # Optional encoder-agreement diagnostic
@@ -246,7 +246,7 @@ class IJEPAModel(nn.Module):
                 #   < 0 : W is actively selecting easy patches (bad)
                 # ----------------------------------------------------------
                 with torch.no_grad():
-                    scores_sel = scorer_stats["_scores"].gather(1, tgt_idx)  # (B, k)
+                    scores_sel = scorer_stats["_scores_centered"].gather(1, tgt_idx)  # (B, k)
                     e_flat = result["per_token_error"].float().reshape(-1)
                     s_flat = scores_sel.float().reshape(-1)
                     s_mu, e_mu = s_flat.mean(), e_flat.mean()

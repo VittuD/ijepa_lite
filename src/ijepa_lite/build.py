@@ -254,13 +254,18 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     ]
 
     lm_lr = float(getattr(cfg.masking, "lm_lr", lr))
+    # Weight decay on W directly controls magnitude explosion — the alternative
+    # (per-image score normalisation) distorts gradients via a non-trivial
+    # Jacobian and corrupts the learning signal.  A modest value like 1e-2
+    # is enough to prevent unbounded growth without over-regularising W.
+    lm_wd = float(getattr(cfg.masking, "lm_weight_decay", 1e-2))
 
     param_groups = [{"params": jepa_params, "lr": lr, "weight_decay": wd_start}]
     if scorer_params:
         param_groups.append({
             "params": scorer_params,
             "lr": lm_lr,
-            "weight_decay": 0.0,   # W is a single vector; WD is not meaningful
+            "weight_decay": lm_wd,
         })
 
     opt = torch.optim.AdamW(param_groups, betas=betas, eps=eps)

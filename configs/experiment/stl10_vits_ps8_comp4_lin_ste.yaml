@@ -29,9 +29,10 @@ masking:
   target: ste_linear           # model-side: how target positions are chosen
   target_ratio: 0.65
   context_ratio: 0.30
-  block_area_ratio: [0.10, 0.35]
-  lm_loss_weight: 0.1
+  block_area_ratio: [0.15, 0.35]
+  lm_loss_weight: 0.3
   lm_lr: 1.0e-4
+  lm_weight_decay: 1.0e-2
 
 data:
   root: /scratch/ijepa_lite/data
