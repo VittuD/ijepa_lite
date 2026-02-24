@@ -8,21 +8,32 @@
 # RateDist3WayMasker's owns_loss path rather than passing a plain scalar loss
 # through the standard reconstruction channel.
 #
-# ijepa.py uses VanillaTokenLoss(kind=base_kind, normalize=normalize) with
-# reduction="none" to produce per-patch distortion (B, K).  This tensor is
-# passed to RateDist3WayMasker.aux_loss(), which combines it with the soft
-# mask probabilities and λ via RateDist3WayLoss:
+# ijepa.py uses VanillaTokenLoss(kind=base_kind, normalize=normalize) to
+# produce a scalar reconstruction_loss, which is passed into
+# RateDist3WayMasker.aux_loss().  The masker then computes the full objective:
 #
-#   D_soft   = Σᵢ w_i · patch_loss_i      (w_i ∝ p_tgt_i, normalised)
-#   R        = (1/N) Σᵢ p_ctx_i           (expected context fraction)
-#   total    = D_soft + λ · N · R
+#   total = reconstruction_loss
+#         - α · surprise_soft          (Concrete, fully differentiable)
+#         + β · ign_tax
+#         + λ · N · R
+#
+#   surprise_soft = Σᵢ p_tgt_i · ||EMA_i − ctx_centroid||²
+#   ign_tax       = Σᵢ p_ign_i · ||EMA_i − image_mean||²
+#   ctx_centroid  = (Σᵢ p_ctx_i · EMA_i) / max(Σᵢ p_ctx_i, 1)
+#   R             = (1/N) Σᵢ p_ctx_i
+#
+# (λ, α, β) are sampled from LogUniform each batch during pre-training,
+# so the masker learns a 3-D R-D surface.
 #
 # Logged as:
-#   train/loss              ← total (D_soft + λ·N·R)
+#   train/loss                ← total (full RD objective)
 #   train/reconstruction_loss ← unweighted mean patch loss (monitoring only)
-#   mask/D_soft             ← soft-weighted distortion
-#   mask/rate               ← R ∈ [0, 1]
-#   mask/lambda             ← λ sampled this step
+#   mask/surprise_mean        ← soft-weighted surprise
+#   mask/ign_rate             ← ignore tax value
+#   mask/rate                 ← R ∈ [0, 1]
+#   mask/lambda               ← λ sampled this step
+#   mask/alpha                ← α sampled this step
+#   mask/beta                 ← β sampled this step
 
 kind: rd_3way
 
