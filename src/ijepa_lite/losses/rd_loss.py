@@ -85,8 +85,8 @@ class RateDistSurpriseLoss(nn.Module):
         # meaningful (restoring force away from the degenerate collapse).
         # ------------------------------------------------------------------
         p_ctx_sum = p_ctx.sum(dim=1, keepdim=True).clamp(min=1.0)          # (B, 1)
-        ctx_centroid = (p_ctx.unsqueeze(-1) * ema_full).sum(dim=1) / p_ctx_sum.unsqueeze(-1)
-        # ctx_centroid : (B, D)
+        ctx_centroid = (p_ctx.unsqueeze(-1) * ema_full).sum(dim=1) / p_ctx_sum
+        # ctx_centroid : (B, D)  — p_ctx_sum is (B,1), broadcasts correctly against (B,D)
 
         # ------------------------------------------------------------------
         # Bayesian surprise for every patch — fully differentiable
