@@ -1,43 +1,48 @@
 """
 RateDist3WayMasker: learned masker with post-selection rate-distortion-surprise
-objective.
+objective and (λ, α, β) Lagrange-multiplier conditioning.
 
 Architecture
 ------------
 Identical to PredictorBasedMasker:
   proj_in → [compressed_ctx | selection_queries] → TransformerEncoder → proj_score
 
-The only structural difference from PredictorBasedMasker is:
+Structural differences from PredictorBasedMasker:
   1. proj_score outputs 3 logits (ctx / tgt / ignore) instead of 1
-  2. Option-C λ-conditioned positional residuals on the selection queries
+  2. Positional embeddings are conditioned on log(λ, α, β) as a 3-vector
   3. owns_loss=True: aux_loss() returns the full objective
-
-No learned geometry module. Surprise is computed analytically in aux_loss
-from the EMA tokens and the soft/hard mask probabilities — zero extra parameters.
+  4. Optional `rates: (B, 3)` kwarg — skip internal sampling at downstream time
 
 Objective (see rd_loss.py for full derivation)
 ----------------------------------------------
     total = reconstruction_loss
-          - α · (surprise_direct + surprise_reinforce)
+          - α · surprise_soft
+          + β · ign_tax
           + λ · N · R
 
-    surprise_direct    = mean(BS)                               gradient → p_ctx
-    surprise_reinforce = mean(BS.detach() · log_p_tgt_at_K)    gradient → p_tgt
-    BS_k               = ||EMA_tgt_k - ctx_centroid_soft||²     (B, K)
-    ctx_centroid_soft  = Σᵢ (p_ctx_i/Σⱼp_ctx_j) · EMA_i       (B, D)
-    R                  = (1/N) Σᵢ p_ctx_i
+    surprise_soft = Σᵢ p_tgt_i · ||EMA_i − ctx_centroid||²   (Concrete, no REINFORCE)
+    ign_tax       = Σᵢ p_ign_i · ||EMA_i − image_mean||²
+    ctx_centroid  = (Σᵢ p_ctx_i · EMA_i) / max(Σᵢ p_ctx_i, 1)
+    R             = (1/N) Σᵢ p_ctx_i
 
-Push-pull
----------
-reconstruction_loss : predictor must predict targets from context
--α · surprise       : masker must pick targets context cannot explain
-λ · N · R           : context is expensive; use less of it
+Pre-training
+------------
+(λ, α, β) are sampled once per batch from independent LogUniform distributions.
+The masker learns a 3-D R-D surface indexed by the Lagrange multipliers.
+
+Downstream use
+--------------
+Pass `rates: (B, 3)` to forward — the masker uses those values as (λ, α, β)
+directly, enabling the caller to optimise them as nn.Parameter without any
+mode switch inside the masker.
 
 Collapse prevention
 -------------------
-ntgt = max(ntgt_min, round(batch_mean(Σᵢ p_tgt_i)))
-ntgt_min (default 4) ensures K ≥ 4 hard targets always exist, so
-reconstruction_loss > 0 always, never pulling total to zero.
+p_ctx → 1   : λ · rate_ctx penalises
+p_ctx → 0   : clamped-sum centroid (denominator floor at 1); non-zero surprise gradient
+p_tgt → 1   : hard prediction from near-zero context; surprise at degenerate point ≈
+              ||EMA_i||² − ||mean_EMA||² (non-zero for spatially varying patches)
+p_ign → 1   : β · ign_tax penalises; prior_bs always positive
 """
 from __future__ import annotations
 
@@ -56,7 +61,8 @@ from ijepa_lite.losses.rd_loss import RateDistSurpriseLoss
 @register("rd_3way")
 class RateDist3WayMasker(LatentMasker):
     """
-    Rate-distortion 3-way masker with post-selection Bayesian surprise.
+    Rate-distortion 3-way masker with post-selection Bayesian surprise and
+    (λ, α, β) Lagrange-multiplier conditioning.
 
     Args
     ----
@@ -68,10 +74,13 @@ class RateDist3WayMasker(LatentMasker):
     dropout       : Dropout.
     num_patches   : N — total patch positions.
     temperature   : Gumbel temperature for 3-way categorical.
-    lam_min       : Lower bound of LogUniform λ.
+    lam_min       : Lower bound of LogUniform λ (context rate multiplier).
     lam_max       : Upper bound of LogUniform λ.
+    alpha_min     : Lower bound of LogUniform α (surprise bonus multiplier).
+    alpha_max     : Upper bound of LogUniform α.
+    beta_min      : Lower bound of LogUniform β (ignore tax multiplier).
+    beta_max      : Upper bound of LogUniform β.
     ntgt_min      : Hard floor on target count.
-    alpha         : Surprise bonus weight (see rd_loss.py). Start 0.05–0.1.
     base_kind     : Distortion function used by VanillaTokenLoss (unused here
                     but kept for registry signature consistency).
     normalize     : Normalise pred/target (unused here, kept for consistency).
@@ -92,8 +101,11 @@ class RateDist3WayMasker(LatentMasker):
         temperature: float = 1.0,
         lam_min: float = 1e-3,
         lam_max: float = 1.0,
+        alpha_min: float = 0.01,
+        alpha_max: float = 0.5,
+        beta_min: float = 0.01,
+        beta_max: float = 0.5,
         ntgt_min: int = 4,
-        alpha: float = 0.1,
         base_kind: str = "smooth_l1",  # unused; kept for build.py compatibility
         normalize: bool = False,       # unused; kept for build.py compatibility
     ) -> None:
@@ -103,34 +115,48 @@ class RateDist3WayMasker(LatentMasker):
             raise ValueError(f"lam_min must be > 0 for LogUniform, got {lam_min}")
         if lam_max <= lam_min:
             raise ValueError(f"lam_max ({lam_max}) must be > lam_min ({lam_min})")
+        if alpha_min <= 0:
+            raise ValueError(f"alpha_min must be > 0 for LogUniform, got {alpha_min}")
+        if alpha_max <= alpha_min:
+            raise ValueError(f"alpha_max ({alpha_max}) must be > alpha_min ({alpha_min})")
+        if beta_min <= 0:
+            raise ValueError(f"beta_min must be > 0 for LogUniform, got {beta_min}")
+        if beta_max <= beta_min:
+            raise ValueError(f"beta_max ({beta_max}) must be > beta_min ({beta_min})")
 
         self.num_patches = int(num_patches)
         self.temperature = float(temperature)
-        self.lam_min = float(lam_min)
-        self.lam_max = float(lam_max)
-        self.ntgt_min = max(1, int(ntgt_min))
+        self.lam_min   = float(lam_min)
+        self.lam_max   = float(lam_max)
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        self.beta_min  = float(beta_min)
+        self.beta_max  = float(beta_max)
+        self.ntgt_min  = max(1, int(ntgt_min))
+
+        d = predictor_dim
 
         # ----------------------------------------------------------------
         # Transformer backbone — identical to PredictorBasedMasker
         # ----------------------------------------------------------------
-        self.proj_in = nn.Linear(dim, predictor_dim)
+        self.proj_in = nn.Linear(dim, d)
 
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, predictor_dim))
-        self.selection_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, d))
+        self.selection_token = nn.Parameter(torch.zeros(1, 1, d))
 
-        # Option C: λ-conditioned positional residual
-        self.lam_proj = nn.Linear(1, predictor_dim)
-        self.pos_lam_mlp = nn.Sequential(
-            nn.LayerNorm(2 * predictor_dim),
-            nn.Linear(2 * predictor_dim, predictor_dim),
+        # (λ, α, β) conditioning — takes log(λ, α, β) as a 3-vector
+        self.rates_proj = nn.Linear(3, d)
+        self.pos_rates_mlp = nn.Sequential(
+            nn.LayerNorm(2 * d),
+            nn.Linear(2 * d, d),
             nn.GELU(),
-            nn.Linear(predictor_dim, predictor_dim),
+            nn.Linear(d, d),
         )
 
         layer = nn.TransformerEncoderLayer(
-            d_model=predictor_dim,
+            d_model=d,
             nhead=num_heads,
-            dim_feedforward=int(predictor_dim * mlp_ratio),
+            dim_feedforward=int(d * mlp_ratio),
             dropout=dropout,
             activation="gelu",
             batch_first=True,
@@ -139,23 +165,25 @@ class RateDist3WayMasker(LatentMasker):
         self.blocks = nn.TransformerEncoder(
             layer, num_layers=depth, enable_nested_tensor=False
         )
-        self.norm = nn.LayerNorm(predictor_dim)
+        self.norm = nn.LayerNorm(d)
 
-        # 3-way score head: predictor_dim → [l_ctx, l_tgt, l_ign]
-        self.proj_score = nn.Linear(predictor_dim, 3)
+        # 3-way score head: d → [l_ctx, l_tgt, l_ign]
+        self.proj_score = nn.Linear(d, 3)
 
         # Surprise-based RD loss (no learned parameters)
-        self.rd_loss = RateDistSurpriseLoss(num_patches=num_patches, alpha=alpha)
+        self.rd_loss = RateDistSurpriseLoss(num_patches=num_patches)
 
         # ----------------------------------------------------------------
         # Initialisation
         # ----------------------------------------------------------------
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.selection_token, std=0.02)
-        nn.init.normal_(self.lam_proj.weight, std=0.01)
-        nn.init.zeros_(self.lam_proj.bias)
-        nn.init.zeros_(self.pos_lam_mlp[-1].weight)
-        nn.init.zeros_(self.pos_lam_mlp[-1].bias)
+        nn.init.normal_(self.rates_proj.weight, std=0.01)
+        nn.init.zeros_(self.rates_proj.bias)
+        # Zero-init the final linear of pos_rates_mlp so positional embeddings
+        # start unperturbed by the rates conditioning.
+        nn.init.zeros_(self.pos_rates_mlp[-1].weight)
+        nn.init.zeros_(self.pos_rates_mlp[-1].bias)
         # Score head: near-zero → soft-uniform 3-way distribution at init
         nn.init.zeros_(self.proj_score.weight)
         nn.init.zeros_(self.proj_score.bias)
@@ -166,59 +194,73 @@ class RateDist3WayMasker(LatentMasker):
 
     def forward(
         self,
-        tokens: torch.Tensor,                    # (B, M, D)
-        ema_full: Optional[torch.Tensor] = None, # (B, N, D)
+        tokens:   torch.Tensor,                    # (B, M, D)
+        ema_full: Optional[torch.Tensor] = None,   # (B, N, D)
+        rates:    Optional[torch.Tensor] = None,   # (B, 3) [lam, alpha, beta]
     ) -> MaskOutput:
         """
         Args:
             tokens   : (B, M, D) compressed EMA tokens — input to transformer.
             ema_full : (B, N, D) full EMA tokens — stored in aux for aux_loss.
                        When None (unit tests), surprise computation is skipped.
+            rates    : (B, 3) tensor with columns [λ, α, β].
+                       When provided, skips LogUniform sampling — intended for
+                       downstream use where (λ, α, β) are learnable parameters.
 
         Returns MaskOutput with:
-            context_idx  : (B, nctx)
-            target_idx   : (B, ntgt)  ntgt ≥ ntgt_min
-            context_soft : (B, N)     p_ctx
-            target_soft  : (B, N)     p_tgt
-            aux["lambda"]: (B,)
-            aux["p_ign"] : (B, N)     detached
-            aux["logits"]: (B, N, 3)  detached — for diagnostics
-            aux["ema_full"]: (B, N, D) — passed to aux_loss for surprise
+            context_idx       : (B, nctx)
+            target_idx        : (B, ntgt)  ntgt ≥ ntgt_min
+            context_soft      : (B, N)     p_ctx
+            target_soft       : (B, N)     p_tgt
+            aux["lambda"]     : (B,)
+            aux["alpha"]      : (B,)
+            aux["beta"]       : (B,)
+            aux["p_ign"]      : (B, N)     with grad — needed for β ign_tax
+            aux["logits"]     : (B, N, 3)  detached — for diagnostics
+            aux["ema_full"]   : (B, N, D)  — passed to aux_loss for surprise
         """
         B = tokens.shape[0]
         device = tokens.device
 
         # ----------------------------------------------------------------
-        # λ sample — once per batch, identical for all B samples
+        # (λ, α, β) — sample or use caller-provided rates
         # ----------------------------------------------------------------
-        lam = _sample_log_uniform(self.lam_min, self.lam_max, device=device).expand(B)
+        if rates is not None:
+            lam   = rates[:, 0]
+            alpha = rates[:, 1]
+            beta  = rates[:, 2]
+        else:
+            lam   = _sample_log_uniform(self.lam_min,   self.lam_max,   device).expand(B)
+            alpha = _sample_log_uniform(self.alpha_min, self.alpha_max, device).expand(B)
+            beta  = _sample_log_uniform(self.beta_min,  self.beta_max,  device).expand(B)
 
         # ----------------------------------------------------------------
         # Transformer input: compressed tokens (no positional embed)
         # ----------------------------------------------------------------
-        ctx = self.proj_in(tokens)   # (B, M, predictor_dim)
+        ctx = self.proj_in(tokens)   # (B, M, d)
 
         # ----------------------------------------------------------------
-        # Option C: λ-conditioned positional embeddings
+        # (λ, α, β)-conditioned positional embeddings
         # ----------------------------------------------------------------
-        lam_embed = self.lam_proj(lam.unsqueeze(-1))                    # (B, predictor_dim)
-        lam_embed_exp = lam_embed.unsqueeze(1).expand(-1, self.num_patches, -1)
-        pos_base = self.pos_embed.expand(B, -1, -1)                     # (B, N, predictor_dim)
-        pos_residual = self.pos_lam_mlp(
-            torch.cat([pos_base, lam_embed_exp], dim=-1)
+        log_rates = torch.stack([lam.log(), alpha.log(), beta.log()], dim=-1)  # (B, 3)
+        rates_embed = self.rates_proj(log_rates)                                # (B, d)
+        rates_embed_exp = rates_embed.unsqueeze(1).expand(-1, self.num_patches, -1)
+        pos_base = self.pos_embed.expand(B, -1, -1)                            # (B, N, d)
+        pos_residual = self.pos_rates_mlp(
+            torch.cat([pos_base, rates_embed_exp], dim=-1)
         )
-        pos_embed_lam = pos_base + pos_residual                         # (B, N, predictor_dim)
+        pos_embed_rates = pos_base + pos_residual                               # (B, N, d)
 
         # ----------------------------------------------------------------
         # Selection queries + transformer
         # ----------------------------------------------------------------
-        queries = self.selection_token.expand(B, self.num_patches, -1) + pos_embed_lam
-        seq = torch.cat([ctx, queries], dim=1)   # (B, M+N, predictor_dim)
+        queries = self.selection_token.expand(B, self.num_patches, -1) + pos_embed_rates
+        seq = torch.cat([ctx, queries], dim=1)   # (B, M+N, d)
         out = self.norm(self.blocks(seq))
-        query_out = out[:, -self.num_patches:]   # (B, N, predictor_dim)
+        query_out = out[:, -self.num_patches:]   # (B, N, d)
 
         # ----------------------------------------------------------------
-        # 3-way Gumbel-softmax
+        # 3-way Gumbel-softmax (Concrete relaxation)
         # ----------------------------------------------------------------
         logits = self.proj_score(query_out)   # (B, N, 3)
 
@@ -248,9 +290,11 @@ class RateDist3WayMasker(LatentMasker):
             target_soft=p_tgt,
             aux={
                 "lambda":   lam,
-                "p_ign":    p_ign.detach(),
-                "logits":   logits.detach(),   # pre-Gumbel, for diagnostics
-                "ema_full": ema_full,           # (B, N, D) — used in aux_loss
+                "alpha":    alpha,
+                "beta":     beta,
+                "p_ign":    p_ign,           # NOT detached — needed for β gradient
+                "logits":   logits.detach(), # pre-Gumbel, for diagnostics
+                "ema_full": ema_full,        # (B, N, D) — used in aux_loss
             },
         )
 
@@ -265,8 +309,8 @@ class RateDist3WayMasker(LatentMasker):
         patch_loss: Optional[torch.Tensor] = None,  # available but unused here
     ) -> torch.Tensor:
         """
-        Returns reconstruction_loss - α·surprise + λ·N·R as the complete
-        training objective.
+        Returns reconstruction_loss - α·surprise_soft + β·ign_tax + λ·N·R
+        as the complete training objective.
 
         patch_loss is not used in the surprise formulation (reconstruction_loss
         already captures prediction difficulty as a scalar). It remains in the
@@ -274,30 +318,35 @@ class RateDist3WayMasker(LatentMasker):
         """
         p_ctx    = mask_output.context_soft          # (B, N)
         p_tgt    = mask_output.target_soft           # (B, N)
-        tgt_idx  = mask_output.target_idx            # (B, K)
+        p_ign    = mask_output.aux["p_ign"]          # (B, N) — with grad
         lam      = mask_output.aux["lambda"]         # (B,)
+        alpha    = mask_output.aux["alpha"]          # (B,)
+        beta     = mask_output.aux["beta"]           # (B,)
         ema_full = mask_output.aux.get("ema_full")   # (B, N, D) or None
 
         if ema_full is None:
             # Unit test / fallback — rate term only, no surprise
             R = p_ctx.sum(dim=-1).mean() / self.num_patches
-            rate_term = lam.mean() * self.num_patches * R
             mask_output.aux["surprise_mean"] = 0.0
             mask_output.aux["R"] = float(R.item())
-            return reconstruction_loss + rate_term
+            mask_output.aux["ign_rate"] = 0.0
+            return reconstruction_loss + lam.mean() * self.num_patches * R
 
-        total, BS_mean, R = self.rd_loss(
+        total, surprise, R, ign_rate = self.rd_loss(
             reconstruction_loss=reconstruction_loss,
             p_ctx=p_ctx,
             p_tgt=p_tgt,
-            tgt_idx=tgt_idx,
+            p_ign=p_ign,
             ema_full=ema_full,
             lam=lam,
+            alpha=alpha,
+            beta=beta,
         )
 
         # Write back into aux for mask_diagnostics to pick up
-        mask_output.aux["surprise_mean"] = float(BS_mean.item())
+        mask_output.aux["surprise_mean"] = float(surprise.item())
         mask_output.aux["R"] = float(R.item())
+        mask_output.aux["ign_rate"] = float(ign_rate.item())
 
         return total
 
@@ -307,8 +356,8 @@ class RateDist3WayMasker(LatentMasker):
 # ------------------------------------------------------------------
 
 def _sample_log_uniform(low: float, high: float, device: torch.device) -> torch.Tensor:
-    log_lam = math.log(low) + (math.log(high) - math.log(low)) * torch.rand(1, device=device)
-    return log_lam.exp()
+    log_val = math.log(low) + (math.log(high) - math.log(low)) * torch.rand(1, device=device)
+    return log_val.exp()
 
 
 def _sample_gumbel(like: torch.Tensor) -> torch.Tensor:

@@ -7,20 +7,23 @@ temperature: 1.0
 # λ distribution: LogUniform(lam_min, lam_max), sampled once per batch.
 # λ ≈ "cost per context token" in units of reconstruction_loss.
 # With smooth_l1 and N=144: λ=0.001 → rate penalty ≈ 0.14 at R=1 (cheap);
-# λ=0.1 → rate penalty ≈ 14 at R=1 (very expensive). Start conservative.
+# λ=1.0 → rate penalty ≈ 144 at R=1 (very expensive). Start conservative.
 lam_min: 0.001
-lam_max: 0.01
+lam_max: 1.0
+
+# α distribution: LogUniform(alpha_min, alpha_max), sampled once per batch.
+# α ≈ weight on the surprise bonus (−α · surprise_soft).
+alpha_min: 0.01
+alpha_max: 0.5
+
+# β distribution: LogUniform(beta_min, beta_max), sampled once per batch.
+# β ≈ weight on the ignore tax (+β · ign_tax).
+beta_min: 0.01
+beta_max: 0.5
 
 # Hard floor on target count — prevents D→0 collapse.
 # ntgt = max(ntgt_min, round(mean_batch(Σᵢ p_tgt_i)))
 ntgt_min: 4
-
-# Surprise bonus weight.
-# Scales -α * (surprise_direct + surprise_reinforce) relative to
-# reconstruction_loss (typically ~0.2). Starting at 0.05 means surprise
-# contributes ~25% of the reconstruction signal. Increase if the masker
-# ignores the surprise signal (mask/surprise_mean stays flat).
-alpha: 0.05
 
 # Transformer capacity: predictor_dim, depth, num_heads, mlp_ratio, dropout
 # pulled from cfg.predictor automatically. Override deliberately if needed:

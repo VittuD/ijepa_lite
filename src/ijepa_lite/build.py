@@ -165,10 +165,20 @@ def _build_latent_masker(
         # RD masker: distortion function (registry.py filters these for non-RD maskers)
         "base_kind": str(getattr(cfg.loss, "base_kind", getattr(cfg.loss, "kind", "smooth_l1"))),
         "normalize": bool(getattr(cfg.loss, "normalize", False)),
-        # RD masker: λ distribution bounds and surprise weight
+        # RD masker: λ distribution bounds
         "lam_min": float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "lam_min", 1e-3)),
         "lam_max": float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "lam_max", 1.0)),
-        "alpha":   float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "alpha", 0.05)),
+        # RD masker: α (surprise) and β (ignore tax) LogUniform bounds.
+        # Backward-compat: if old-style single `alpha` is present, derive
+        # alpha_min = alpha/10, alpha_max = alpha.
+        "alpha_min": float(getattr(latent_cfg, "alpha_min",
+                           getattr(latent_cfg, "alpha", 0.01) / 10
+                           if latent_cfg is not None else 0.01)),
+        "alpha_max": float(getattr(latent_cfg, "alpha_max",
+                           getattr(latent_cfg, "alpha", 0.5)
+                           if latent_cfg is not None else 0.5)),
+        "beta_min":  float(getattr(latent_cfg, "beta_min", 0.01) if latent_cfg is not None else 0.01),
+        "beta_max":  float(getattr(latent_cfg, "beta_max", 0.5)  if latent_cfg is not None else 0.5),
     }
 
     # Collect all fields from the latent config (excluding "name")

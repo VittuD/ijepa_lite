@@ -102,6 +102,14 @@ def mask_diagnostics(
         lam = aux["lambda"]
         stats["mask/lambda"] = float(lam.mean().item()) if torch.is_tensor(lam) else float(lam)
 
+    if "alpha" in aux:
+        alpha = aux["alpha"]
+        stats["mask/alpha"] = float(alpha.mean().item()) if torch.is_tensor(alpha) else float(alpha)
+
+    if "beta" in aux:
+        beta = aux["beta"]
+        stats["mask/beta"] = float(beta.mean().item()) if torch.is_tensor(beta) else float(beta)
+
     if "D_soft" in aux:
         stats["mask/D_soft"] = float(aux["D_soft"])
 
@@ -121,9 +129,12 @@ def mask_diagnostics(
     if p_ign is not None:
         stats["mask/expected_nign"] = float(p_ign.sum(dim=-1).mean().item())
 
-    # Surprise metrics — always log when present
+    # Surprise and ignore-tax metrics — always log when present
     if "surprise_mean" in aux:
         stats["mask/surprise_mean"] = float(aux["surprise_mean"])
+
+    if "ign_rate" in aux:
+        stats["mask/ign_rate"] = float(aux["ign_rate"])
 
     if not full:
         return stats
