@@ -1,3 +1,4 @@
+# FILE: src/ijepa_lite/masking/multiblock_mask.py
 from __future__ import annotations
 
 import math
@@ -5,17 +6,23 @@ import random
 
 import torch
 
+from ijepa_lite.masking.base import CollateMasker, MaskOutput
 
-class MultiBlockMaskGenerator:
+
+class MultiBlockMaskGenerator(CollateMasker):
     """
     CPU-side multi-block mask generator intended to run in DataLoader workers.
 
     Behavior (per sample):
       - Sample M target rectangles (optionally non-overlapping).
       - Sample one context rectangle, then remove target patches when overlap is disallowed.
-      - Return fixed-shape tensors for batching:
-          context_idx: (B, Nctx)
-          target_idx:  (B, M, K)
+      - Return fixed-shape tensors for batching.
+
+    Returns:
+        MaskOutput with:
+          context_idx: LongTensor (B, Nctx)
+          target_idx:  LongTensor (B, M, K)
+          context_soft / target_soft: None  (deterministic, no gradient path)
 
     Notes on shapes:
       - Nctx is derived from context_ratio, but may be clipped when many patches are
@@ -176,13 +183,18 @@ class MultiBlockMaskGenerator:
 
         return tgt_blocks, ctx
 
-    def __call__(self, batch_size: int) -> dict:
+    # ------------------------------------------------------------------
+    # Batch entry point — called by IJEPACollate
+    # ------------------------------------------------------------------
+
+    def __call__(self, batch_size: int) -> MaskOutput:
         """
         Generate masks for a batch.
 
         Returns:
-            context_idx: LongTensor (B, Nctx)
-            target_idx:  LongTensor (B, M, K)
+            MaskOutput with:
+              context_idx: LongTensor (B, Nctx)
+              target_idx:  LongTensor (B, M, K)
         """
         ctx_list: list[list[int]] = []
         tgt_list: list[list[list[int]]] = []
@@ -192,11 +204,15 @@ class MultiBlockMaskGenerator:
             ctx_list.append(ctx)
             tgt_list.append(tgt_blocks)
 
-        return {
-            "context_idx": torch.tensor(ctx_list, dtype=torch.long),
-            "target_idx": torch.tensor(tgt_list, dtype=torch.long),
-        }
+        return MaskOutput(
+            context_idx=torch.tensor(ctx_list, dtype=torch.long),  # (B, Nctx)
+            target_idx=torch.tensor(tgt_list, dtype=torch.long),   # (B, M, K)
+        )
 
+
+# ------------------------------------------------------------------
+# Private helpers (unchanged)
+# ------------------------------------------------------------------
 
 def _complement(occupied: set[int], n: int) -> set[int]:
     """Return the set {0, ..., n-1} excluding occupied."""

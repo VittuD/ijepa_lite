@@ -1,0 +1,80 @@
+# @package _global_
+#
+# STL10 pretraining with Gumbel-TopK masker + attention pool compressor.
+# 4 learned queries cross-attend over all N EMA patch tokens before the masker.
+# This is a good middle ground: spatially aware, far cheaper than "full" for
+# maskers with high-dimensional operations, and itself learnable.
+#
+# Run:
+#   python -m ijepa_lite.run experiment=stl10_vits_latent_attnpool
+#
+# Tune number of queries:
+#   python -m ijepa_lite.run experiment=stl10_vits_latent_attnpool masking.compressor.num_queries=8
+
+defaults:
+  - /task: pretrain
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: stl10
+  - /masking: multiblock
+  - /masking/compressor: attention_pool
+  - /masking/latent: gumbel_topk
+  - /loss: vanilla
+  - /optim: adamw
+  - /sched: warmup_cosine
+  - /train: pretrain
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+  ema_momentum: [0.996, 1.0]
+
+predictor:
+  depth: 2
+  num_heads: 6
+
+masking:
+  target_ratio: 0.25
+  context_ratio: 0.75
+
+  compressor:
+    num_queries: 4
+    num_heads: 6   # match model num_heads
+
+  latent:
+    temperature: 1.0
+    entropy_coeff: 0.01
+
+data:
+  root: ${oc.env:STL10_ROOT,/scratch/ijepa_lite/data}
+  pretrain_split: unlabeled
+  batch_size: 256
+  num_workers: 4
+  download: true
+  prefetch_factor: 4
+
+loss:
+  kind: smooth_l1
+
+optim:
+  lr: 3e-4
+  weight_decay: 1e-5
+  final_weight_decay: 1e-5
+  betas: [0.9, 0.95]
+  eps: 1e-8
+
+sched:
+  warmup_epochs: 4
+  min_lr: 1e-6
+
+train:
+  epochs: 400
+  amp: true
+  grad_clip_norm: 1.0
+  log_every: 50
+  save_every_epochs: 10

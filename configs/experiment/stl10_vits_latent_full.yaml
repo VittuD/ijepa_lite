@@ -1,0 +1,79 @@
+# @package _global_
+#
+# STL10 pretraining with Gumbel-TopK learned masker.
+# Compressor: full — masker sees all N EMA patch tokens.
+# This is the richest input for the masker; use as the default starting point.
+#
+# Run:
+#   python -m ijepa_lite.run experiment=stl10_vits_latent_full
+#
+# Swap to a cheaper compressor without changing anything else:
+#   python -m ijepa_lite.run experiment=stl10_vits_latent_full masking/compressor=spatial_stride
+#   python -m ijepa_lite.run experiment=stl10_vits_latent_full masking/compressor=attention_pool masking.compressor.num_queries=8
+
+defaults:
+  - /task: pretrain
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: stl10
+  - /masking: multiblock       # provides target_ratio, context_ratio and block geometry;
+                               # "name: multiblock" is ignored when latent.name is set
+  - /masking/compressor: full
+  - /masking/latent: gumbel_topk
+  - /loss: vanilla
+  - /optim: adamw
+  - /sched: warmup_cosine
+  - /train: pretrain
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+  ema_momentum: [0.996, 1.0]
+
+predictor:
+  depth: 2
+  num_heads: 6
+
+masking:
+  target_ratio: 0.25
+  context_ratio: 0.75
+  # Block geometry fields below are present because /masking: multiblock was loaded.
+  # They are ignored by the latent masker path but harmless to have around.
+
+  latent:
+    temperature: 1.0
+    entropy_coeff: 0.01
+
+data:
+  root: ${oc.env:STL10_ROOT,/scratch/ijepa_lite/data}
+  pretrain_split: unlabeled
+  batch_size: 256
+  num_workers: 4
+  download: true
+  prefetch_factor: 4
+
+loss:
+  kind: smooth_l1
+
+optim:
+  lr: 3e-4
+  weight_decay: 1e-5
+  final_weight_decay: 1e-5
+  betas: [0.9, 0.95]
+  eps: 1e-8
+
+sched:
+  warmup_epochs: 4
+  min_lr: 1e-6
+
+train:
+  epochs: 400
+  amp: true
+  grad_clip_norm: 1.0
+  log_every: 50
+  save_every_epochs: 10

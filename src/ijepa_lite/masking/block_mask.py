@@ -1,11 +1,14 @@
+# FILE: src/ijepa_lite/masking/block_mask.py
 from __future__ import annotations
 
 import random
 
 import torch
 
+from ijepa_lite.masking.base import CollateMasker, MaskOutput
 
-class BlockMaskGenerator:
+
+class BlockMaskGenerator(CollateMasker):
     """
     CPU-side single-block mask generator, called from the DataLoader collate function.
 
@@ -13,8 +16,10 @@ class BlockMaskGenerator:
     Python/CPU logic — no GPU tensor ops, no sync stalls.
 
     Returns:
-        context_idx: (B, Nctx)  long
-        target_idx:  (B, Ntgt)  long
+        MaskOutput with:
+          context_idx: LongTensor (B, Nctx)
+          target_idx:  LongTensor (B, Ntgt)
+          context_soft / target_soft: None  (deterministic, no gradient path)
     """
 
     def __init__(
@@ -94,14 +99,15 @@ class BlockMaskGenerator:
     # Batch entry point — called by IJEPACollate
     # ------------------------------------------------------------------
 
-    def __call__(self, batch_size: int) -> dict:
+    def __call__(self, batch_size: int) -> MaskOutput:
         """
         Args:
             batch_size: number of samples in the batch.
 
-        Returns dict with:
-            "context_idx": LongTensor (B, Nctx)
-            "target_idx":  LongTensor (B, Ntgt)
+        Returns:
+            MaskOutput with:
+              context_idx: LongTensor (B, Nctx)
+              target_idx:  LongTensor (B, Ntgt)
         """
         ctx_list, tgt_list = [], []
         for _ in range(batch_size):
@@ -109,7 +115,7 @@ class BlockMaskGenerator:
             ctx_list.append(ctx)
             tgt_list.append(tgt)
 
-        return {
-            "context_idx": torch.tensor(ctx_list, dtype=torch.long),  # (B, Nctx)
-            "target_idx": torch.tensor(tgt_list, dtype=torch.long),  # (B, Ntgt)
-        }
+        return MaskOutput(
+            context_idx=torch.tensor(ctx_list, dtype=torch.long),  # (B, Nctx)
+            target_idx=torch.tensor(tgt_list, dtype=torch.long),   # (B, Ntgt)
+        )

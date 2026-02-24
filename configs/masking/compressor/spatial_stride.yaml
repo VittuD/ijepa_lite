@@ -1,0 +1,6 @@
+mode: spatial_stride
+# Subsample the patch grid: keep 1 of every (stride x stride) patches.
+# Preserves spatial structure at reduced resolution.
+# Requires a square patch grid. No learned parameters.
+# M = ceil(grid / stride)^2
+stride: 2

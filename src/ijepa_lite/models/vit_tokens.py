@@ -1,6 +1,7 @@
+# FILE: src/ijepa_lite/models/vit_tokens.py
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -59,9 +60,19 @@ class ViTTokens(nn.Module):
     the correct behaviour for:
       - the target encoder (always unmasked, full image)
       - linear probe evaluation (want all patch tokens for mean-pooling)
+
+    CLS token
+    ---------
+    By default the CLS token is stripped from the output (legacy behaviour).
+    Pass return_cls=True to additionally receive the CLS token as a separate
+    tensor.  This is used by TokenCompressor(mode='cls') to feed the ViT's
+    global summary representation to a LatentMasker.
+
+    Signature change is fully backward compatible: return_cls=False is the
+    default and the return type is identical to before when False.
     """
 
-    def __init__(self, vit: VisionTransformer):
+    def __init__(self, vit: VisionTransformer) -> None:
         super().__init__()
         self.vit = vit
 
@@ -69,17 +80,23 @@ class ViTTokens(nn.Module):
         self,
         x: torch.Tensor,
         keep_idx: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_cls: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Args:
-            x:        (B, C, H, W) input images.
-            keep_idx: (B, K) long tensor of patch indices to keep, or None.
-                      When provided, only those K patches enter the transformer.
-                      When None, all N patches are processed (target encoder /
-                      linear probe path).
+            x          : (B, C, H, W) input images.
+            keep_idx   : (B, K) long tensor of patch indices to keep, or None.
+                         When provided, only those K patches enter the transformer.
+                         When None, all N patches are processed (target encoder /
+                         linear probe path).
+            return_cls : when False (default) return patch tokens only — (B, K, D).
+                         when True return (cls_token, patch_tokens):
+                           cls_token    : (B, D)   — ViT global summary token
+                           patch_tokens : (B, K, D) — same as the default return
 
         Returns:
-            (B, K, D) patch token embeddings  (CLS token is always stripped).
+            return_cls=False : (B, K, D) patch token embeddings
+            return_cls=True  : Tuple[(B, D), (B, K, D)] — (cls_token, patch_tokens)
         """
         if not hasattr(self.vit, "_process_input"):
             raise RuntimeError("Unsupported torchvision VisionTransformer version.")
@@ -119,7 +136,13 @@ class ViTTokens(nn.Module):
         x = self.vit.encoder.layers(x)
         x = self.vit.encoder.ln(x)
 
-        return x[:, 1:]  # drop CLS, return patch tokens only
+        patch_tokens = x[:, 1:]  # (B, K, D) or (B, N, D) — drop CLS from sequence
+
+        if return_cls:
+            cls_token = x[:, 0]  # (B, D)
+            return cls_token, patch_tokens
+
+        return patch_tokens
 
 
 def build_torchvision_vit_tokens(cfg) -> ViTTokens:

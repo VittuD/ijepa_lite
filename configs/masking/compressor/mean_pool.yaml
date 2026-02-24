@@ -1,0 +1,3 @@
+mode: mean_pool
+# Global average pool over all N patch tokens → single (B, D) vector.
+# Differentiable, cheap, no learned parameters. M = 1.

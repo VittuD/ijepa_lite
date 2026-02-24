@@ -1,0 +1,115 @@
+# @package _global_
+#
+# Rate-distortion 3-way masker experiment — directly comparable to the
+# multiblock baseline (stl10_vits_ps8_comp4.yaml).
+#
+# All training hyperparameters (lr, wd, schedule, batch, EMA) are
+# intentionally identical.  The only differences from the baseline are:
+#
+#   /masking:   multiblock  →  no static masking config needed (masker owns it)
+#   /loss:      vanilla     →  rd_3way
+#   /masking/compressor: full (new)
+#   /masking/latent:     rd_3way (new)
+#
+# Architecture context
+# --------------------
+# image_size=96, patch_size=8  →  grid = 12×12 = 144 patches (N)
+# λ ~ LogUniform(0.001, 0.1)   →  rate penalty range: 0.14 – 14.4 distortion units
+# nctx, ntgt determined on-the-fly from expected soft counts each batch.
+#
+# Masker transformer = Predictor transformer (same depth=2, heads=6, dim=192).
+# The masker sees all 144 EMA tokens (compressor=full) and produces a 3-way
+# categorical assignment (ctx / tgt / ignore) for each patch, conditioned on
+# the sampled λ via Option-C positional residuals.
+#
+# Key metrics to compare against the baseline
+# -------------------------------------------
+#   train/loss                  ← D_soft + λ·N·R  (compare to baseline train/loss)
+#   train/reconstruction_loss   ← unweighted mean patch loss (direct baseline comparison)
+#   mask/D_soft                 ← soft-weighted distortion (masker's own signal)
+#   mask/rate                   ← expected context fraction R ∈ [0, 1]
+#   mask/lambda                 ← λ sampled this step
+#   mask/expected_nctx          ← compare to baseline mask/nctx = 43
+#   mask/expected_ntgt          ← compare to baseline mask/ntgt = 94
+#   mask/entropy_3way           ← per-patch assignment uncertainty; should decay
+#   mask/batch_iou              ← collapse monitor; expected baseline ≈ 0.45
+#
+# Ablation commands
+# -----------------
+# Disable rate term (pure reconstruction signal drives masker):
+#   python -m ijepa_lite.run experiment=stl10_vits_ps8_rd \
+#       masking.latent.lam_max=1e-6 masking.latent.lam_min=1e-7
+#
+# Wider λ range (allow very sparse context):
+#   python -m ijepa_lite.run experiment=stl10_vits_ps8_rd \
+#       masking.latent.lam_min=1e-3 masking.latent.lam_max=1.0
+#
+# Smaller compressor (cut masker input from 144 to 36 tokens):
+#   python -m ijepa_lite.run experiment=stl10_vits_ps8_rd \
+#       masking/compressor=spatial_stride masking.compressor.stride=2
+#
+# Register the masker before running:
+#   import ijepa_lite.masking.rd_masker  # noqa: F401
+
+defaults:
+  - /task: pretrain
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: stl10
+  - /masking: multiblock        # provides base config structure; name is ignored
+                                # when masking.latent.name is set
+  - /masking/compressor: full
+  - /masking/latent: rd_3way
+  - /loss: rd_3way
+  - /optim: adamw
+  - /sched: warmup_cosine
+  - /train: pretrain
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+  ema_momentum: [0.996, 1.0]
+
+predictor:
+  depth: 2
+  num_heads: 6
+  # predictor_dim=192, mlp_ratio=4.0, dropout=0.0 from /predictor: base.
+  # Masker inherits these automatically via build.py — no duplication needed.
+
+masking:
+  # target_ratio and context_ratio are kept as soft priors for the masker's
+  # expected-count initialisation. They do not impose hard constraints —
+  # the masker is free to learn different operating points via the RD objective.
+  target_ratio: 0.65
+  context_ratio: 0.30
+
+data:
+  root: /scratch/ijepa_lite/data
+  pretrain_split: unlabeled
+  download: true
+  batch_size: 512
+  num_workers: 10
+  prefetch_factor: 4
+
+optim:
+  lr: 6e-4
+  weight_decay: 1e-5
+  final_weight_decay: 1e-5
+  betas: [0.9, 0.95]
+  eps: 1e-8
+
+sched:
+  warmup_epochs: 4
+  min_lr: 1e-6
+
+train:
+  epochs: 400
+  amp: true
+  grad_clip_norm: 1.0
+  log_every: 50
+  save_every_epochs: 10

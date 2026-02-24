@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -17,8 +17,11 @@ from ijepa_lite.data.transforms import (
     build_pretrain_transform,
 )
 from ijepa_lite.engine.checkpoint import load_checkpoint_if_available
+from ijepa_lite.losses.rd_loss import RateDistSurpriseLoss
 from ijepa_lite.losses.vanilla import VanillaTokenLoss
+from ijepa_lite.masking.base import CollateMasker, LatentMasker
 from ijepa_lite.masking.block_mask import BlockMaskGenerator
+from ijepa_lite.masking.compressor import TokenCompressor
 from ijepa_lite.masking.multiblock_mask import MultiBlockMaskGenerator
 from ijepa_lite.models.ijepa import IJEPAModel
 from ijepa_lite.models.predictor import Predictor
@@ -27,7 +30,22 @@ from ijepa_lite.utils.dist import get_rank, get_world_size, is_distributed
 from ijepa_lite.utils.seed import seed_worker
 
 
-def _build_masker(cfg):
+# ------------------------------------------------------------------
+# Masker builders
+# ------------------------------------------------------------------
+
+def _build_collate_masker(cfg) -> Optional[CollateMasker]:
+    """
+    Build a CPU-side CollateMasker from config.
+
+    Returns None when a LatentMasker is configured (collate stays dumb).
+    """
+    # If a latent masker is configured, the collate should not produce masks.
+    latent_cfg = getattr(cfg.masking, "latent", None)
+    latent_name = str(getattr(latent_cfg, "name", "none")).lower() if latent_cfg else "none"
+    if latent_name not in ("none", "null", ""):
+        return None
+
     name = str(cfg.masking.name)
 
     if name == "block":
@@ -63,8 +81,114 @@ def _build_masker(cfg):
             allow_overlap=bool(getattr(cfg.masking, "allow_overlap", False)),
         )
 
-    raise ValueError(f"Unknown masking.name={name}")
+    raise ValueError(f"Unknown masking.name={name!r}")
 
+
+def _build_compressor(cfg) -> Optional[TokenCompressor]:
+    """
+    Build a TokenCompressor from cfg.masking.compressor.
+
+    Returns None if no compressor section is present in the config.
+    A compressor is only required when cfg.masking.latent.name is set.
+    """
+    comp_cfg = getattr(cfg.masking, "compressor", None)
+    if comp_cfg is None:
+        return None
+
+    mode = str(getattr(comp_cfg, "mode", "full"))
+    embed_dim = int(cfg.model.embed_dim)
+
+    return TokenCompressor(
+        mode=mode,
+        dim=embed_dim,
+        stride=int(getattr(comp_cfg, "stride", 2)),
+        num_queries=int(getattr(comp_cfg, "num_queries", 4)),
+        num_heads=int(getattr(comp_cfg, "num_heads", 8)),
+    )
+
+
+def _build_latent_masker(
+    cfg,
+    compressor: Optional[TokenCompressor],
+) -> Optional[LatentMasker]:
+    """
+    Build a LatentMasker from cfg.masking.latent using the masker registry.
+
+    Returns None if masking.latent is absent or masking.latent.name is "none".
+
+    The masker class must be registered via @register("name") and its module
+    imported before this function is called.  The simplest way to ensure this
+    is to import your masker module at the top of run.py:
+        import ijepa_lite.masking.example_latent_masker  # noqa: F401
+
+    All fields under cfg.masking.latent (except "name") are forwarded to the
+    masker constructor as keyword arguments, along with these automatically
+    inferred values:
+        dim          : cfg.model.embed_dim
+        num_patches  : (image_size // patch_size) ** 2
+        target_ratio : cfg.masking.target_ratio
+        context_ratio: cfg.masking.context_ratio
+
+    Constructor keyword arguments take precedence over the auto-inferred ones
+    if the masker config explicitly provides them.
+    """
+    latent_cfg = getattr(cfg.masking, "latent", None)
+    if latent_cfg is None:
+        return None
+
+    name = str(getattr(latent_cfg, "name", "none")).lower()
+    if name in ("none", "null", ""):
+        return None
+
+    # Lazy import to avoid importing user code unless a latent masker is used.
+    from ijepa_lite.masking.registry import build_latent_masker
+
+    num_patches = (int(cfg.model.image_size) // int(cfg.model.patch_size)) ** 2
+
+    # Build kwargs: auto-inferred defaults, overridable by the latent config.
+    #
+    # Predictor-compatible fields are pulled from cfg.predictor so that
+    # "predictor_based" maskers match predictor capacity with no config
+    # duplication.  Any field can be overridden in masking.latent.
+    pred_cfg = getattr(cfg, "predictor", None)
+    auto_kwargs = {
+        "dim": int(cfg.model.embed_dim),
+        "num_patches": num_patches,
+        "target_ratio": float(getattr(cfg.masking, "target_ratio", 0.25)),
+        "context_ratio": float(getattr(cfg.masking, "context_ratio", 0.75)),
+        # Predictor-compatible defaults (ignored by maskers that don't use them)
+        "predictor_dim": int(getattr(pred_cfg, "predictor_dim", 192)),
+        "depth": int(getattr(pred_cfg, "depth", 2)),
+        "num_heads": int(getattr(pred_cfg, "num_heads", 6)),
+        "mlp_ratio": float(getattr(pred_cfg, "mlp_ratio", 4.0)),
+        "dropout": float(getattr(pred_cfg, "dropout", 0.0)),
+        # RD masker: distortion function (registry.py filters these for non-RD maskers)
+        "base_kind": str(getattr(cfg.loss, "base_kind", getattr(cfg.loss, "kind", "smooth_l1"))),
+        "normalize": bool(getattr(cfg.loss, "normalize", False)),
+        # RD masker: λ distribution bounds and surprise weight
+        "lam_min": float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "lam_min", 1e-3)),
+        "lam_max": float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "lam_max", 1.0)),
+        "alpha":   float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "alpha", 0.05)),
+    }
+
+    # Collect all fields from the latent config (excluding "name")
+    from omegaconf import OmegaConf
+    latent_dict = (
+        dict(OmegaConf.to_container(latent_cfg, resolve=True))
+        if hasattr(latent_cfg, "_metadata")  # OmegaConf DictConfig
+        else {k: v for k, v in vars(latent_cfg).items() if not k.startswith("_")}
+    )
+    latent_dict.pop("name", None)
+
+    # Config overrides auto-inferred values
+    merged_kwargs = {**auto_kwargs, **latent_dict}
+
+    return build_latent_masker(name, **merged_kwargs)
+
+
+# ------------------------------------------------------------------
+# Callbacks, DDP, sampler (unchanged)
+# ------------------------------------------------------------------
 
 def build_callbacks(cfg):
     cbs = []
@@ -84,14 +208,12 @@ def build_callbacks(cfg):
         )
     )
 
-    # Optional logger (W&B)
     logger_cfg = getattr(cfg, "logger", None)
     logger_name = (
         str(getattr(logger_cfg, "name", "none")).lower() if logger_cfg else "none"
     )
 
     if logger_name == "wandb":
-        # Lazy import so logger=none doesn't require wandb installed.
         try:
             from ijepa_lite.callbacks.wandb_cb import WandbCallback
         except Exception as e:
@@ -136,6 +258,34 @@ def _build_sampler(ds, shuffle: bool, drop_last: bool):
     )
 
 
+# ------------------------------------------------------------------
+# Loss builder
+# ------------------------------------------------------------------
+
+def _build_loss(cfg) -> VanillaTokenLoss:
+    """
+    Build the token-level loss function for use in ijepa.py.
+
+    For standard maskers: VanillaTokenLoss with cfg.loss.kind.
+    For rd_3way masker:   VanillaTokenLoss with cfg.loss.base_kind.
+                          The RateDistSurpriseLoss combination lives on the masker;
+                          this function only provides the per-patch distortion
+                          that ijepa.py computes and passes into aux_loss.
+    """
+    normalize = bool(getattr(cfg.loss, "normalize", False))
+    kind = str(getattr(cfg.loss, "kind", "mse"))
+
+    if kind == "rd_3way":
+        base_kind = str(getattr(cfg.loss, "base_kind", "smooth_l1"))
+        return VanillaTokenLoss(normalize=normalize, kind=base_kind)
+
+    return VanillaTokenLoss(normalize=normalize, kind=kind)
+
+
+# ------------------------------------------------------------------
+# Pretrain model
+# ------------------------------------------------------------------
+
 def build_pretrain_model(cfg) -> torch.nn.Module:
     context = build_torchvision_vit_tokens(cfg.model)
     target = build_torchvision_vit_tokens(cfg.model)
@@ -153,12 +303,12 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         num_patches=num_patches,
     )
 
-    loss_fn = VanillaTokenLoss(
-        normalize=bool(getattr(cfg.loss, "normalize", False)),
-        kind=str(getattr(cfg.loss, "kind", "mse")),
-    )
+    loss_fn = _build_loss(cfg)
 
     ema_m = float(cfg.model.ema_momentum[0])
+
+    compressor = _build_compressor(cfg)
+    latent_masker = _build_latent_masker(cfg, compressor)
 
     return IJEPAModel(
         context_encoder=context,
@@ -167,12 +317,22 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         loss_fn=loss_fn,
         ema_momentum=ema_m,
         mask_generator=None,
+        latent_masker=latent_masker,
+        token_compressor=compressor,
     )
 
 
+# ------------------------------------------------------------------
+# Pretrain loader
+# ------------------------------------------------------------------
+
 def build_pretrain_loader(cfg):
     tfm = build_pretrain_transform(cfg)
-    masker = _build_masker(cfg)
+
+    # CollateMasker is None when a LatentMasker is configured.
+    # In that case IJEPACollate is dumb (images only) and masking
+    # happens inside IJEPAModel.forward on GPU.
+    masker = _build_collate_masker(cfg)
 
     pretrain_split = str(getattr(cfg.data, "pretrain_split", "train"))
     ds = build_dataset(cfg.data, split=pretrain_split, transform=tfm)
@@ -206,6 +366,10 @@ def build_pretrain_loader(cfg):
     )
     return loader
 
+
+# ------------------------------------------------------------------
+# Optimiser + scheduler (unchanged)
+# ------------------------------------------------------------------
 
 def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     wd_start = float(cfg.optim.weight_decay)
@@ -247,6 +411,10 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     return opt, sched, wd_start, wd_end
 
 
+# ------------------------------------------------------------------
+# Linear probe (unchanged)
+# ------------------------------------------------------------------
+
 def build_linear_probe_model(cfg) -> torch.nn.Module:
     encoder = build_torchvision_vit_tokens(cfg.model)
 
@@ -264,7 +432,7 @@ def build_linear_probe_model(cfg) -> torch.nn.Module:
             "target_encoder." if prefer in ("target", "ema") else "context_encoder."
         )
 
-        enc_sd = {k[len(prefix) :]: v for k, v in sd.items() if k.startswith(prefix)}
+        enc_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
         if not enc_sd:
             enc_sd = sd
 
@@ -320,11 +488,14 @@ def build_linear_probe_loaders(cfg):
     )
     val_loader = _loader(ds_val, sampler_val, shuffle=False, drop_last=False)
 
-    # IMPORTANT: pass full cfg (needs cfg.task + cfg.data)
     num_classes = infer_num_classes(cfg, ds_train=ds_train)
 
     return train_loader, val_loader, num_classes
 
+
+# ------------------------------------------------------------------
+# Top-level entry point (unchanged)
+# ------------------------------------------------------------------
 
 def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
     task = str(cfg.task.name)

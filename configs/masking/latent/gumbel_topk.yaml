@@ -1,0 +1,17 @@
+name: gumbel_topk
+
+# Gumbel-softmax temperature.
+# Higher → more uniform selection (more exploration).
+# Lower  → sharper, more decisive selection.
+# Anneal downward during training for a curriculum effect (override per experiment).
+temperature: 1.0
+
+# Weight on entropy regularisation added to the total loss via aux_loss().
+# Positive → penalise low-entropy distributions (prevents the masker from always
+#             selecting the same patches and collapsing to a trivial solution).
+# Negative → reward sharper selections (use with caution).
+# Zero     → no auxiliary loss; only reconstruction signal reaches the masker.
+entropy_coeff: 0.01
+
+# Note: dim, num_patches, target_ratio, context_ratio are inferred automatically
+# from cfg.model and cfg.masking in build.py — no need to set them here.

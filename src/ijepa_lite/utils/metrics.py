@@ -49,8 +49,8 @@ def token_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
 
 @torch.no_grad()
 def encoder_agreement(
-    ctx_tokens_all: torch.Tensor,  # (B, N, D) full context encoder output (unmasked)
-    tgt_tokens_all: torch.Tensor,  # (B, N, D) full target encoder output
+    ctx_tokens_all: torch.Tensor,  # (B, Nctx, D) context encoder output at ctx positions
+    tgt_tokens_all: torch.Tensor,  # (B, Nctx, D) target encoder output at same positions
 ) -> Dict[str, float]:
     """
     Cosine similarity between context and target encoder at the SAME patch
@@ -69,16 +69,24 @@ def encoder_agreement(
     patch positions produce different representations:
       - Near zero: all patches look the same = collapsed spatial structure
       - Healthy: non-trivial and stable or slowly growing over training
-    """
-    c = F.normalize(ctx_tokens_all.detach().float(), dim=-1)  # (B, N, D)
-    t = F.normalize(tgt_tokens_all.detach().float(), dim=-1)  # (B, N, D)
 
-    # Per-patch cosine similarity averaged over B and N
+    correction=0 (population std, not sample std) is used for the spatial
+    diversity metrics.  This is correct here — we are describing a property
+    of the current batch, not estimating a population parameter.  It also
+    avoids the UserWarning when Nctx=1 (e.g. extreme-lambda RD masker steps
+    where the masker collapses context to a single token), where
+    Bessel-corrected std is undefined.
+    """
+    c = F.normalize(ctx_tokens_all.detach().float(), dim=-1)  # (B, Nctx, D)
+    t = F.normalize(tgt_tokens_all.detach().float(), dim=-1)  # (B, Nctx, D)
+
+    # Per-patch cosine similarity averaged over B and Nctx
     cos = (c * t).sum(dim=-1).mean()
 
-    # Spatial diversity: std over patch positions
-    ctx_spatial_std = ctx_tokens_all.detach().float().std(dim=1).mean()
-    tgt_spatial_std = tgt_tokens_all.detach().float().std(dim=1).mean()
+    # Spatial diversity: std over patch positions — correction=0 avoids
+    # undefined behaviour when Nctx=1 (no change in behaviour when Nctx>1)
+    ctx_spatial_std = ctx_tokens_all.detach().float().std(dim=1, correction=0).mean()
+    tgt_spatial_std = tgt_tokens_all.detach().float().std(dim=1, correction=0).mean()
 
     return {
         "train/encoder_agreement": float(cos.item()),

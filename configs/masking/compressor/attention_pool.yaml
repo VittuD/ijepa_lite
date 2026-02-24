@@ -1,0 +1,7 @@
+mode: attention_pool
+# M learned query vectors cross-attend over all N patch tokens via MHA.
+# Most expressive mode: learns to pool task-relevant spatial information.
+# Learned parameters: query embeddings + MHA weights (trained end-to-end).
+# M = num_queries
+num_queries: 4
+num_heads: 8

@@ -136,7 +136,7 @@ def train(
             do_log = next_step % log_every == 0
 
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                out = model(images, masks=masks, compute_agreement=do_log)
+                out = model(images, masks=masks, compute_agreement=do_log, compute_mask_metrics=do_log)
                 loss = out["loss"]
 
             scaler.scale(loss).backward()
@@ -222,6 +222,7 @@ def train(
                         state=state,
                         metrics={
                             "train/loss": float(global_loss),
+                            "train/reconstruction_loss": float(out["reconstruction_loss"].item()),
                             "train/lr": lr,
                             "train/epoch": float(epoch),
                             **extra,

@@ -1,0 +1,35 @@
+# @package loss
+#
+# Rate-distortion 3-way loss configuration.
+#
+# How it maps to code
+# -------------------
+# `kind: rd_3way` is the sentinel that tells build.py to wire up the
+# RateDist3WayMasker's owns_loss path rather than passing a plain scalar loss
+# through the standard reconstruction channel.
+#
+# ijepa.py uses VanillaTokenLoss(kind=base_kind, normalize=normalize) with
+# reduction="none" to produce per-patch distortion (B, K).  This tensor is
+# passed to RateDist3WayMasker.aux_loss(), which combines it with the soft
+# mask probabilities and λ via RateDist3WayLoss:
+#
+#   D_soft   = Σᵢ w_i · patch_loss_i      (w_i ∝ p_tgt_i, normalised)
+#   R        = (1/N) Σᵢ p_ctx_i           (expected context fraction)
+#   total    = D_soft + λ · N · R
+#
+# Logged as:
+#   train/loss              ← total (D_soft + λ·N·R)
+#   train/reconstruction_loss ← unweighted mean patch loss (monitoring only)
+#   mask/D_soft             ← soft-weighted distortion
+#   mask/rate               ← R ∈ [0, 1]
+#   mask/lambda             ← λ sampled this step
+
+kind: rd_3way
+
+# Per-patch distortion function used by ijepa.py before soft-weighting.
+# Must match the kind in the comparable vanilla experiment (smooth_l1 here).
+base_kind: smooth_l1
+
+# Whether to L2-normalise pred and target before computing the distortion.
+# False matches the i-JEPA paper default.
+normalize: false

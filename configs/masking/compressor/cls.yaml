@@ -1,0 +1,5 @@
+mode: cls
+# Returns only the ViT CLS token — the encoder's own global summary representation.
+# Computed over the full unmasked image with no grad through the encoder.
+# No learned parameters. M = 1.
+# Note: requires ViTTokens.forward(return_cls=True), handled automatically by IJEPAModel.

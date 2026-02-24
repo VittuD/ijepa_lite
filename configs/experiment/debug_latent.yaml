@@ -1,0 +1,56 @@
+# @package _global_
+#
+# Minimal latent-masker debug run on STL10.
+# Uses Gumbel-TopK masker conditioned on full EMA patch tokens.
+#
+# Run:
+#   python -m ijepa_lite.run experiment=debug_latent
+#
+# To swap compressor mode on the fly:
+#   python -m ijepa_lite.run experiment=debug_latent masking/compressor=cls
+#   python -m ijepa_lite.run experiment=debug_latent masking.compressor.mode=mean_pool
+#
+# Note: this experiment requires the GumbelTopKMasker to be registered.
+# Add to your run.py (before build_for_task):
+#   import ijepa_lite.masking.example_latent_masker  # noqa: F401
+
+defaults:
+  - /task: pretrain
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: stl10
+  - /masking: block            # provides target_ratio, context_ratio, block params
+                               # "name: block" is ignored when masking.latent.name is set
+  - /masking/compressor: full  # TokenCompressor mode (full | cls | mean_pool | spatial_stride | attention_pool)
+  - /masking/latent: gumbel_topk
+  - /loss: vanilla
+  - /optim: adamw
+  - /sched: warmup_cosine
+  - /train: pretrain
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 16
+  embed_dim: 384
+  num_heads: 6
+  depth: 4
+  ema_momentum: [0.99, 0.99]
+
+data:
+  root: ${oc.env:STL10_ROOT,/scratch/ijepa_lite/data}
+  pretrain_split: unlabeled
+  batch_size: 32
+  num_workers: 2
+  download: true
+
+masking:
+  target_ratio: 0.25
+  context_ratio: 0.75
+
+train:
+  epochs: 1
+  log_every: 10
+  save_every_epochs: 1
+  amp: true

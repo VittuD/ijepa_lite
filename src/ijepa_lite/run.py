@@ -1,3 +1,4 @@
+# FILE: src/ijepa_lite/run.py
 from __future__ import annotations
 
 import signal
@@ -16,6 +17,18 @@ from ijepa_lite.utils.dist import (
     setup_device,
 )
 from ijepa_lite.utils.seed import set_seed
+
+# ------------------------------------------------------------------
+# Learned masker registration
+#
+# @register("name") only fires when the module is imported.  List all
+# built-in learned maskers here so they are always available.  Add your
+# own maskers below — one import per line is enough.
+# ------------------------------------------------------------------
+import ijepa_lite.masking.example_latent_masker   # noqa: F401  registers "gumbel_topk"
+import ijepa_lite.masking.predictor_based_masker  # noqa: F401  registers "predictor_based"
+import ijepa_lite.masking.rd_masker               # noqa: F401  registers "rd_3way"
+# import my_project.my_masker                     # noqa: F401  registers "my_masker"
 
 
 @hydra.main(config_path="../../configs", config_name="config", version_base="1.3")

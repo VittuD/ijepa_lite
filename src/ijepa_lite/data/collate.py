@@ -1,44 +1,51 @@
+# FILE: src/ijepa_lite/data/collate.py
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
+
+from ijepa_lite.masking.base import CollateMasker
 
 
 class IJEPACollate:
     """
     Collate function for i-JEPA pre-training.
 
-    Mask generation is performed here — in the DataLoader worker processes on
-    CPU so it is fully overlapped with GPU computation and never causes a
-    CPU<->GPU synchronisation stall.
+    Mask generation is performed here for deterministic (CollateMasker) strategies.
+    When a LatentMasker is used, no masker is passed and the collate stays dumb —
+    it only stacks images.  Masking then happens inside IJEPAModel.forward on GPU,
+    conditioned on EMA encoder outputs.
 
-    If no masker is provided the batch dict will contain only "images";
-    IJEPAModel.forward will then call the mask generator on the device
-    (legacy / debug path, not recommended for training).
+    The masker argument is typed as Optional[CollateMasker].  Passing a LatentMasker
+    here is a type error by design: LatentMaskers are nn.Modules that need GPU access
+    and cannot run in DataLoader worker processes.
 
     Args:
-        masker: a BlockMaskGenerator or MultiBlockMaskGenerator instance
-                whose __call__(batch_size: int) -> dict method returns
-                {"context_idx": LongTensor, "target_idx": LongTensor}
-                on CPU.
+        masker : a CollateMasker instance (BlockMaskGenerator or MultiBlockMaskGenerator),
+                 or None when using a LatentMasker (collate stays dumb).
+
+    Batch dict keys produced:
+        "images"       : FloatTensor (B, C, H, W)           always
+        "context_idx"  : LongTensor  (B, Nctx)              when masker is not None
+        "target_idx"   : LongTensor  (B, Ntgt) or (B, M, K) when masker is not None
     """
 
-    def __init__(self, masker=None):
+    def __init__(self, masker: Optional[CollateMasker] = None) -> None:
         self.masker = masker
 
     def __call__(self, batch: List[Any]) -> Dict[str, torch.Tensor]:
-        imgs = []
-        for item in batch:
-            imgs.append(item[0] if isinstance(item, (tuple, list)) else item)
-
+        imgs = [item[0] if isinstance(item, (tuple, list)) else item for item in batch]
         images = torch.stack(imgs, dim=0)  # (B, C, H, W)
+
         out: Dict[str, torch.Tensor] = {"images": images}
 
         if self.masker is not None:
-            masks = self.masker(batch_size=len(imgs))
-            # masks keys: "context_idx" (B, Nctx), "target_idx" (B, Ntgt) or (B, M, K)
-            out.update(masks)
+            mask_output = self.masker(batch_size=len(imgs))
+            # Serialise MaskOutput to plain tensors for the DataLoader batch dict.
+            # Soft scores are None for all CollateMaskers — not added to batch.
+            out["context_idx"] = mask_output.context_idx  # (B, Nctx)
+            out["target_idx"] = mask_output.target_idx    # (B, Ntgt) or (B, M, K)
 
         return out
 
