@@ -13,7 +13,7 @@ Where:
     ctx_centroid  = (Σᵢ p_ctx_i · EMA_i) / max(Σᵢ p_ctx_i, 1)   (B, D)
     BS_all_i      = ||EMA_i - ctx_centroid||²                       (B, N)
 
-    surprise_soft = Σᵢ p_tgt_i · BS_all_i   (soft Concrete expectation)
+    surprise_soft = (Σᵢ p_tgt_i · BS_all_i) / max(Σᵢ p_tgt_i, 1)   (normalised expectation)
     prior_bs_i    = ||EMA_i - mean(EMA)||²   (B, N)
     ign_tax       = Σᵢ p_ign_i · prior_bs_i  (ignoring surprising patches costs β)
     R             = (1/N) Σᵢ p_ctx_i
@@ -95,7 +95,8 @@ class RateDistSurpriseLoss(nn.Module):
         # Gradients flow through p_tgt (Concrete weights) and ctx_centroid.
         # ------------------------------------------------------------------
         BS_all = (ema_full - ctx_centroid.unsqueeze(1)).pow(2).mean(dim=-1)  # (B, N)
-        surprise_soft = (p_tgt * BS_all).sum(dim=-1).mean()                  # scalar
+        p_tgt_sum = p_tgt.sum(dim=-1).clamp(min=1.0)                        # (B,)
+        surprise_soft = ((p_tgt * BS_all).sum(dim=-1) / p_tgt_sum).mean()   # scalar
 
         # ------------------------------------------------------------------
         # Ignore tax — penalise assigning high p_ign to spatially surprising patches
