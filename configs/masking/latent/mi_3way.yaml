@@ -2,13 +2,17 @@
 name: mi_3way
 
 # λ — MI rate multiplier: λ·[H(Y|X) − H(Y)]
-# Higher λ → harder per-patch assignments AND stronger class-balance enforcement.
-lam_min: 0.01
-lam_max: 1.0
+# mi_rate ∈ [−log(3), 0] ≈ [−1.099, 0].  For λ·mi_rate to stay comparable to
+# a typical reconstruction loss (0.1–0.3), we need λ ≲ 0.2/log(3) ≈ 0.18.
+# lam_max=1.0 lets λ reach 0.88 and the MI term then swamps reconstruction,
+# causing the masker to collapse to a fixed spatial partition within 100 steps.
+lam_min: 0.005
+lam_max: 0.15
 
 # α — semantic surprise bonus weight: −α·surprise_soft
-alpha_min: 0.01
-alpha_max: 0.5
+# Raised slightly so surprise stays competitive with the MI term.
+alpha_min: 0.05
+alpha_max: 0.8
 
 # Hard floor on target count.
 ntgt_min: 4

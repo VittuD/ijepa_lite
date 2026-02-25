@@ -12,8 +12,9 @@
 # Architecture context
 # --------------------
 # image_size=96, patch_size=8  →  grid = 12×12 = 144 patches (N)
-# λ ~ LogUniform(0.01, 1.0)    →  MI-rate multiplier; minimising H(Y|X) self-sharpens masks.
-# α ~ LogUniform(0.01, 0.5)    →  surprise bonus weight (−α · surprise_soft)
+# λ ~ LogUniform(0.005, 0.15)  →  MI-rate multiplier; capped so λ·log(3) ≲ recon_loss,
+#                                  preventing the fixed-partition degenerate solution.
+# α ~ LogUniform(0.05, 0.8)    →  surprise bonus weight (−α · surprise_soft)
 # No external sharpener: the loss drives hardness. proj_score init std=0.02 ensures
 # H(Y|X) gradient is non-zero from step 0 (breaks uniform fixed point).
 #
