@@ -287,7 +287,7 @@ def _build_loss(cfg) -> VanillaTokenLoss:
     normalize = bool(getattr(cfg.loss, "normalize", False))
     kind = str(getattr(cfg.loss, "kind", "mse"))
 
-    if kind == "rd_3way":
+    if kind in ("rd_3way", "mi_3way"):
         base_kind = str(getattr(cfg.loss, "base_kind", "smooth_l1"))
         return VanillaTokenLoss(normalize=normalize, kind=base_kind)
 
