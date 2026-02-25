@@ -30,11 +30,12 @@ ign_tax        → p_ign : β penalises assigning high p_ign to patches far from
 
 Centroid stability
 ------------------
-The denominator is clamped to max(Σ p_ctx, 1.0) instead of Σ p_ctx + ε.
-When Σ p_ctx < 1, the floor activates and the gradient
-    ∂centroid / ∂p_ctx_j = (EMA_j − centroid)
-is larger than with a small-ε denominator, providing a genuine restoring force
-away from the p_ctx → 0 collapse.
+ctx_centroid blends the soft weighted mean with the image mean:
+    centroid = (Σ p_ctx_i · EMA_i  +  (1 − Σ p_ctx).clamp(0) · image_mean)
+               / (Σ p_ctx + (1 − Σ p_ctx).clamp(0))
+At Σ p_ctx = 0: centroid = image_mean  → BS = prior_bs (no zero-vector attractor).
+At Σ p_ctx = 1: centroid = weighted mean (standard behaviour).
+This prevents the absorbing state where ctx→0 kills all gradients on logit_ctx.
 
 (λ_ctx, α, β, λ_tgt) are per-sample tensors (B,) sampled from independent
 LogUniform distributions during pre-training.  At downstream time the caller can
@@ -82,15 +83,26 @@ class RateDistSurpriseLoss(nn.Module):
         ign_rate      : scalar — soft-weighted ignore tax (for logging)
         """
         # ------------------------------------------------------------------
-        # Soft context centroid — clamped-sum normalisation
+        # Soft context centroid — blended with image mean
         #
-        # Denominator floor at 1.0 prevents gradient vanishing at p_ctx → 0.
-        # When Σ p_ctx < 1, ∂centroid/∂p_ctx_j = (EMA_j − centroid) remains
-        # meaningful (restoring force away from the degenerate collapse).
+        # When p_ctx → 0 the old clamped formula gives centroid → 0 (zero
+        # vector), which makes BS_all = ‖EMA‖² constant w.r.t. which patch
+        # becomes context.  That kills ∂(-α·surprise)/∂logit_ctx completely
+        # and creates an absorbing state: ctx can never recover once collapsed.
+        #
+        # Fix: treat image_mean as a "virtual context token" with weight
+        # (1 − Σ p_ctx).clamp(min=0).  Blending:
+        #   centroid = (Σ p_ctx_i · EMA_i  +  virtual_w · image_mean)
+        #              / (Σ p_ctx + virtual_w)
+        # At Σ p_ctx = 0 → centroid = image_mean  (prior, no attractor)
+        # At Σ p_ctx = 1 → centroid = weighted_mean (same as before)
         # ------------------------------------------------------------------
-        p_ctx_sum = p_ctx.sum(dim=1, keepdim=True).clamp(min=1.0)          # (B, 1)
-        ctx_centroid = (p_ctx.unsqueeze(-1) * ema_full).sum(dim=1) / p_ctx_sum
-        # ctx_centroid : (B, D)  — p_ctx_sum is (B,1), broadcasts correctly against (B,D)
+        image_mean   = ema_full.mean(dim=1)                                 # (B, D)
+        p_ctx_sum    = p_ctx.sum(dim=1, keepdim=True)                       # (B, 1)
+        ctx_weighted = (p_ctx.unsqueeze(-1) * ema_full).sum(dim=1)          # (B, D)
+        virtual_w    = (1.0 - p_ctx_sum).clamp(min=0.0)                    # (B, 1)
+        ctx_centroid = (ctx_weighted + virtual_w * image_mean) \
+                       / (p_ctx_sum + virtual_w).clamp(min=1e-6)            # (B, D)
 
         # ------------------------------------------------------------------
         # Bayesian surprise for every patch — fully differentiable

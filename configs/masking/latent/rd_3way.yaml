@@ -6,9 +6,10 @@ temperature: 1.0
 
 # λ_ctx distribution: LogUniform(lam_min, lam_max), sampled once per batch.
 # λ_ctx ≈ "cost per context token" in units of reconstruction_loss.
-# Raised from 0.001 → 0.01 so the context rate gradient ≥ surprise gradient at init.
+# lam_max lowered from 1.0 → 0.3: at lam=1.0 the rate penalty (lam·N·R_ctx)
+# is ~60× reconstruction_loss at R_ctx=0.1, which crushes ctx entirely.
 lam_min: 0.01
-lam_max: 1.0
+lam_max: 0.3
 
 # λ_tgt distribution: LogUniform(lam_tgt_min, lam_tgt_max), sampled once per batch.
 # λ_tgt provides the first positive gradient on logit_tgt, preventing tgt collapse.
