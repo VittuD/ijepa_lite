@@ -110,6 +110,10 @@ def mask_diagnostics(
         beta = aux["beta"]
         stats["mask/beta"] = float(beta.mean().item()) if torch.is_tensor(beta) else float(beta)
 
+    if "lambda_tgt" in aux:
+        lam_tgt = aux["lambda_tgt"]
+        stats["mask/lambda_tgt"] = float(lam_tgt.mean().item()) if torch.is_tensor(lam_tgt) else float(lam_tgt)
+
     if "D_soft" in aux:
         stats["mask/D_soft"] = float(aux["D_soft"])
 

@@ -6,7 +6,8 @@ Objective
     total = reconstruction_loss
           - α · surprise_soft
           + β · ign_tax
-          + λ · N · R
+          + λ_ctx · N · R_ctx
+          + λ_tgt · N · R_tgt
 
 Where:
 
@@ -16,14 +17,16 @@ Where:
     surprise_soft = (Σᵢ p_tgt_i · BS_all_i) / max(Σᵢ p_tgt_i, 1)   (normalised expectation)
     prior_bs_i    = ||EMA_i - mean(EMA)||²   (B, N)
     ign_tax       = Σᵢ p_ign_i · prior_bs_i  (ignoring surprising patches costs β)
-    R             = (1/N) Σᵢ p_ctx_i
+    R_ctx         = (1/N) Σᵢ p_ctx_i
+    R_tgt         = (1/N) Σᵢ p_tgt_i
 
 Gradient paths
 --------------
-surprise_soft → p_tgt : Concrete relaxation — fully differentiable, no REINFORCE.
-surprise_soft → p_ctx : via ctx_centroid (clamped-sum normalisation, no ε-collapse).
-ign_tax       → p_ign : β penalises assigning high p_ign to patches far from mean.
-rate term     → p_ctx : penalises using many context tokens.
+surprise_soft  → p_tgt : Concrete relaxation — fully differentiable, no REINFORCE.
+surprise_soft  → p_ctx : via ctx_centroid (clamped-sum normalisation, no ε-collapse).
+ign_tax        → p_ign : β penalises assigning high p_ign to patches far from mean.
+λ_ctx · R_ctx  → p_ctx : penalises using many context tokens.
+λ_tgt · R_tgt  → p_tgt : FIRST positive gradient on logit_tgt — prevents tgt collapse.
 
 Centroid stability
 ------------------
@@ -33,9 +36,9 @@ When Σ p_ctx < 1, the floor activates and the gradient
 is larger than with a small-ε denominator, providing a genuine restoring force
 away from the p_ctx → 0 collapse.
 
-(λ, α, β) are per-sample tensors (B,) sampled from independent LogUniform
-distributions during pre-training.  At downstream time the caller can pass a
-fixed / optimised rates tensor — no mode switch needed inside the masker.
+(λ_ctx, α, β, λ_tgt) are per-sample tensors (B,) sampled from independent
+LogUniform distributions during pre-training.  At downstream time the caller can
+pass a fixed / optimised rates tensor — no mode switch needed inside the masker.
 """
 from __future__ import annotations
 
@@ -65,16 +68,17 @@ class RateDistSurpriseLoss(nn.Module):
         p_tgt:               torch.Tensor,  # (B, N)  soft target probs
         p_ign:               torch.Tensor,  # (B, N)  soft ignore probs
         ema_full:            torch.Tensor,  # (B, N, D) full EMA tokens
-        lam:                 torch.Tensor,  # (B,)   λ per sample
+        lam:                 torch.Tensor,  # (B,)   λ_ctx per sample
         alpha:               torch.Tensor,  # (B,)   α per sample
         beta:                torch.Tensor,  # (B,)   β per sample
+        lam_tgt:             torch.Tensor,  # (B,)   λ_tgt per sample
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns
         -------
         total         : scalar loss — the full objective
         surprise_soft : scalar — soft-weighted surprise (for logging)
-        R             : scalar — expected context fraction ∈ [0, 1] (for logging)
+        R_ctx         : scalar — expected context fraction ∈ [0, 1] (for logging)
         ign_rate      : scalar — soft-weighted ignore tax (for logging)
         """
         # ------------------------------------------------------------------
@@ -109,10 +113,15 @@ class RateDistSurpriseLoss(nn.Module):
         ign_tax = (p_ign * prior_bs).sum(dim=-1).mean()                       # scalar
 
         # ------------------------------------------------------------------
-        # Rate term: λ · N · R, where R = expected context fraction ∈ [0, 1]
+        # Rate terms:
+        #   λ_ctx · N · R_ctx  penalises context tokens (∂/∂logit_ctx < 0)
+        #   λ_tgt · N · R_tgt  penalises target tokens  (∂/∂logit_tgt > 0 — first
+        #                       positive gradient on logit_tgt, prevents tgt collapse)
         # ------------------------------------------------------------------
-        R = p_ctx.sum(dim=-1).mean() / self.num_patches
-        rate_term = lam.mean() * self.num_patches * R
+        R_ctx = p_ctx.sum(dim=-1).mean() / self.num_patches
+        R_tgt = p_tgt.sum(dim=-1).mean() / self.num_patches
+        rate_term = (lam.mean() * self.num_patches * R_ctx
+                     + lam_tgt.mean() * self.num_patches * R_tgt)
 
         # ------------------------------------------------------------------
         # Total: minimise reconstruction + rate + ign_tax, maximise surprise
@@ -124,4 +133,4 @@ class RateDistSurpriseLoss(nn.Module):
             + rate_term
         )
 
-        return total, surprise_soft.detach(), R.detach(), ign_tax.detach()
+        return total, surprise_soft.detach(), R_ctx.detach(), ign_tax.detach()

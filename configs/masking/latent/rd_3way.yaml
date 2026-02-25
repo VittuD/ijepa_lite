@@ -4,12 +4,16 @@ name: rd_3way
 # Gumbel temperature for the 3-way categorical (ctx / tgt / ignore).
 temperature: 1.0
 
-# λ distribution: LogUniform(lam_min, lam_max), sampled once per batch.
-# λ ≈ "cost per context token" in units of reconstruction_loss.
-# With smooth_l1 and N=144: λ=0.001 → rate penalty ≈ 0.14 at R=1 (cheap);
-# λ=1.0 → rate penalty ≈ 144 at R=1 (very expensive). Start conservative.
-lam_min: 0.001
+# λ_ctx distribution: LogUniform(lam_min, lam_max), sampled once per batch.
+# λ_ctx ≈ "cost per context token" in units of reconstruction_loss.
+# Raised from 0.001 → 0.01 so the context rate gradient ≥ surprise gradient at init.
+lam_min: 0.01
 lam_max: 1.0
+
+# λ_tgt distribution: LogUniform(lam_tgt_min, lam_tgt_max), sampled once per batch.
+# λ_tgt provides the first positive gradient on logit_tgt, preventing tgt collapse.
+lam_tgt_min: 0.001
+lam_tgt_max: 0.1
 
 # α distribution: LogUniform(alpha_min, alpha_max), sampled once per batch.
 # α ≈ weight on the surprise bonus (−α · surprise_soft).

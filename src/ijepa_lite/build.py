@@ -177,8 +177,10 @@ def _build_latent_masker(
         "alpha_max": float(getattr(latent_cfg, "alpha_max",
                            getattr(latent_cfg, "alpha", 0.5)
                            if latent_cfg is not None else 0.5)),
-        "beta_min":  float(getattr(latent_cfg, "beta_min", 0.01) if latent_cfg is not None else 0.01),
-        "beta_max":  float(getattr(latent_cfg, "beta_max", 0.5)  if latent_cfg is not None else 0.5),
+        "beta_min":     float(getattr(latent_cfg, "beta_min", 0.01)  if latent_cfg is not None else 0.01),
+        "beta_max":     float(getattr(latent_cfg, "beta_max", 0.5)   if latent_cfg is not None else 0.5),
+        "lam_tgt_min":  float(getattr(latent_cfg, "lam_tgt_min", 1e-3) if latent_cfg is not None else 1e-3),
+        "lam_tgt_max":  float(getattr(latent_cfg, "lam_tgt_max", 0.1)  if latent_cfg is not None else 0.1),
     }
 
     # Collect all fields from the latent config (excluding "name")
