@@ -28,7 +28,6 @@
 #   mask/mi_rate              ← H(Y|X) − H(Y)
 #   mask/entropy_conditional  ← H(Y|X) — should decay toward 0
 #   mask/entropy_marginal     ← H(Y)   — should stay near log(3) ≈ 1.1
-#   mask/steepness            ← β — STanH steepness conditioned on λ
 #   mask/lambda               ← λ sampled this step
 #   mask/alpha                ← α sampled this step
 

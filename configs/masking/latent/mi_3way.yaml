@@ -12,8 +12,3 @@ alpha_max: 0.5
 
 # Hard floor on target count.
 ntgt_min: 4
-
-# STanH sharpener parameters (see mi_masker.py / StanHSharpener).
-stanh_num_sigmoids: 5    # number of tanh components = quantization levels
-stanh_extrema: 5.0       # bias point range [−extrema, +extrema]
-stanh_beta_init: 1.0     # initial steepness (learnable via lambda_to_beta head)

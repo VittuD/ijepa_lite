@@ -1,5 +1,5 @@
 """
-MIRateMasker: learned masker with MI-rate + surprise objective and STanH sharpening.
+MIRateMasker: learned masker with MI-rate + surprise objective.
 
 Architecture
 ------------
@@ -7,10 +7,8 @@ Identical to RateDist3WayMasker:
   proj_in → [compressed_ctx | selection_queries] → TransformerEncoder → proj_score
 
 Structural differences from RateDist3WayMasker:
-  1. Gumbel noise replaced by STanH sharpening (deterministic, λ-conditioned)
-  2. rates_proj takes a 2-vector [log_lam, log_alpha] instead of 4
-  3. owns_loss=True: aux_loss() returns the full MI-rate objective
-  4. lambda_to_beta head maps log(λ) → β (steepness), so higher λ forces harder masks
+  1. rates_proj takes a 2-vector [log_lam, log_alpha] instead of 4
+  2. owns_loss=True: aux_loss() returns the full MI-rate objective
 
 Objective (see mi_loss.py for full derivation)
 ----------------------------------------------
@@ -20,19 +18,16 @@ Objective (see mi_loss.py for full derivation)
 
     mi_rate = H(Y|X) − H(Y)   (= −I(X;Y))
 
-Sharpening schedule
--------------------
-β = softplus(lambda_to_beta(log λ)) + 1  ≥ 1
-
-At λ → small: β ≈ 1.69 (softplus(0) + 1) — mild, near-linear STanH.
-At λ → large: β grows — STanH approaches a staircase, assignments become hard.
-The lambda_to_beta linear is zero-initialised, so β starts at ≈ 1.69 everywhere.
-
 Collapse prevention
 -------------------
-H(Y|X) → 0 : MI rate reward (lower H_cond = more decisive assignments)
+H(Y|X) → 0 : MI rate reward is self-sharpening — minimising per-patch entropy
+              directly drives decisive assignments without an external sharpener.
 H(Y)   → 0 : penalised because mi_rate = H_cond − H_marg increases
 surprise ↑  : −α · surprise rewards context that is semantically informative
+
+proj_score is initialised with trunc_normal_(std=0.02) so that logits at step 0
+are non-uniform (≈ std 0.28 for d=192), breaking the uniform fixed point where
+∂H(Y|X)/∂logit = 0 and the entropy gradient is dead.
 """
 from __future__ import annotations
 
@@ -49,84 +44,30 @@ from ijepa_lite.losses.mi_loss import MIRateSurpriseLoss
 
 
 # ---------------------------------------------------------------------------
-# STanH wrapper
-# ---------------------------------------------------------------------------
-
-class StanHSharpener(nn.Module):
-    """Element-wise STanH applied to any-shape tensor (broadcasting on last dim).
-
-    Wraps NonLinearStanh from the STanH package (EIDOSLAB) and re-applies the
-    learned bias points b and weights w to an arbitrary-shape input tensor,
-    avoiding the dim=1 convention of the original forward.
-
-    Args
-    ----
-    beta_init    : Initial steepness (may be overridden per-call by the β arg).
-    num_sigmoids : Number of sigmoid / tanh components (= quantisation levels).
-    extrema      : Range [−extrema, +extrema] for the learnable bias points b.
-    """
-
-    def __init__(
-        self,
-        beta_init: float,
-        num_sigmoids: int,
-        extrema: float = 5.0,
-    ) -> None:
-        super().__init__()
-        from compress.quantization.activation import NonLinearStanh  # type: ignore[import]
-        self._stanh = NonLinearStanh(
-            beta=beta_init,
-            num_sigmoids=num_sigmoids,
-            extrema=extrema,
-        )
-
-    def forward(self, x: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
-        """
-        Args
-        ----
-        x    : (...) float tensor — logits to sharpen.
-        beta : scalar tensor ≥ 1 — steepness conditioned on λ.
-
-        Returns
-        -------
-        (...) tensor — sharpened logits, same shape as x.
-        """
-        b = torch.sort(self._stanh.b)[0].to(x.device)   # (S,)
-        w = self._stanh.w.to(x.device)                   # (S,)
-        # x.unsqueeze(-1): (..., 1); b: (S,) → diff: (..., S)
-        diff = x.unsqueeze(-1) - b                        # (..., S)
-        f    = 2.0 * torch.sigmoid(2.0 * beta * diff) - 1.0  # (..., S)
-        return (w / 2.0 * f).sum(-1)                      # (...) same shape as x
-
-
-# ---------------------------------------------------------------------------
 # MIRateMasker
 # ---------------------------------------------------------------------------
 
 @register("mi_3way")
 class MIRateMasker(LatentMasker):
     """
-    MI-rate 3-way masker with STanH sharpening and (λ, α) Lagrange conditioning.
+    MI-rate 3-way masker with (λ, α) Lagrange conditioning.
 
     Args
     ----
-    dim                : Encoder embedding dim.
-    predictor_dim      : Internal transformer dim (matches Predictor).
-    depth              : Transformer layers.
-    num_heads          : Attention heads.
-    mlp_ratio          : FFN expansion.
-    dropout            : Dropout.
-    num_patches        : N — total patch positions.
-    lam_min            : Lower bound of LogUniform λ (MI-rate multiplier).
-    lam_max            : Upper bound of LogUniform λ.
-    alpha_min          : Lower bound of LogUniform α (surprise bonus multiplier).
-    alpha_max          : Upper bound of LogUniform α.
-    ntgt_min           : Hard floor on target count.
-    stanh_num_sigmoids : Number of STanH sigmoid components.
-    stanh_extrema      : Bias point range [−extrema, +extrema].
-    stanh_beta_init    : Initial steepness passed to NonLinearStanh constructor.
-    base_kind          : Unused; kept for build.py kwarg filtering.
-    normalize          : Unused; kept for build.py kwarg filtering.
+    dim           : Encoder embedding dim.
+    predictor_dim : Internal transformer dim (matches Predictor).
+    depth         : Transformer layers.
+    num_heads     : Attention heads.
+    mlp_ratio     : FFN expansion.
+    dropout       : Dropout.
+    num_patches   : N — total patch positions.
+    lam_min       : Lower bound of LogUniform λ (MI-rate multiplier).
+    lam_max       : Upper bound of LogUniform λ.
+    alpha_min     : Lower bound of LogUniform α (surprise bonus multiplier).
+    alpha_max     : Upper bound of LogUniform α.
+    ntgt_min      : Hard floor on target count.
+    base_kind     : Unused; kept for build.py kwarg filtering.
+    normalize     : Unused; kept for build.py kwarg filtering.
     """
 
     owns_loss: bool = True
@@ -146,9 +87,6 @@ class MIRateMasker(LatentMasker):
         alpha_min: float = 0.01,
         alpha_max: float = 0.5,
         ntgt_min: int = 4,
-        stanh_num_sigmoids: int = 5,
-        stanh_extrema: float = 5.0,
-        stanh_beta_init: float = 1.0,
         base_kind: str = "smooth_l1",  # unused; kept for build.py compatibility
         normalize: bool = False,       # unused; kept for build.py compatibility
     ) -> None:
@@ -206,19 +144,6 @@ class MIRateMasker(LatentMasker):
         # 3-way score head: d → [l_ctx, l_tgt, l_ign]
         self.proj_score = nn.Linear(d, 3)
 
-        # STanH sharpener (has learned b and w parameters)
-        self.stanh_sharpener = StanHSharpener(
-            beta_init=stanh_beta_init,
-            num_sigmoids=stanh_num_sigmoids,
-            extrema=stanh_extrema,
-        )
-
-        # Maps log(λ) → log(β − 1 + ε) so that β = softplus(·) + 1 ≥ 1
-        self.lambda_to_beta = nn.Linear(1, 1)
-        nn.init.zeros_(self.lambda_to_beta.weight)
-        nn.init.zeros_(self.lambda_to_beta.bias)
-        # At init: softplus(0) + 1.0 ≈ 1.69 — mild sharpening, close to linear
-
         # MI-rate + surprise loss (no learned parameters)
         self.mi_loss = MIRateSurpriseLoss(num_patches=num_patches)
 
@@ -233,8 +158,9 @@ class MIRateMasker(LatentMasker):
         # start unperturbed by the rates conditioning.
         nn.init.zeros_(self.pos_rates_mlp[-1].weight)
         nn.init.zeros_(self.pos_rates_mlp[-1].bias)
-        # Score head: near-zero → soft-uniform 3-way distribution at init
-        nn.init.zeros_(self.proj_score.weight)
+        # Score head: trunc_normal init breaks the uniform fixed point where
+        # ∂H(Y|X)/∂logit = 0 (dead gradient at exactly uniform distribution).
+        nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)
 
     # ------------------------------------------------------------------
@@ -267,7 +193,6 @@ class MIRateMasker(LatentMasker):
         aux["alpha"]         : (B,)
         aux["p_ign"]         : (B, N)     with grad — needed for H(Y|X) gradient
         aux["logits"]        : (B, N, 3)  detached — for diagnostics
-        aux["steepness"]     : scalar     β used for sharpening — for diagnostics
         aux["ema_full"]      : (B, N, D)  — passed to aux_loss for surprise
         """
         B = tokens.shape[0]
@@ -309,16 +234,10 @@ class MIRateMasker(LatentMasker):
         query_out = out[:, -self.num_patches:]   # (B, N, d)
 
         # ----------------------------------------------------------------
-        # STanH sharpening (replaces Gumbel-softmax)
+        # 3-way soft assignments — H(Y|X) loss self-sharpens over training
         # ----------------------------------------------------------------
         logits = self.proj_score(query_out)   # (B, N, 3)
-
-        # Compute β from λ (batch-level scalar — lam is same for all B elements)
-        log_lam = lam[0:1].log()                                                # (1,)
-        beta = F.softplus(self.lambda_to_beta(log_lam.unsqueeze(0))) + 1.0     # (1, 1) scalar ≥ 1
-
-        sharpened = self.stanh_sharpener(logits, beta=beta)    # (B, N, 3)
-        soft      = F.softmax(sharpened, dim=-1)               # (B, N, 3)
+        soft   = F.softmax(logits, dim=-1)    # (B, N, 3)
 
         p_ctx = soft[..., 0]   # (B, N)
         p_tgt = soft[..., 1]   # (B, N)
@@ -341,12 +260,11 @@ class MIRateMasker(LatentMasker):
             context_soft=p_ctx,
             target_soft=p_tgt,
             aux={
-                "lambda":    lam,
-                "alpha":     alpha,
-                "p_ign":     p_ign,                       # NOT detached — needed for gradient
-                "logits":    logits.detach(),              # pre-sharpening, for diagnostics
-                "steepness": beta.detach().squeeze(),      # scalar — for diagnostics
-                "ema_full":  ema_full,                     # (B, N, D) — used in aux_loss
+                "lambda":   lam,
+                "alpha":    alpha,
+                "p_ign":    p_ign,              # NOT detached — needed for gradient
+                "logits":   logits.detach(),    # for diagnostics
+                "ema_full": ema_full,           # (B, N, D) — used in aux_loss
             },
         )
 

@@ -12,10 +12,10 @@
 # Architecture context
 # --------------------
 # image_size=96, patch_size=8  →  grid = 12×12 = 144 patches (N)
-# λ ~ LogUniform(0.01, 1.0)    →  MI-rate multiplier; higher λ → harder assignments
+# λ ~ LogUniform(0.01, 1.0)    →  MI-rate multiplier; minimising H(Y|X) self-sharpens masks.
 # α ~ LogUniform(0.01, 0.5)    →  surprise bonus weight (−α · surprise_soft)
-# Gumbel noise replaced by STanH sharpening conditioned on λ via lambda_to_beta head.
-# β (steepness) = softplus(W·log_λ) + 1 ≥ 1  — learned, starts at ≈ 1.69.
+# No external sharpener: the loss drives hardness. proj_score init std=0.02 ensures
+# H(Y|X) gradient is non-zero from step 0 (breaks uniform fixed point).
 #
 # Masker transformer = Predictor transformer (depth=2, heads=6, dim=192).
 # The masker sees all 144 EMA tokens (compressor=full) and produces a 3-way
@@ -40,7 +40,6 @@
 #   mask/mi_rate                ← H(Y|X) − H(Y); should ↓ over training (I(X;Y) increasing)
 #   mask/entropy_conditional    ← H(Y|X); healthy: ↓ toward 0
 #   mask/entropy_marginal       ← H(Y);   healthy: stays near log(3) ≈ 1.1
-#   mask/steepness              ← β; should ↑ with λ at high-λ batches
 #   mask/lambda                 ← λ sampled this step
 #   mask/alpha                  ← α sampled this step
 #   mask/expected_nctx          ← compare to baseline mask/nctx = 43
@@ -58,10 +57,6 @@
 # Disable surprise bonus (MI-rate + recon only):
 #   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi \
 #       masking.latent.alpha_max=1e-6 masking.latent.alpha_min=1e-7
-#
-# More STanH components (finer quantisation staircase):
-#   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi \
-#       masking.latent.stanh_num_sigmoids=10
 #
 # Smaller compressor (cut masker input from 144 to 36 tokens):
 #   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi \

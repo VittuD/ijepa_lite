@@ -15,8 +15,5 @@ wandb>=0.19.0
 # Hugging Face datasets integration
 datasets
 
-# STanH — differentiable quantizer for variable-rate sharpening
-git+https://github.com/EIDOSLAB/StanH.git#subdirectory=src
-
 # Dev / tests
 pytest>=9.0.2
