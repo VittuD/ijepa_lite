@@ -1,0 +1,41 @@
+# @package loss
+#
+# MI-rate 3-way loss configuration.
+#
+# How it maps to code
+# -------------------
+# `kind: mi_3way` tells build.py to wire up MIRateMasker's owns_loss path.
+#
+# ijepa.py uses VanillaTokenLoss(kind=base_kind, normalize=normalize) to
+# produce a scalar reconstruction_loss, which is passed into
+# MIRateMasker.aux_loss().  The masker then computes the full objective:
+#
+#   total = reconstruction_loss
+#         - α · surprise_soft          (Concrete, fully differentiable)
+#         + λ · mi_rate
+#
+#   surprise_soft = Σᵢ p_tgt_i · ||EMA_i − ctx_centroid||²
+#   mi_rate       = H(Y|X) − H(Y)   (= −I(X;Y))
+#   H(Y|X)        = mean per-patch categorical entropy   ∈ [0, log3]
+#   H(Y)          = entropy of mean class distribution   ∈ [0, log3]
+#
+# (λ, α) are sampled from LogUniform each batch during pre-training.
+#
+# Logged as:
+#   train/loss                ← total (full MI-rate objective)
+#   train/reconstruction_loss ← unweighted mean patch loss (monitoring only)
+#   mask/surprise_mean        ← soft-weighted surprise
+#   mask/mi_rate              ← H(Y|X) − H(Y)
+#   mask/entropy_conditional  ← H(Y|X) — should decay toward 0
+#   mask/entropy_marginal     ← H(Y)   — should stay near log(3) ≈ 1.1
+#   mask/steepness            ← β — STanH steepness conditioned on λ
+#   mask/lambda               ← λ sampled this step
+#   mask/alpha                ← α sampled this step
+
+kind: mi_3way
+
+# Per-patch distortion function used by ijepa.py before soft-weighting.
+base_kind: smooth_l1
+
+# Whether to L2-normalise pred and target before computing the distortion.
+normalize: false
