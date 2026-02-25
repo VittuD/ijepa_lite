@@ -128,7 +128,7 @@ sched:
   min_lr: 1e-6
 
 train:
-  epochs: 400
+  epochs: 250
   amp: true
   grad_clip_norm: 1.0
   log_every: 50
