@@ -140,6 +140,19 @@ def mask_diagnostics(
     if "ign_rate" in aux:
         stats["mask/ign_rate"] = float(aux["ign_rate"])
 
+    if "mi_rate" in aux:
+        stats["mask/mi_rate"] = float(aux["mi_rate"])
+
+    if "entropy_conditional" in aux:
+        stats["mask/entropy_conditional"] = float(aux["entropy_conditional"])
+
+    if "entropy_marginal" in aux:
+        stats["mask/entropy_marginal"] = float(aux["entropy_marginal"])
+
+    if "steepness" in aux:
+        s = aux["steepness"]
+        stats["mask/steepness"] = float(s.item()) if torch.is_tensor(s) else float(s)
+
     if not full:
         return stats
 
