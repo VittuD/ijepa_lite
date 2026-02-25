@@ -8,23 +8,23 @@ temperature: 3.0
 # λ_ctx ≈ "cost per context token" in units of reconstruction_loss.
 # lam_max lowered from 1.0 → 0.3: at lam=1.0 the rate penalty (lam·N·R_ctx)
 # is ~60× reconstruction_loss at R_ctx=0.1, which crushes ctx entirely.
-lam_min: 0.001
-lam_max: 0.01
+lam_min: 0.00125
+lam_max: 0.001251
 
 # λ_tgt distribution: LogUniform(lam_tgt_min, lam_tgt_max), sampled once per batch.
 # λ_tgt provides the first positive gradient on logit_tgt, preventing tgt collapse.
-lam_tgt_min: 0.001
-lam_tgt_max: 0.1
+lam_tgt_min: 0.0015
+lam_tgt_max: 0.001501
 
 # α distribution: LogUniform(alpha_min, alpha_max), sampled once per batch.
 # α ≈ weight on the surprise bonus (−α · surprise_soft).
-alpha_min: 0.01
-alpha_max: 0.5
+alpha_min: 0.001
+alpha_max: 0.001001
 
 # β distribution: LogUniform(beta_min, beta_max), sampled once per batch.
 # β ≈ weight on the ignore tax (+β · ign_tax).
-beta_min: 0.01
-beta_max: 0.5
+beta_min: 0.005
+beta_max: 0.005001
 
 # Hard floor on target count — prevents D→0 collapse.
 # ntgt = max(ntgt_min, round(mean_batch(Σᵢ p_tgt_i)))
