@@ -122,10 +122,16 @@ def mask_diagnostics(
         stats["mask/rate"] = R
         stats["mask/expected_nctx"] = R * num_patches
 
-    # Expected target and ignore counts from soft probabilities
+    # Hard ignore count (complements the always-on nctx / ntgt)
+    stats["mask/nign"] = float(num_patches - nctx - ntgt_total)
+
+    # Expected counts from soft probabilities
     p_tgt = mask_output.target_soft   # (B, N) or None
     p_ctx = mask_output.context_soft  # (B, N) or None
     p_ign = aux.get("p_ign", None)    # (B, N) or None — 3-way masker only
+
+    if p_ctx is not None:
+        stats["mask/expected_nctx"] = float(p_ctx.sum(dim=-1).mean().item())
 
     if p_tgt is not None:
         stats["mask/expected_ntgt"] = float(p_tgt.sum(dim=-1).mean().item())
