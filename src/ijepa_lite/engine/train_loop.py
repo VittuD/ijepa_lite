@@ -111,11 +111,13 @@ def train(
     for epoch in range(start_epoch, int(cfg.train.epochs)):
         state["epoch"] = epoch
 
-        # Grow λ sampling range according to warmup schedule
+        # Grow λ sampling range according to warmup schedule.
+        # warmup=0 means disabled: _progress stays at its init value (1.0 = full range).
         _masker = getattr(core, "latent_masker", None)
         if _masker is not None and hasattr(_masker, "set_progress"):
-            warmup = getattr(_masker, "lam_warmup_epochs", 1)
-            _masker.set_progress(epoch / max(1, warmup))
+            warmup = getattr(_masker, "lam_warmup_epochs", 0)
+            if warmup > 0:
+                _masker.set_progress(epoch / warmup)
 
         callbacks.on_epoch_start(cfg=cfg, state=state)
 

@@ -26,4 +26,4 @@ floor_weight: 2.0
 # λ-range warmup — grows the sampling range from [lam_min, lam_min] to
 # [lam_min, lam_max] over lam_warmup_epochs (log-space interpolation).
 # Gives the encoder time to build semantic features before strong MI gradients.
-lam_warmup_epochs: 50
+lam_warmup_epochs: 0
