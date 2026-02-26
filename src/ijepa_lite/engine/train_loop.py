@@ -84,6 +84,9 @@ def train(
     core = unwrap_model(model)
     callbacks.on_run_start(cfg=cfg, state=state, model=core)
 
+    # Unwrap once here; DDP wrapping doesn't change between epochs.
+    # (The variable is reused inside the loop for EMA/metrics without re-wrapping.)
+
     sampler = getattr(loader, "sampler", None)
     log_every = int(cfg.train.log_every)
     clip_norm = float(getattr(cfg.train, "grad_clip_norm", 0.0))
@@ -107,6 +110,13 @@ def train(
 
     for epoch in range(start_epoch, int(cfg.train.epochs)):
         state["epoch"] = epoch
+
+        # Grow λ sampling range according to warmup schedule
+        _masker = getattr(core, "latent_masker", None)
+        if _masker is not None and hasattr(_masker, "set_progress"):
+            warmup = getattr(_masker, "lam_warmup_epochs", 1)
+            _masker.set_progress(epoch / max(1, warmup))
+
         callbacks.on_epoch_start(cfg=cfg, state=state)
 
         if sampler is not None and hasattr(sampler, "set_epoch"):
@@ -168,7 +178,6 @@ def train(
             # ----------------------------------------------------------
             # EMA linear schedule + target encoder update
             # ----------------------------------------------------------
-            core = unwrap_model(model)
             core.ema_momentum = _linear_ema_momentum(
                 ema_start, ema_end, state["global_step"], total_steps
             )

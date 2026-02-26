@@ -87,6 +87,9 @@ class MIRateMasker(LatentMasker):
         alpha_min: float = 0.01,
         alpha_max: float = 0.5,
         ntgt_min: int = 4,
+        h_floor: float = 0.1,          # entropy floor (nats); penalty kicks in below this
+        floor_weight: float = 2.0,     # quadratic penalty weight
+        lam_warmup_epochs: int = 50,   # epochs to grow λ sampling range to lam_max
         base_kind: str = "smooth_l1",  # unused; kept for build.py compatibility
         normalize: bool = False,       # unused; kept for build.py compatibility
     ) -> None:
@@ -107,6 +110,12 @@ class MIRateMasker(LatentMasker):
         self.alpha_min = float(alpha_min)
         self.alpha_max = float(alpha_max)
         self.ntgt_min  = max(1, int(ntgt_min))
+        self.h_floor = float(h_floor)
+        self.floor_weight = float(floor_weight)
+        self.lam_warmup_epochs = int(lam_warmup_epochs)
+        # _progress in [0, 1]; initialised to 1.0 so unit tests (no set_progress call)
+        # use the full lam range and are unaffected by the warmup logic.
+        self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
 
         d = predictor_dim
 
@@ -164,6 +173,16 @@ class MIRateMasker(LatentMasker):
         nn.init.zeros_(self.proj_score.bias)
 
     # ------------------------------------------------------------------
+    # Warmup progress
+    # ------------------------------------------------------------------
+
+    def set_progress(self, fraction: float) -> None:
+        """Update warmup progress. Call once per epoch.
+        fraction = epoch / lam_warmup_epochs, clamped to [0, 1].
+        """
+        self._progress.fill_(max(0.0, min(1.0, float(fraction))))
+
+    # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
 
@@ -205,7 +224,16 @@ class MIRateMasker(LatentMasker):
             lam   = rates[:, 0]
             alpha = rates[:, 1]
         else:
-            lam   = _sample_log_uniform(self.lam_min,   self.lam_max,   device).expand(B)
+            # Temperature-biased sampling: u^(1/p) concentrates near lam_min when p≈0,
+            # degrades to standard LogUniform when p=1 (end of warmup).
+            p = max(self._progress.item(), 1e-3)          # clamp to avoid u^inf
+            u = torch.rand(1, device=device).item()
+            u_warmed = u ** (1.0 / p)
+            log_lam_range = math.log(self.lam_max) - math.log(self.lam_min)
+            lam_val = math.exp(math.log(self.lam_min) + u_warmed * log_lam_range)
+            lam = torch.tensor(lam_val, device=device).expand(B)
+
+            # α: standard LogUniform, no temperature (no collapse risk from surprise term)
             alpha = _sample_log_uniform(self.alpha_min, self.alpha_max, device).expand(B)
 
         # ----------------------------------------------------------------
@@ -296,11 +324,13 @@ class MIRateMasker(LatentMasker):
             p_bar  = soft_3way.mean(dim=1)
             H_marg = -(p_bar * (p_bar + 1e-8).log()).sum(-1).mean()
             mi_rate = H_cond - H_marg
+            floor_penalty = self.floor_weight * F.relu(self.h_floor - H_cond).pow(2)
             mask_output.aux["surprise_mean"]       = 0.0
             mask_output.aux["mi_rate"]             = float(mi_rate.detach().item())
             mask_output.aux["entropy_conditional"] = float(H_cond.detach().item())
             mask_output.aux["entropy_marginal"]    = float(H_marg.detach().item())
-            return reconstruction_loss + lam.mean() * mi_rate
+            mask_output.aux["floor_penalty"]       = float(floor_penalty.detach().item())
+            return reconstruction_loss + lam.mean() * mi_rate + floor_penalty
 
         total, surprise, mi_rate, H_cond, H_marg = self.mi_loss(
             reconstruction_loss=reconstruction_loss,
@@ -312,11 +342,15 @@ class MIRateMasker(LatentMasker):
             alpha=alpha,
         )
 
+        floor_penalty = self.floor_weight * F.relu(self.h_floor - H_cond).pow(2)
+        total = total + floor_penalty
+
         # Write back into aux for mask_diagnostics to pick up
         mask_output.aux["surprise_mean"]       = float(surprise.item())
         mask_output.aux["mi_rate"]             = float(mi_rate.item())
         mask_output.aux["entropy_conditional"] = float(H_cond.item())
         mask_output.aux["entropy_marginal"]    = float(H_marg.item())
+        mask_output.aux["floor_penalty"]       = float(floor_penalty.detach().item())
 
         return total
 
