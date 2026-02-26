@@ -342,7 +342,11 @@ class MIRateMasker(LatentMasker):
             alpha=alpha,
         )
 
-        floor_penalty = self.floor_weight * F.relu(self.h_floor - H_cond).pow(2)
+        # H_cond returned by mi_loss is .detach()-ed (logging only).
+        # Recompute with gradient for the floor penalty so the masker feels it.
+        soft_3way = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)   # (B, N, 3)
+        H_cond_grad = -(soft_3way * (soft_3way + 1e-8).log()).sum(-1).mean()
+        floor_penalty = self.floor_weight * F.relu(self.h_floor - H_cond_grad).pow(2)
         total = total + floor_penalty
 
         # Write back into aux for mask_diagnostics to pick up

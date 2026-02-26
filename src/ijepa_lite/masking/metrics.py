@@ -149,6 +149,9 @@ def mask_diagnostics(
     if "entropy_marginal" in aux:
         stats["mask/entropy_marginal"] = float(aux["entropy_marginal"])
 
+    if "floor_penalty" in aux:
+        stats["mask/floor_penalty"] = float(aux["floor_penalty"])
+
     if not full:
         return stats
 
