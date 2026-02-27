@@ -111,6 +111,12 @@ class MIRateMasker(LatentMasker):
         # ------------------------------------------------------------------
         beta_scalarization: bool = False,
         beta_concentration: float = 2.0,  # a in Beta(a, a); higher = tighter around 0.5
+        # ------------------------------------------------------------------
+        # Coupled (s, r) scalarization via logit-normal ratio — opt-in, default=False
+        # r = sigmoid(N(0, σ_r²)), concentrated near 0.5; σ_r controls spread.
+        # ------------------------------------------------------------------
+        coupled_scalarization: bool = False,
+        ratio_logit_std: float = 1.0,   # σ_r; controls coupling tightness
     ) -> None:
         super().__init__()
 
@@ -137,6 +143,8 @@ class MIRateMasker(LatentMasker):
         self.normalize_scalarization = bool(normalize_scalarization)
         self.beta_scalarization  = bool(beta_scalarization)
         self.beta_concentration  = float(beta_concentration)
+        self.coupled_scalarization = bool(coupled_scalarization)
+        self.ratio_logit_std     = float(ratio_logit_std)
         self.s_min     = float(s_min)
         self.s_max     = float(s_max)
         self.ema_decay = float(ema_decay)
@@ -274,6 +282,22 @@ class MIRateMasker(LatentMasker):
             s_val = math.exp(math.log(self.s_min) + u_s * math.log(self.s_max / self.s_min))
             a     = self.beta_concentration
             r_val = torch.distributions.Beta(a, a).sample().item()
+            lam   = torch.tensor(s_val * r_val,       device=device).expand(B)
+            alpha = torch.tensor(s_val * (1 - r_val), device=device).expand(B)
+        elif self.coupled_scalarization:
+            # (s, r) reparametrization with logit-normal ratio sampling.
+            #
+            # s ~ LogUniform(s_min, s_max)  — total regularisation strength
+            # r = sigmoid(N(0, σ_r²))       — ratio, concentrated near 0.5
+            # λ = s · r,  α = s · (1 − r)
+            #
+            # σ_r → 0: fixed ratio λ = α; σ_r = 1: r ∈ [0.27, 0.73] at 95%.
+            # Open-loop, no EMA feedback, no normalisation.
+            p     = max(self._progress.item(), 1e-3)
+            u_s   = torch.rand(1, device=device).item() ** (1.0 / p)
+            s_val = math.exp(math.log(self.s_min) + u_s * math.log(self.s_max / self.s_min))
+            z     = torch.randn(1, device=device).item() * self.ratio_logit_std
+            r_val = torch.sigmoid(torch.tensor(z)).item()
             lam   = torch.tensor(s_val * r_val,       device=device).expand(B)
             alpha = torch.tensor(s_val * (1 - r_val), device=device).expand(B)
         elif self.normalize_scalarization:

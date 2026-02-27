@@ -1,0 +1,20 @@
+# @package masking.latent
+name: mi_3way
+
+# lam_min/max and alpha_min/max unused in coupled mode; kept for build.py passthrough.
+lam_min: 0.01
+lam_max: 1.0
+alpha_min: 0.01
+alpha_max: 0.5
+ntgt_min: 4
+nctx_min: 1
+h_floor: 0.1
+floor_weight: 5.0
+lam_warmup_epochs: 0
+
+# Shared scale range: at r=0.5, λ = α = s/2 → s_min=0.02 gives λ_min=0.01 (= lam_min).
+s_min: 0.02
+s_max: 2.0
+
+coupled_scalarization: true
+ratio_logit_std: 1.0
