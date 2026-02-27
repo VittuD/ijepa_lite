@@ -103,6 +103,14 @@ class MIRateMasker(LatentMasker):
         ema_decay: float = 0.996,  # EMA momentum; matches encoder ema_momentum[0] default
         ema_init_mi: float = 0.3,       # initial EMA(|mi_rate|)  — typical at random init
         ema_init_surprise: float = 0.05,# initial EMA(|surprise|) — typical at random init
+        # ------------------------------------------------------------------
+        # Beta (s, r) scalarization — opt-in, default=False
+        # Keeps scale/direction decoupling but uses Beta(a,a) for r instead
+        # of Uniform, biasing toward balanced (λ≈α) configurations.
+        # No EMA normalisation — open-loop, stable.
+        # ------------------------------------------------------------------
+        beta_scalarization: bool = False,
+        beta_concentration: float = 2.0,  # a in Beta(a, a); higher = tighter around 0.5
     ) -> None:
         super().__init__()
 
@@ -127,6 +135,8 @@ class MIRateMasker(LatentMasker):
         self.lam_warmup_epochs = int(lam_warmup_epochs)
 
         self.normalize_scalarization = bool(normalize_scalarization)
+        self.beta_scalarization  = bool(beta_scalarization)
+        self.beta_concentration  = float(beta_concentration)
         self.s_min     = float(s_min)
         self.s_max     = float(s_max)
         self.ema_decay = float(ema_decay)
@@ -251,6 +261,21 @@ class MIRateMasker(LatentMasker):
         if rates is not None:
             lam   = rates[:, 0]
             alpha = rates[:, 1]
+        elif self.beta_scalarization:
+            # (s, r) reparametrization with Beta(a, a) ratio sampling.
+            #
+            # Same scale/direction decoupling as normalize_scalarization but
+            # open-loop — no EMA feedback, no normalisation by objective magnitudes.
+            # Beta(a, a) concentrates r around 0.5, biasing toward balanced
+            # (λ ≈ α) configurations while still covering the full [0, 1] range.
+            # Higher beta_concentration → tighter concentration around 0.5.
+            p     = max(self._progress.item(), 1e-3)
+            u_s   = torch.rand(1, device=device).item() ** (1.0 / p)
+            s_val = math.exp(math.log(self.s_min) + u_s * math.log(self.s_max / self.s_min))
+            a     = self.beta_concentration
+            r_val = torch.distributions.Beta(a, a).sample().item()
+            lam   = torch.tensor(s_val * r_val,       device=device).expand(B)
+            alpha = torch.tensor(s_val * (1 - r_val), device=device).expand(B)
         elif self.normalize_scalarization:
             # (s, r) reparametrization with normalised scalarization.
             #
