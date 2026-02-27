@@ -100,10 +100,6 @@ predictor:
   # predictor_dim=192, mlp_ratio=4.0, dropout=0.0 from /predictor: base.
   # Masker inherits these automatically via build.py — no duplication needed.
 
-masking:
-  target_ratio: 0.65
-  context_ratio: 0.30
-
 data:
   root: /scratch/ijepa_lite/data
   pretrain_split: unlabeled

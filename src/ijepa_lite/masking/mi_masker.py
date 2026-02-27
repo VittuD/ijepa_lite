@@ -66,6 +66,7 @@ class MIRateMasker(LatentMasker):
     alpha_min     : Lower bound of LogUniform α (surprise bonus multiplier).
     alpha_max     : Upper bound of LogUniform α.
     ntgt_min      : Hard floor on target count.
+    nctx_min      : Hard floor on context count.
     base_kind     : Unused; kept for build.py kwarg filtering.
     normalize     : Unused; kept for build.py kwarg filtering.
     """
@@ -87,6 +88,7 @@ class MIRateMasker(LatentMasker):
         alpha_min: float = 0.01,
         alpha_max: float = 0.5,
         ntgt_min: int = 4,
+        nctx_min: int = 1,
         h_floor: float = 0.1,          # entropy floor (nats); penalty kicks in below this
         floor_weight: float = 2.0,     # quadratic penalty weight
         lam_warmup_epochs: int = 50,   # epochs to grow λ sampling range to lam_max
@@ -110,6 +112,7 @@ class MIRateMasker(LatentMasker):
         self.alpha_min = float(alpha_min)
         self.alpha_max = float(alpha_max)
         self.ntgt_min  = max(1, int(ntgt_min))
+        self.nctx_min  = max(1, int(nctx_min))
         self.h_floor = float(h_floor)
         self.floor_weight = float(floor_weight)
         self.lam_warmup_epochs = int(lam_warmup_epochs)
@@ -275,7 +278,7 @@ class MIRateMasker(LatentMasker):
         # Hard counts — ntgt floored at ntgt_min
         # ----------------------------------------------------------------
         ntgt = max(self.ntgt_min, int(round(p_tgt.sum(dim=-1).mean().item())))
-        nctx = max(1, int(round(p_ctx.sum(dim=-1).mean().item())))
+        nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
 
         # Targets selected first; context from remaining positions
         _, tgt_idx = torch.topk(p_tgt, ntgt, dim=-1, sorted=False)

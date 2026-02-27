@@ -9,8 +9,9 @@ lam_max: 1.0
 alpha_min: 0.01
 alpha_max: 0.5
 
-# Hard floor on target count.
+# Hard floors on patch counts.
 ntgt_min: 4
+nctx_min: 1
 
 # Entropy floor — quadratic penalty when H(Y|X) drops below h_floor (nats).
 # Prevents masker gradient from dying at the H(Y|X)=0 fixed point.
