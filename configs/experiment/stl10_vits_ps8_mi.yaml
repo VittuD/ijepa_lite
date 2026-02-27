@@ -6,15 +6,15 @@
 # All training hyperparameters (lr, wd, schedule, batch, EMA) are
 # intentionally identical to the RD experiment. The only differences are:
 #
-#   /masking/latent: rd_3way  →  mi_3way
-#   /loss:           rd_3way  →  mi_3way
+#   /masking/latent: rd_3way  ->  mi_3way
+#   /loss:           rd_3way  ->  mi_3way
 #
 # Architecture context
 # --------------------
-# image_size=96, patch_size=8  →  grid = 12×12 = 144 patches (N)
-# λ ~ LogUniform(0.005, 0.15)  →  MI-rate multiplier; capped so λ·log(3) ≲ recon_loss,
+# image_size=96, patch_size=8  ->  grid = 12×12 = 144 patches (N)
+# λ ~ LogUniform(0.005, 0.15)  ->  MI-rate multiplier; capped so λ·log(3) ≲ recon_loss,
 #                                  preventing the fixed-partition degenerate solution.
-# α ~ LogUniform(0.05, 0.8)    →  surprise bonus weight (−α · surprise_soft)
+# α ~ LogUniform(0.05, 0.8)    ->  surprise bonus weight (−α · surprise_soft)
 # No external sharpener: the loss drives hardness. proj_score init std=0.02 ensures
 # H(Y|X) gradient is non-zero from step 0 (breaks uniform fixed point).
 #
@@ -35,20 +35,20 @@
 #
 # Key metrics (compare against stl10_vits_ps8_rd.yaml)
 # -------------------------------------------------------
-#   train/loss                  ← full MI-rate objective
-#   train/reconstruction_loss   ← unweighted mean patch loss (direct baseline comparison)
-#   mask/surprise_mean          ← soft-weighted surprise (masker's own signal)
-#   mask/mi_rate                ← H(Y|X) − H(Y); should ↓ over training (I(X;Y) increasing)
-#   mask/entropy_conditional    ← H(Y|X); healthy: ↓ toward 0
-#   mask/entropy_marginal       ← H(Y);   healthy: stays near log(3) ≈ 1.1
-#   mask/lambda                 ← λ sampled this step
-#   mask/alpha                  ← α sampled this step
-#   mask/expected_nctx          ← compare to baseline mask/nctx = 43
-#   mask/expected_ntgt          ← compare to baseline mask/ntgt = 94
-#   mask/expected_nign          ← ignored patches (should stay < 0.8·N)
-#   mask/entropy_3way           ← per-patch assignment uncertainty; should decay
-#   mask/batch_iou              ← collapse monitor; expected baseline ≈ 0.45
-#   mask/floor_penalty          ← should be ~0 in healthy training; spikes = H(Y|X) below floor
+#   train/loss                  <- full MI-rate objective
+#   train/reconstruction_loss   <- unweighted mean patch loss (direct baseline comparison)
+#   mask/surprise_mean          <- soft-weighted surprise (masker's own signal)
+#   mask/mi_rate                <- H(Y|X) − H(Y); should ↓ over training (I(X;Y) increasing)
+#   mask/entropy_conditional    <- H(Y|X); healthy: ↓ toward 0
+#   mask/entropy_marginal       <- H(Y);   healthy: stays near log(3) ≈ 1.1
+#   mask/lambda                 <- λ sampled this step
+#   mask/alpha                  <- α sampled this step
+#   mask/expected_nctx          <- compare to baseline mask/nctx = 43
+#   mask/expected_ntgt          <- compare to baseline mask/ntgt = 94
+#   mask/expected_nign          <- ignored patches (should stay < 0.8·N)
+#   mask/entropy_3way           <- per-patch assignment uncertainty; should decay
+#   mask/batch_iou              <- collapse monitor; expected baseline ≈ 0.45
+#   mask/floor_penalty          <- should be ~0 in healthy training; spikes = H(Y|X) below floor
 #
 # Ablation commands
 # -----------------
