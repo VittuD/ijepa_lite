@@ -100,7 +100,7 @@ class MIRateMasker(LatentMasker):
         normalize_scalarization: bool = False,  # False = current independent LogUniform
         s_min: float = 0.02,      # total strength lower bound (≈ lam_min + alpha_min)
         s_max: float = 1.5,       # total strength upper bound (≈ lam_max + alpha_max)
-        ema_decay: float = 0.99,  # EMA momentum for running objective magnitude stats
+        ema_decay: float = 0.996,  # EMA momentum; matches encoder ema_momentum[0] default
         ema_init_mi: float = 0.3,       # initial EMA(|mi_rate|)  — typical at random init
         ema_init_surprise: float = 0.05,# initial EMA(|surprise|) — typical at random init
     ) -> None:
@@ -203,6 +203,12 @@ class MIRateMasker(LatentMasker):
         fraction = epoch / lam_warmup_epochs, clamped to [0, 1].
         """
         self._progress.fill_(max(0.0, min(1.0, float(fraction))))
+
+    def set_ema_decay(self, m: float) -> None:
+        """Sync the running-stats EMA momentum to the encoder EMA momentum.
+        Call once per step, right after core.update_target().
+        """
+        self.ema_decay = float(m)
 
     # ------------------------------------------------------------------
     # Forward

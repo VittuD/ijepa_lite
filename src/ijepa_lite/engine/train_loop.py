@@ -184,6 +184,8 @@ def train(
                 ema_start, ema_end, state["global_step"], total_steps
             )
             core.update_target()
+            if _masker is not None and hasattr(_masker, "set_ema_decay"):
+                _masker.set_ema_decay(core.ema_momentum)
 
             loss_meter.update(float(loss.item()), n=images.size(0))
 
