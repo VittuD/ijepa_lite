@@ -94,6 +94,15 @@ class MIRateMasker(LatentMasker):
         lam_warmup_epochs: int = 50,   # epochs to grow λ sampling range to lam_max
         base_kind: str = "smooth_l1",  # unused; kept for build.py compatibility
         normalize: bool = False,       # unused; kept for build.py compatibility
+        # ------------------------------------------------------------------
+        # Normalised (s, r) scalarization — opt-in, default=False
+        # ------------------------------------------------------------------
+        normalize_scalarization: bool = False,  # False = current independent LogUniform
+        s_min: float = 0.02,      # total strength lower bound (≈ lam_min + alpha_min)
+        s_max: float = 1.5,       # total strength upper bound (≈ lam_max + alpha_max)
+        ema_decay: float = 0.99,  # EMA momentum for running objective magnitude stats
+        ema_init_mi: float = 0.3,       # initial EMA(|mi_rate|)  — typical at random init
+        ema_init_surprise: float = 0.05,# initial EMA(|surprise|) — typical at random init
     ) -> None:
         super().__init__()
 
@@ -116,9 +125,19 @@ class MIRateMasker(LatentMasker):
         self.h_floor = float(h_floor)
         self.floor_weight = float(floor_weight)
         self.lam_warmup_epochs = int(lam_warmup_epochs)
+
+        self.normalize_scalarization = bool(normalize_scalarization)
+        self.s_min     = float(s_min)
+        self.s_max     = float(s_max)
+        self.ema_decay = float(ema_decay)
+
         # _progress in [0, 1]; initialised to 1.0 so unit tests (no set_progress call)
         # use the full lam range and are unaffected by the warmup logic.
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
+        # Running EMA of objective magnitudes — used by normalised scalarization.
+        # persistent=True so they survive checkpoint save/load.
+        self.register_buffer("_ema_mi_rate",  torch.tensor(float(ema_init_mi)),      persistent=True)
+        self.register_buffer("_ema_surprise", torch.tensor(float(ema_init_surprise)), persistent=True)
 
         d = predictor_dim
 
@@ -226,6 +245,26 @@ class MIRateMasker(LatentMasker):
         if rates is not None:
             lam   = rates[:, 0]
             alpha = rates[:, 1]
+        elif self.normalize_scalarization:
+            # (s, r) reparametrization with normalised scalarization.
+            #
+            # Sample total strength s and allocation ratio r independently:
+            #   λ_eff = s · r       / EMA(|mi_rate|)
+            #   α_eff = s · (1 − r) / EMA(|surprise|)
+            #
+            # This ensures both terms are always on the same gradient scale
+            # (λ_eff=1 ≈ MI term contributes as much as reconstruction).
+            # The same temperature warmup is applied to s so early training
+            # stays in the low-regularisation regime.
+            p     = max(self._progress.item(), 1e-3)
+            u_s   = torch.rand(1, device=device).item() ** (1.0 / p)
+            s_val = math.exp(math.log(self.s_min) + u_s * math.log(self.s_max / self.s_min))
+            r_val = torch.rand(1, device=device).item()   # Uniform(0, 1)
+
+            m_mi   = max(self._ema_mi_rate.item(),  1e-6)
+            m_surp = max(self._ema_surprise.item(), 1e-6)
+            lam   = torch.tensor(s_val * r_val       / m_mi,   device=device).expand(B)
+            alpha = torch.tensor(s_val * (1 - r_val) / m_surp, device=device).expand(B)
         else:
             # Temperature-biased sampling: u^(1/p) concentrates near lam_min when p≈0,
             # degrades to standard LogUniform when p=1 (end of warmup).
@@ -328,6 +367,12 @@ class MIRateMasker(LatentMasker):
             H_marg = -(p_bar * (p_bar + 1e-8).log()).sum(-1).mean()
             mi_rate = H_cond - H_marg
             floor_penalty = self.floor_weight * F.relu(self.h_floor - H_cond).pow(2)
+            if self.normalize_scalarization:
+                decay = self.ema_decay
+                self._ema_mi_rate.mul_(decay).add_(
+                    abs(float(mi_rate.detach().item())) * (1.0 - decay)
+                )
+                # No surprise in this branch — EMA(|surprise|) left unchanged.
             mask_output.aux["surprise_mean"]       = 0.0
             mask_output.aux["mi_rate"]             = float(mi_rate.detach().item())
             mask_output.aux["entropy_conditional"] = float(H_cond.detach().item())
@@ -351,6 +396,16 @@ class MIRateMasker(LatentMasker):
         H_cond_grad = -(soft_3way * (soft_3way + 1e-8).log()).sum(-1).mean()
         floor_penalty = self.floor_weight * F.relu(self.h_floor - H_cond_grad).pow(2)
         total = total + floor_penalty
+
+        # Update running EMA stats used by normalised scalarization.
+        if self.normalize_scalarization:
+            decay = self.ema_decay
+            self._ema_mi_rate.mul_(decay).add_(
+                abs(float(mi_rate.item())) * (1.0 - decay)
+            )
+            self._ema_surprise.mul_(decay).add_(
+                float(surprise.item()) * (1.0 - decay)
+            )
 
         # Write back into aux for mask_diagnostics to pick up
         mask_output.aux["surprise_mean"]       = float(surprise.item())

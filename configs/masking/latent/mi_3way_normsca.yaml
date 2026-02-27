@@ -1,0 +1,55 @@
+# @package masking.latent
+#
+# Normalised (s, r) scalarization variant of the MI-rate 3-way masker.
+#
+# Sampling change vs. mi_3way.yaml
+# ----------------------------------
+# Instead of sampling λ and α independently from LogUniform boxes, this config
+# decouples scale from direction and normalises by running objective magnitudes:
+#
+#   s     ~ LogUniform(s_min, s_max)   [total regularisation strength]
+#   r     ~ Uniform(0, 1)              [allocation ratio]
+#   λ_eff = s · r       / EMA(|mi_rate|)
+#   α_eff = s · (1 − r) / EMA(|surprise|)
+#
+# This ensures both terms always compete on the same gradient scale
+# (λ_eff = 1 ≈ "MI term as strong as reconstruction") and that the ratio
+# α/λ stays within a band determined by objective magnitudes rather than
+# the arbitrary product of two independent ranges.
+#
+# All other masker hyperparameters are identical to mi_3way.yaml.
+name: mi_3way
+
+# λ and α bounds kept for reference / ablation — only active when
+# normalize_scalarization: false.
+lam_min: 0.01
+lam_max: 1.0
+alpha_min: 0.01
+alpha_max: 0.5
+
+ntgt_min: 4
+nctx_min: 1
+
+h_floor: 0.1
+floor_weight: 5.0
+
+lam_warmup_epochs: 0
+
+# ------------------------------------------------------------------
+# Normalised (s, r) scalarization
+# ------------------------------------------------------------------
+normalize_scalarization: true
+
+# Total strength bounds — span the same overall range as lam+alpha.
+# s_min ≈ lam_min + alpha_min = 0.02
+# s_max ≈ lam_max + alpha_max = 1.5
+s_min: 0.02
+s_max: 1.5
+
+# EMA momentum for running objective magnitude estimates.
+ema_decay: 0.99
+
+# Initial EMA values — set to typical magnitudes at random initialisation.
+# These are only used until the EMA warms up (~100 / (1 - ema_decay) steps).
+ema_init_mi: 0.3
+ema_init_surprise: 0.05
