@@ -99,7 +99,17 @@ def load_masker_weights(masker: MIRateMasker, sd_full: Dict[str, torch.Tensor]) 
     sd_masker = strip_prefix(sd_full, "latent_masker.")
     if not sd_masker:
         raise ValueError("No 'latent_masker.*' keys in checkpoint.")
-    masker.load_state_dict(sd_masker, strict=True)
+    missing, unexpected = masker.load_state_dict(sd_masker, strict=False)
+    # _ema_mi_rate / _ema_surprise are persistent=True buffers added after some
+    # checkpoints were saved; their default init values are fine for probing.
+    known_optional = {"_ema_mi_rate", "_ema_surprise"}
+    real_missing = [k for k in missing if k not in known_optional]
+    if real_missing:
+        raise RuntimeError(f"Masker load_state_dict missing unexpected keys: {real_missing}")
+    if unexpected:
+        raise RuntimeError(f"Masker load_state_dict unexpected keys: {unexpected}")
+    if missing:
+        print(f"  [masker] missing keys (using defaults): {missing}")
 
 
 # ---------------------------------------------------------------------------
