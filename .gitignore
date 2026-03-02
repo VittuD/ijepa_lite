@@ -10,4 +10,4 @@ datasets/
 
 # Ignore outputs
 outputs/
-slurm/
+# slurm/
