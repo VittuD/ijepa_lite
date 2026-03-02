@@ -1,0 +1,30 @@
+name: eval_suite
+
+# Path to a pretraining checkpoint produced by this repo (checkpoints/last.pt in rank0 dir)
+pretrained_ckpt: null
+
+# Which encoder weights to use from the JEPA checkpoint
+# - context: online encoder
+# - target: EMA encoder
+encoder: target
+
+# Feature pooling from patch tokens (used by the linear_probe mode)
+pool: mean
+amp: true
+
+# Toggle each eval mode independently
+eval_modes:
+  linear_probe: true   # SGD linear head (always on by default)
+  masker_probe: false  # soft-pool via frozen masker; requires masking.latent.* in config
+  logreg: false        # sklearn LogisticRegression on mean-pool features
+
+# Per-mode overrides (only used when the corresponding mode is enabled)
+masker_probe:
+  lr: 1e-3
+  rates_lr: 1e-2
+  epochs: 20
+  weight_decay: 0.0
+
+logreg:
+  max_iter: 2000
+  C: 1.0

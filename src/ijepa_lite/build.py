@@ -424,6 +424,59 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
 
 
 # ------------------------------------------------------------------
+# Eval masker (for eval_suite masker_probe mode)
+# ------------------------------------------------------------------
+
+def build_eval_masker(cfg, sd_full: dict, device: torch.device):
+    """
+    Build a frozen LatentMasker for the masker_probe eval mode.
+
+    Returns None when:
+    - masking.latent is absent or masking.latent.name is "none"
+    - the checkpoint has no 'latent_masker.*' keys
+
+    On success: loads weights (strict=False), freezes all params, moves to device.
+    """
+    latent_cfg = getattr(cfg.masking, "latent", None)
+    latent_name = str(getattr(latent_cfg, "name", "none")).lower() if latent_cfg else "none"
+    if latent_name in ("none", "null", ""):
+        return None
+
+    masker = _build_latent_masker(cfg, compressor=None)
+    if masker is None:
+        return None
+
+    sd_masker = {
+        k[len("latent_masker."):]: v
+        for k, v in sd_full.items()
+        if k.startswith("latent_masker.")
+    }
+    if not sd_masker:
+        import warnings
+        warnings.warn(
+            "[build_eval_masker] No 'latent_masker.*' keys found in checkpoint;"
+            " masker_probe mode will be skipped."
+        )
+        return None
+
+    known_optional = {"_ema_mi_rate", "_ema_surprise"}
+    missing, unexpected = masker.load_state_dict(sd_masker, strict=False)
+    real_missing = [k for k in missing if k not in known_optional]
+    if real_missing:
+        import warnings
+        warnings.warn(
+            f"[build_eval_masker] Missing unexpected keys: {real_missing}."
+            " Check that the checkpoint architecture matches the config."
+        )
+    if missing:
+        print(f"[build_eval_masker] missing keys (using defaults): {missing}")
+
+    masker.requires_grad_(False)
+    masker.to(device)
+    return masker
+
+
+# ------------------------------------------------------------------
 # Linear probe (unchanged)
 # ------------------------------------------------------------------
 
@@ -551,6 +604,33 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
 
         return {
             "encoder": encoder,
+            "train_loader": train_loader,
+            "val_loader": val_loader,
+            "num_classes": num_classes,
+            "callbacks": callbacks,
+            "device": device,
+        }
+
+    if task == "eval_suite":
+        encoder = build_linear_probe_model(cfg).to(device)
+        train_loader, val_loader, num_classes = build_linear_probe_loaders(cfg)
+
+        masker = None
+        if getattr(getattr(cfg.task, "eval_modes", {}), "masker_probe", False):
+            ckpt = getattr(cfg.task, "pretrained_ckpt", None)
+            if ckpt:
+                sd_full = torch.load(str(ckpt), map_location="cpu", weights_only=True)
+                sd_full = sd_full.get("model", sd_full)
+                masker = build_eval_masker(cfg, sd_full, device)
+            else:
+                print(
+                    "[build_for_task] masker_probe enabled but task.pretrained_ckpt is null;"
+                    " masker_probe will be skipped."
+                )
+
+        return {
+            "encoder": encoder,
+            "masker": masker,
             "train_loader": train_loader,
             "val_loader": val_loader,
             "num_classes": num_classes,

@@ -8,6 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from ijepa_lite.build import build_for_task
 from ijepa_lite.engine.eval_linear import linear_probe_eval
+from ijepa_lite.engine.eval_suite import eval_suite
 from ijepa_lite.engine.train_loop import train as pretrain_loop
 from ijepa_lite.utils.dist import (
     barrier,
@@ -64,6 +65,8 @@ def main(cfg: DictConfig) -> None:
             pretrain_loop(cfg, **bundle)
         elif task == "linear_probe":
             linear_probe_eval(cfg, **bundle)
+        elif task == "eval_suite":
+            eval_suite(cfg, **bundle)
         else:
             raise ValueError(f"Unknown task.name={task}")
 
