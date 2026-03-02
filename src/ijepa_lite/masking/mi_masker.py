@@ -32,6 +32,7 @@ are non-uniform (≈ std 0.28 for d=192), breaking the uniform fixed point where
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Optional
 
 import torch
@@ -122,12 +123,24 @@ class MIRateMasker(LatentMasker):
 
         if lam_min <= 0:
             raise ValueError(f"lam_min must be > 0 for LogUniform, got {lam_min}")
-        if lam_max <= lam_min:
-            raise ValueError(f"lam_max ({lam_max}) must be > lam_min ({lam_min})")
+        if lam_max < lam_min:
+            raise ValueError(f"lam_max ({lam_max}) must be >= lam_min ({lam_min})")
         if alpha_min <= 0:
             raise ValueError(f"alpha_min must be > 0 for LogUniform, got {alpha_min}")
-        if alpha_max <= alpha_min:
-            raise ValueError(f"alpha_max ({alpha_max}) must be > alpha_min ({alpha_min})")
+        if alpha_max < alpha_min:
+            raise ValueError(f"alpha_max ({alpha_max}) must be >= alpha_min ({alpha_min})")
+        if lam_min == lam_max:
+            warnings.warn(
+                f"lam_min == lam_max == {lam_min}: λ is fixed (no sampling). "
+                "Pareto front exploration is disabled — intended for ablation only.",
+                UserWarning, stacklevel=2,
+            )
+        if alpha_min == alpha_max:
+            warnings.warn(
+                f"alpha_min == alpha_max == {alpha_min}: α is fixed (no sampling). "
+                "Pareto front exploration is disabled — intended for ablation only.",
+                UserWarning, stacklevel=2,
+            )
 
         self.num_patches = int(num_patches)
         self.lam_min   = float(lam_min)
