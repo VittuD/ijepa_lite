@@ -18,6 +18,7 @@ eval_modes:
   masker_probe: false       # soft-pool via frozen masker; learnable (λ, α)
   logreg: false             # sklearn LogisticRegression on mean-pool features
   masker_hard_probe: false  # linear head on hard-selected context tokens; fixed (λ, α)
+  spatial_probe: false      # fixed spatial patch selection (no masker); center or random
 
 # Per-mode overrides (only used when the corresponding mode is enabled)
 masker_probe:
@@ -36,3 +37,8 @@ masker_hard_probe:
   # Which token bins to pool. Any '+'-separated combination of: ctx, tgt, ign
   # Examples: ctx | tgt | ign | ctx+tgt | ctx+tgt+ign
   pool: ctx
+
+spatial_probe:
+  # center: middle vertical third of patch rows (rows 4–7 of 12 for 96×96/ps8 → 48 patches)
+  # random: same count drawn uniformly at random per image (positional-agnostic null)
+  pool: center
