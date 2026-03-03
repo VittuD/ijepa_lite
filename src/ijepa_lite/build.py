@@ -616,7 +616,12 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
         train_loader, val_loader, num_classes = build_linear_probe_loaders(cfg)
 
         masker = None
-        if getattr(getattr(cfg.task, "eval_modes", {}), "masker_probe", False):
+        modes = getattr(cfg.task, "eval_modes", {})
+        needs_masker = (
+            getattr(modes, "masker_probe", False)
+            or getattr(modes, "masker_hard_probe", False)
+        )
+        if needs_masker:
             ckpt = getattr(cfg.task, "pretrained_ckpt", None)
             if ckpt:
                 sd_full = torch.load(str(ckpt), map_location="cpu", weights_only=True)
@@ -624,8 +629,8 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
                 masker = build_eval_masker(cfg, sd_full, device)
             else:
                 print(
-                    "[build_for_task] masker_probe enabled but task.pretrained_ckpt is null;"
-                    " masker_probe will be skipped."
+                    "[build_for_task] masker mode enabled but task.pretrained_ckpt is null;"
+                    " masker modes will be skipped."
                 )
 
         return {
