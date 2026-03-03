@@ -1,0 +1,68 @@
+# @package _global_
+#
+# Hard-pool context-token probe sweep — coupled-SR pretrained model on STL-10.
+#
+# For each (λ, α) operating point:
+#   - run the frozen masker with fixed rates → hard-select context token indices
+#   - mean-pool only those context tokens
+#   - train a linear SGD head on top (same hypers as linear_probe baseline)
+#
+# This ablation isolates whether the masker's spatial selection is useful for
+# downstream classification, independent of gradient-through-rates effects.
+#
+# Baseline for comparison (from previous eval_suite run):
+#   linear_probe (mean-pool ALL tokens): val_acc1 = 0.6880
+#
+# Usage — single point (manual):
+#   python -m ijepa_lite.run \
+#       experiment=stl10_masker_hard_probe_sweep \
+#       task.masker_hard_probe.lam=0.1 \
+#       task.masker_hard_probe.alpha=0.1
+#
+# Usage — full 3×3 grid (slurm array):
+#   sbatch slurm/mi_ablations/masker_hard_probe_sweep.sbatch
+
+defaults:
+  - /task: eval_suite
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: stl10
+  - /masking: multiblock
+  - /masking/compressor: full
+  - /masking/latent: mi_3way_coupled_sr
+  - /loss: mi_3way
+  - /train: eval_suite
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+
+predictor:
+  depth: 2
+  num_heads: 6
+
+data:
+  root: ${oc.env:STL10_ROOT,/scratch/ijepa_lite/data}
+  train_split: train
+  val_split: test
+  batch_size: 256
+  num_workers: 4
+  download: true
+
+task:
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
+  eval_modes:
+    linear_probe: false       # baseline already known (0.6880); skip to save time
+    masker_probe: false
+    logreg: false
+    masker_hard_probe: true
+
+train:
+  epochs: 100
+  lr: 0.1
+  weight_decay: 0.0

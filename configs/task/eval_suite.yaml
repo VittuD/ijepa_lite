@@ -14,9 +14,10 @@ amp: true
 
 # Toggle each eval mode independently
 eval_modes:
-  linear_probe: true   # SGD linear head (always on by default)
-  masker_probe: false  # soft-pool via frozen masker; requires masking.latent.* in config
-  logreg: false        # sklearn LogisticRegression on mean-pool features
+  linear_probe: true        # SGD linear head (always on by default)
+  masker_probe: false       # soft-pool via frozen masker; learnable (λ, α)
+  logreg: false             # sklearn LogisticRegression on mean-pool features
+  masker_hard_probe: false  # linear head on hard-selected context tokens; fixed (λ, α)
 
 # Per-mode overrides (only used when the corresponding mode is enabled)
 masker_probe:
@@ -28,3 +29,7 @@ masker_probe:
 logreg:
   max_iter: 2000
   C: 1.0
+
+masker_hard_probe:
+  lam: 0.1    # fixed λ — sweep with task.masker_hard_probe.lam=<value>
+  alpha: 0.07 # fixed α — sweep with task.masker_hard_probe.alpha=<value>

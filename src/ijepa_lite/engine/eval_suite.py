@@ -72,18 +72,33 @@ def eval_suite(
             callbacks, state, device,
         )
 
+    if getattr(modes, "masker_hard_probe", False):
+        if masker is None:
+            print("[eval_suite] masker_hard_probe skipped: no masker loaded")
+        else:
+            results["masker_hard_probe"] = _run_masker_hard_probe(
+                cfg, encoder, masker, train_loader, val_loader, num_classes,
+                callbacks, state, device,
+            )
+
     if is_rank0():
         print("\n=== Eval Suite Results ===")
         for mode, res in results.items():
             if mode == "linear_probe":
-                print(f"  linear_probe : val_acc1={res['val_acc1']:.4f}")
+                print(f"  linear_probe      : val_acc1={res['val_acc1']:.4f}")
             elif mode == "masker_probe":
                 print(
-                    f"  masker_probe : val_acc1={res['val_acc1']:.4f}"
+                    f"  masker_probe      : val_acc1={res['val_acc1']:.4f}"
                     f"  \u03bb={res['lam']:.4f}  \u03b1={res['alpha']:.4f}"
                 )
             elif mode == "logreg":
-                print(f"  logreg       : val_acc1={res['val_acc1']:.4f}")
+                print(f"  logreg            : val_acc1={res['val_acc1']:.4f}")
+            elif mode == "masker_hard_probe":
+                print(
+                    f"  masker_hard_probe : val_acc1={res['val_acc1']:.4f}"
+                    f"  \u03bb={res['lam']:.4f}  \u03b1={res['alpha']:.4f}"
+                    f"  nctx={res['nctx']}"
+                )
 
         callbacks.on_run_end(cfg=cfg, state=state)
 
@@ -449,3 +464,184 @@ def _run_logreg(
         )
 
     return {"val_acc1": val_acc1}
+
+
+# ---------------------------------------------------------------------------
+# Mode: masker_hard_probe
+# ---------------------------------------------------------------------------
+
+def _run_masker_hard_probe(
+    cfg,
+    encoder: nn.Module,
+    masker: nn.Module,
+    train_loader,
+    val_loader,
+    num_classes: int,
+    callbacks,
+    state: Dict,
+    device: torch.device,
+) -> Dict:
+    """Linear probe on hard-selected context tokens at fixed (λ, α).
+
+    The masker is run with fixed rates (not learned) to hard-select context
+    token indices. A linear head is trained on the mean-pool of those tokens
+    only, with no gradient flowing through the masker at all.
+
+    This isolates the spatial selectivity of the masker from the
+    gradient-through-rates complexity of masker_probe:
+    - If context-subset > mean-pool-all: masker selects discriminative patches
+    - If context-subset ≈ mean-pool-all: context tokens cover the image uniformly
+    - If context-subset < mean-pool-all: masker discards class-relevant patches
+    """
+    mhp_cfg = getattr(cfg.task, "masker_hard_probe", None)
+    lam    = float(getattr(mhp_cfg, "lam",   0.1))  if mhp_cfg else 0.1
+    alpha  = float(getattr(mhp_cfg, "alpha", 0.07)) if mhp_cfg else 0.07
+    amp    = bool(getattr(cfg.task, "amp", True)) and (device.type == "cuda")
+    epochs = int(cfg.train.epochs)
+    log_every = int(getattr(cfg.train, "log_every", 50))
+
+    masker.eval()
+
+    # Fixed rates tensor — constructed once, reused every batch
+    rates_1 = torch.tensor([[lam, alpha]], device=device)  # (1, 2)
+
+    # Track nctx on first batch so we can log it
+    nctx_seen: int = 0
+
+    @torch.no_grad()
+    def _hard_pool(x: torch.Tensor) -> torch.Tensor:
+        """Mean-pool only the hard-selected context tokens."""
+        nonlocal nctx_seen
+        B = x.size(0)
+        tokens = encoder(x)                                          # (B, N, D)
+        mask_out = masker(tokens, ema_full=None,
+                          rates=rates_1.expand(B, -1))               # fixed rates
+        ctx_idx = mask_out.context_idx                               # (B, nctx)
+        nctx_seen = ctx_idx.shape[1]
+        D = tokens.shape[-1]
+        ctx_tokens = tokens.gather(
+            1, ctx_idx.unsqueeze(-1).expand(-1, -1, D)
+        )                                                            # (B, nctx, D)
+        return ctx_tokens.mean(dim=1)                                # (B, D)
+
+    head = nn.Linear(int(cfg.model.embed_dim), int(num_classes)).to(device)
+    opt = torch.optim.SGD(
+        head.parameters(),
+        lr=float(cfg.train.lr),
+        momentum=0.9,
+        weight_decay=float(cfg.train.weight_decay),
+    )
+    sched = _build_scheduler(opt, getattr(cfg.task, "sched", None), epochs)
+    scaler = GradScaler("cuda", enabled=amp)
+
+    val_acc1 = 0.0
+    best_acc1 = 0.0
+    train_sampler = getattr(train_loader, "sampler", None)
+
+    for epoch in range(epochs):
+        state["epoch"] = epoch
+        callbacks.on_epoch_start(cfg=cfg, state=state)
+
+        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
+            train_sampler.set_epoch(epoch)
+
+        head.train()
+        loss_meter = AverageMeter()
+        correct_sum = torch.zeros((), device=device, dtype=torch.long)
+        total_sum   = torch.zeros((), device=device, dtype=torch.long)
+
+        for batch in train_loader:
+            x = batch["images"].to(device, non_blocking=True)
+            y = batch["labels"].to(device, non_blocking=True)
+
+            feat = _hard_pool(x)  # (B, D) — fully detached
+
+            opt.zero_grad(set_to_none=True)
+            with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                logits = head(feat)
+                loss = F.cross_entropy(logits, y)
+
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+
+            loss_meter.update(float(loss.item()), n=x.size(0))
+            state["global_step"] += 1
+
+            with torch.no_grad():
+                c, t = _acc_top1(logits, y)
+                correct_sum += c
+                total_sum   += t
+
+            if state["global_step"] % log_every == 0 and is_rank0():
+                callbacks.on_step_end(
+                    cfg=cfg,
+                    state=state,
+                    metrics={
+                        "probe/hard_train_loss": float(loss_meter.avg),
+                        "probe/hard_lr":         float(opt.param_groups[0]["lr"]),
+                        "probe/hard_lam":        lam,
+                        "probe/hard_alpha":      alpha,
+                        "probe/hard_nctx":       float(nctx_seen),
+                    },
+                )
+
+        if sched is not None:
+            sched.step()
+
+        correct_sum = all_reduce_sum(correct_sum.float())
+        total_sum   = all_reduce_sum(total_sum.float())
+        train_acc1  = (correct_sum / total_sum.clamp(min=1.0)).item()
+
+        # Validate
+        head.eval()
+        val_loss_sum = torch.zeros((), device=device)
+        val_correct  = torch.zeros((), device=device, dtype=torch.long)
+        val_total    = torch.zeros((), device=device, dtype=torch.long)
+
+        with torch.no_grad():
+            for batch in val_loader:
+                x = batch["images"].to(device, non_blocking=True)
+                y = batch["labels"].to(device, non_blocking=True)
+                feat = _hard_pool(x)
+                with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    logits = head(feat)
+                    loss = F.cross_entropy(logits, y)
+                val_loss_sum += loss.detach() * x.size(0)
+                val_correct  += _acc_top1(logits, y)[0]
+                val_total    += y.numel()
+
+        val_loss_sum = all_reduce_sum(val_loss_sum)
+        val_correct  = all_reduce_sum(val_correct.float())
+        val_total    = all_reduce_sum(val_total.float())
+
+        val_loss = (val_loss_sum / val_total.clamp(min=1.0)).item()
+        val_acc1 = (val_correct  / val_total.clamp(min=1.0)).item()
+
+        if val_acc1 > best_acc1:
+            best_acc1 = val_acc1
+
+        if is_rank0():
+            callbacks.on_epoch_end(
+                cfg=cfg,
+                state=state,
+                metrics={
+                    "probe/hard_val_acc1":   float(val_acc1),
+                    "probe/hard_train_acc1": float(train_acc1),
+                    "probe/hard_val_loss":   float(val_loss),
+                    "probe/hard_train_loss": float(loss_meter.avg),
+                    "probe/hard_lr":         float(opt.param_groups[0]["lr"]),
+                    "probe/hard_lam":        lam,
+                    "probe/hard_alpha":      alpha,
+                    "probe/hard_nctx":       float(nctx_seen),
+                    "probe/epoch":           float(epoch),
+                },
+            )
+
+    return {
+        "val_acc1":  val_acc1,
+        "best_acc1": best_acc1,
+        "lam":       lam,
+        "alpha":     alpha,
+        "nctx":      nctx_seen,
+    }
