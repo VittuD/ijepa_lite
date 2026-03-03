@@ -67,4 +67,5 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     seed=${SEED} \
     task.masker_hard_probe.lam=1.0 \
     task.masker_hard_probe.alpha=0.01 \
-    "task.masker_hard_probe.pool=${POOL}"
+    "task.masker_hard_probe.pool=${POOL}" \
+    masker_probe.epochs=20

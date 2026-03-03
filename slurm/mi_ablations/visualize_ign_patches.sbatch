@@ -37,7 +37,7 @@ export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_ps8
 mkdir -p sbatch_logs/viz-ign-patches
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python hacky_visualize_ign_patches.py \
+  python ijepa_lite/hacky_visualize_ign_patches.py \
     --ckpt     "$PRETRAIN_CKPT" \
     --data-root "$FAST/datasets/" \
     --out-dir  ign_viz \

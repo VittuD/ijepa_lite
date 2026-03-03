@@ -51,4 +51,5 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     data.root=$FAST/datasets/ \
     seed=${SEED} \
     task.eval_modes.masker_hard_probe=false \
-    task.eval_modes.linear_probe=true
+    task.eval_modes.linear_probe=true \
+    masker_probe.epochs=20
