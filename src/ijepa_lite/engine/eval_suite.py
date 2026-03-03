@@ -97,7 +97,8 @@ def eval_suite(
                 print(
                     f"  masker_hard_probe : val_acc1={res['val_acc1']:.4f}"
                     f"  \u03bb={res['lam']:.4f}  \u03b1={res['alpha']:.4f}"
-                    f"  nctx={res['nctx']}"
+                    f"  pool={res['pool']}"
+                    f"  nctx={res['nctx']}  ntgt={res['ntgt']}  nign={res['nign']}"
                 )
 
         callbacks.on_run_end(cfg=cfg, state=state)
@@ -470,6 +471,26 @@ def _run_logreg(
 # Mode: masker_hard_probe
 # ---------------------------------------------------------------------------
 
+def _parse_pool_bins(pool_str: str) -> frozenset:
+    """Parse pool spec string into a frozenset of bin names.
+
+    Examples:
+        "ctx"         → frozenset({"ctx"})
+        "tgt"         → frozenset({"tgt"})
+        "ctx+tgt"     → frozenset({"ctx", "tgt"})
+        "ctx+tgt+ign" → frozenset({"ctx", "tgt", "ign"})
+    """
+    valid = {"ctx", "tgt", "ign"}
+    bins = frozenset(b.strip() for b in pool_str.split("+"))
+    unknown = bins - valid
+    if unknown:
+        raise ValueError(
+            f"Unknown pool bin(s): {unknown}. Valid: {valid}. "
+            f"Combine with '+', e.g. 'ctx+tgt'."
+        )
+    return bins
+
+
 def _run_masker_hard_probe(
     cfg,
     encoder: nn.Module,
@@ -481,48 +502,69 @@ def _run_masker_hard_probe(
     state: Dict,
     device: torch.device,
 ) -> Dict:
-    """Linear probe on hard-selected context tokens at fixed (λ, α).
+    """Linear probe on a chosen subset of the masker's 3-way token partition.
 
-    The masker is run with fixed rates (not learned) to hard-select context
-    token indices. A linear head is trained on the mean-pool of those tokens
-    only, with no gradient flowing through the masker at all.
+    The masker runs with fixed (λ, α); its hard assignments split N patches
+    into ctx / tgt / ign bins. `pool` selects which bins to mean-pool:
 
-    This isolates the spatial selectivity of the masker from the
-    gradient-through-rates complexity of masker_probe:
-    - If context-subset > mean-pool-all: masker selects discriminative patches
-    - If context-subset ≈ mean-pool-all: context tokens cover the image uniformly
-    - If context-subset < mean-pool-all: masker discards class-relevant patches
+        pool="ctx"         — context tokens only  (current default)
+        pool="tgt"         — target tokens only
+        pool="ign"         — ignored tokens only  (sanity check)
+        pool="ctx+tgt"     — non-ignored tokens
+        pool="ctx+tgt+ign" — all tokens (≡ mean-pool baseline)
+
+    Multiple bins are union-pooled: every token in any listed bin is included.
+    Token counts (nctx, ntgt, nign) are always logged regardless of pool choice.
     """
-    mhp_cfg = getattr(cfg.task, "masker_hard_probe", None)
-    lam    = float(getattr(mhp_cfg, "lam",   0.1))  if mhp_cfg else 0.1
-    alpha  = float(getattr(mhp_cfg, "alpha", 0.07)) if mhp_cfg else 0.07
-    amp    = bool(getattr(cfg.task, "amp", True)) and (device.type == "cuda")
-    epochs = int(cfg.train.epochs)
+    mhp_cfg   = getattr(cfg.task, "masker_hard_probe", None)
+    lam       = float(getattr(mhp_cfg, "lam",   0.1))   if mhp_cfg else 0.1
+    alpha     = float(getattr(mhp_cfg, "alpha", 0.07))  if mhp_cfg else 0.07
+    pool_str  = str(getattr(mhp_cfg,   "pool",  "ctx"))  if mhp_cfg else "ctx"
+    amp       = bool(getattr(cfg.task, "amp", True)) and (device.type == "cuda")
+    epochs    = int(cfg.train.epochs)
     log_every = int(getattr(cfg.train, "log_every", 50))
 
+    bins = _parse_pool_bins(pool_str)
     masker.eval()
 
-    # Fixed rates tensor — constructed once, reused every batch
-    rates_1 = torch.tensor([[lam, alpha]], device=device)  # (1, 2)
+    rates_1 = torch.tensor([[lam, alpha]], device=device)  # (1, 2) — fixed
 
-    # Track nctx on first batch so we can log it
-    nctx_seen: int = 0
+    # Per-batch token counts (updated on every forward, logged each step/epoch)
+    counts = {"nctx": 0, "ntgt": 0, "nign": 0}
 
     @torch.no_grad()
     def _hard_pool(x: torch.Tensor) -> torch.Tensor:
-        """Mean-pool only the hard-selected context tokens."""
-        nonlocal nctx_seen
-        B = x.size(0)
-        tokens = encoder(x)                                          # (B, N, D)
+        B, N = x.size(0), (x.shape[-1] // 1)  # N resolved after encoder
+        tokens   = encoder(x)                                   # (B, N, D)
+        N        = tokens.shape[1]
         mask_out = masker(tokens, ema_full=None,
-                          rates=rates_1.expand(B, -1))               # fixed rates
-        ctx_idx = mask_out.context_idx                               # (B, nctx)
-        nctx_seen = ctx_idx.shape[1]
-        D = tokens.shape[-1]
-        ctx_tokens = tokens.gather(
-            1, ctx_idx.unsqueeze(-1).expand(-1, -1, D)
-        )                                                            # (B, nctx, D)
-        return ctx_tokens.mean(dim=1)                                # (B, D)
+                          rates=rates_1.expand(B, -1))
+
+        ctx_idx = mask_out.context_idx   # (B, nctx)
+        tgt_idx = mask_out.target_idx    # (B, ntgt)
+
+        # Build per-bin boolean masks  (B, N)
+        ctx_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        tgt_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        ctx_mask.scatter_(1, ctx_idx, True)
+        tgt_mask.scatter_(1, tgt_idx, True)
+        ign_mask = ~(ctx_mask | tgt_mask)
+
+        counts["nctx"] = int(ctx_mask[0].sum())
+        counts["ntgt"] = int(tgt_mask[0].sum())
+        counts["nign"] = int(ign_mask[0].sum())
+
+        # Union of requested bins
+        pool_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        if "ctx" in bins:
+            pool_mask |= ctx_mask
+        if "tgt" in bins:
+            pool_mask |= tgt_mask
+        if "ign" in bins:
+            pool_mask |= ign_mask
+
+        n_kept = pool_mask.sum(dim=1, keepdim=True).float().clamp(min=1)
+        return (tokens * pool_mask.unsqueeze(-1)).sum(dim=1) / n_kept  # (B, D)
 
     head = nn.Linear(int(cfg.model.embed_dim), int(num_classes)).to(device)
     opt = torch.optim.SGD(
@@ -534,7 +576,7 @@ def _run_masker_hard_probe(
     sched = _build_scheduler(opt, getattr(cfg.task, "sched", None), epochs)
     scaler = GradScaler("cuda", enabled=amp)
 
-    val_acc1 = 0.0
+    val_acc1  = 0.0
     best_acc1 = 0.0
     train_sampler = getattr(train_loader, "sampler", None)
 
@@ -582,7 +624,9 @@ def _run_masker_hard_probe(
                         "probe/hard_lr":         float(opt.param_groups[0]["lr"]),
                         "probe/hard_lam":        lam,
                         "probe/hard_alpha":      alpha,
-                        "probe/hard_nctx":       float(nctx_seen),
+                        "probe/hard_nctx":       float(counts["nctx"]),
+                        "probe/hard_ntgt":       float(counts["ntgt"]),
+                        "probe/hard_nign":       float(counts["nign"]),
                     },
                 )
 
@@ -633,7 +677,9 @@ def _run_masker_hard_probe(
                     "probe/hard_lr":         float(opt.param_groups[0]["lr"]),
                     "probe/hard_lam":        lam,
                     "probe/hard_alpha":      alpha,
-                    "probe/hard_nctx":       float(nctx_seen),
+                    "probe/hard_nctx":       float(counts["nctx"]),
+                    "probe/hard_ntgt":       float(counts["ntgt"]),
+                    "probe/hard_nign":       float(counts["nign"]),
                     "probe/epoch":           float(epoch),
                 },
             )
@@ -643,5 +689,8 @@ def _run_masker_hard_probe(
         "best_acc1": best_acc1,
         "lam":       lam,
         "alpha":     alpha,
-        "nctx":      nctx_seen,
+        "pool":      pool_str,
+        "nctx":      counts["nctx"],
+        "ntgt":      counts["ntgt"],
+        "nign":      counts["nign"],
     }

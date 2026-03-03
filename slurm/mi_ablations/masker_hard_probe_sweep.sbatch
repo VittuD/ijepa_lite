@@ -13,13 +13,9 @@
 #SBATCH --error=sbatch_logs/hard-probe-sweep/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
-# 3×3 grid sweep over (λ, α) operating points of the frozen coupled-SR masker.
-#
-# Each array element trains a linear head on the hard-selected context tokens
-# at one fixed (λ, α) point. All 9 jobs run in parallel, one GPU each.
-#
-# Baseline for comparison (from previous eval_suite run):
-#   linear_probe val_acc1 = 0.6880  (mean-pool ALL tokens, SGD head)
+# 3×3 grid sweep over (λ, α) at pool=ctx (context tokens only).
+# Change pool= below or override on the sbatch command line for other bins:
+#   pool=tgt / pool=ign / pool=ctx+tgt / pool=ctx+tgt+ign
 #
 # Submit from the repo root:
 #   sbatch slurm/mi_ablations/masker_hard_probe_sweep.sbatch
@@ -36,6 +32,10 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 nvidia-smi -L || true
 
 export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
+
+# Pool spec — override by setting POOL env var before sbatch, e.g.:
+#   POOL=tgt sbatch slurm/mi_ablations/masker_hard_probe_sweep.sbatch
+POOL="${POOL:-ctx}"
 
 # ---------------------------------------------------------------------------
 # (λ, α) grid — row-major order matching --array=0-8
@@ -56,7 +56,7 @@ ALPHAS=(0.01  0.1   0.5   0.01 0.1  0.5  0.01 0.1  0.5)
 LAM=${LAMS[$SLURM_ARRAY_TASK_ID]}
 ALPHA=${ALPHAS[$SLURM_ARRAY_TASK_ID]}
 
-echo "Array task ${SLURM_ARRAY_TASK_ID}: lam=${LAM}  alpha=${ALPHA}"
+echo "Array task ${SLURM_ARRAY_TASK_ID}: lam=${LAM}  alpha=${ALPHA}  pool=${POOL}"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m ijepa_lite.run \
@@ -64,4 +64,4 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     data.root=$FAST/datasets/ \
     task.masker_hard_probe.lam="${LAM}" \
     task.masker_hard_probe.alpha="${ALPHA}" \
-    logger.mode=offline
+    "task.masker_hard_probe.pool=${POOL}"

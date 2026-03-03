@@ -31,5 +31,8 @@ logreg:
   C: 1.0
 
 masker_hard_probe:
-  lam: 0.1    # fixed λ — sweep with task.masker_hard_probe.lam=<value>
-  alpha: 0.07 # fixed α — sweep with task.masker_hard_probe.alpha=<value>
+  lam: 0.1    # fixed λ — override with task.masker_hard_probe.lam=<value>
+  alpha: 0.07 # fixed α — override with task.masker_hard_probe.alpha=<value>
+  # Which token bins to pool. Any '+'-separated combination of: ctx, tgt, ign
+  # Examples: ctx | tgt | ign | ctx+tgt | ctx+tgt+ign
+  pool: ctx
