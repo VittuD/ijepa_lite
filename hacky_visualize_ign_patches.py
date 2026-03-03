@@ -12,11 +12,18 @@ Color coding:
 
 In the ign-only panel, ctx+tgt patches are replaced with grey.
 
-Output (4 PNG files):
+Also saves per-dataset average bin-assignment heatmaps (12x12 patch grid,
+averaged over all N images) to check for positional bias:
+  ign_viz/stl10_avg_bins.png
+  ign_viz/food101_avg_bins.png
+
+Output (4 grid PNGs + 2 heatmap PNGs):
   ign_viz/stl10_train.png
   ign_viz/stl10_test.png
   ign_viz/food101_train.png
   ign_viz/food101_test.png
+  ign_viz/stl10_avg_bins.png
+  ign_viz/food101_avg_bins.png
 
 Each grid is 25 columns x 20 rows = 500 images.
 Each cell is a 3-panel strip: [original | ign-only | color-coded] = 288x96 px.
@@ -31,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw
 from torchvision import datasets as tv_datasets
 from torchvision import transforms
 from torchvision.models.vision_transformer import VisionTransformer
@@ -208,6 +215,63 @@ def _make_cell(orig_np, ign_np, col_np) -> Image.Image:
     return strip
 
 
+def save_avg_bin_heatmap(
+    bin_counts: np.ndarray,   # (3, gh, gw) float — accumulated counts per bin
+    n_images: int,
+    out_path: Path,
+    patch_px: int = 40,       # display pixels per patch cell
+) -> None:
+    """
+    Save a heatmap showing the average bin assignment per patch position.
+
+    Each of the 3 panels (ctx / tgt / ign) shows a 12x12 grid where
+    brightness = fraction of images that assigned that position to that bin.
+    A perfectly positional masker produces near-binary (white/black) panels.
+    """
+    gh, gw = bin_counts.shape[1], bin_counts.shape[2]
+    frac   = bin_counts / max(n_images, 1)   # (3, gh, gw) in [0, 1]
+
+    bin_names  = ["ctx (blue)", "tgt (red)", "ign (green)"]
+    bin_colors = [CTX_RGB, TGT_RGB, IGN_RGB]
+
+    cell_w = gw * patch_px
+    cell_h = gh * patch_px
+    label_h = 24
+    panel_w = cell_w
+    panel_h = cell_h + label_h
+
+    img = Image.new("RGB", (3 * panel_w, panel_h), (20, 20, 20))
+
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    for b, (name, color) in enumerate(zip(bin_names, bin_colors)):
+        panel = Image.new("RGB", (panel_w, panel_h), (20, 20, 20))
+        draw  = ImageDraw.Draw(panel)
+
+        # Draw label
+        draw.text((4, 4), name, fill=color, font=font)
+
+        # Draw heatmap: each patch cell coloured by its average assignment freq
+        for i in range(gh):
+            for j in range(gw):
+                v   = float(frac[b, i, j])          # 0..1
+                col = tuple(int(c * v) for c in color)
+                x0, y0 = j * patch_px, label_h + i * patch_px
+                x1, y1 = x0 + patch_px, y0 + patch_px
+                draw.rectangle([x0, y0, x1, y1], fill=col)
+                # grid lines
+                draw.rectangle([x0, y0, x1, y1], outline=(40, 40, 40))
+
+        img.paste(panel, (b * panel_w, 0))
+
+    img.save(out_path)
+    print(f"  Saved heatmap → {out_path}  (n={n_images})")
+
+
 # ---------------------------------------------------------------------------
 # Main visualization loop
 # ---------------------------------------------------------------------------
@@ -223,12 +287,15 @@ def visualize_split(
     out_dir: Path,
     n: int,
     grid_cols: int,
-) -> None:
+) -> np.ndarray:
+    """Returns bin_counts (3, gh, gw) accumulated over all processed images."""
     n = min(n, len(dataset))
     rates = torch.tensor([[LAM, ALPHA]], device=device)   # (1, 2) fixed
     gh = gw = IMG_SIZE // PATCH_SIZE                      # 12x12 patch grid
 
-    cells = []
+    cells      = []
+    bin_counts = np.zeros((3, gh, gw), dtype=np.float32)  # ctx/tgt/ign
+
     for start in range(0, n, BATCH_SIZE):
         end  = min(start + BATCH_SIZE, n)
         idxs = range(start, end)
@@ -255,10 +322,14 @@ def visualize_split(
 
         for bi in range(B):
             # 0=ctx, 1=tgt, 2=ign  (flat, then reshape to patch grid)
-            bin_flat          = torch.full((N,), 2, dtype=torch.long)
+            bin_flat = torch.full((N,), 2, dtype=torch.long)
             bin_flat[ctx_mask[bi].cpu()] = 0
             bin_flat[tgt_mask[bi].cpu()] = 1
             bin_map = bin_flat.reshape(gh, gw).numpy()     # (12, 12)
+
+            # Accumulate per-position bin counts
+            for b in range(3):
+                bin_counts[b] += (bin_map == b).astype(np.float32)
 
             orig_np = displays[bi]
             ign_np  = _apply_bin_overlay(orig_np, bin_map, "ign_only")
@@ -283,6 +354,8 @@ def visualize_split(
     ntgt = int(mask_out.target_idx.shape[1])
     nign = N - nctx - ntgt
     print(f"  Saved → {fname}   [{len(cells)} images, nctx={nctx} ntgt={ntgt} nign={nign}]")
+
+    return bin_counts
 
 
 # ---------------------------------------------------------------------------
@@ -317,26 +390,44 @@ def main():
     print(f"  λ={LAM}  α={ALPHA}  device={device}")
 
     datasets_cfg = [
-        ("stl10",   "train", lambda r: tv_datasets.STL10(r,   split="train", download=False)),
-        ("stl10",   "test",  lambda r: tv_datasets.STL10(r,   split="test",  download=False)),
-        ("food101", "train", lambda r: tv_datasets.Food101(r,  split="train", download=False)),
-        ("food101", "test",  lambda r: tv_datasets.Food101(r,  split="test",  download=False)),
+        ("stl10",   [
+            ("train", lambda r: tv_datasets.STL10(r,  split="train", download=False)),
+            ("test",  lambda r: tv_datasets.STL10(r,  split="test",  download=False)),
+        ]),
+        ("food101", [
+            ("train", lambda r: tv_datasets.Food101(r, split="train", download=False)),
+            ("test",  lambda r: tv_datasets.Food101(r, split="test",  download=False)),
+        ]),
     ]
 
-    for name, split, loader_fn in datasets_cfg:
-        print(f"\n{name}/{split}")
-        try:
-            ds = loader_fn(args.data_root)
-        except Exception as e:
-            print(f"  skipped ({e})")
-            continue
-        visualize_split(
-            name, split, ds, encoder, masker, device,
-            out_dir, args.n, args.grid_cols,
-        )
+    for name, splits in datasets_cfg:
+        gh = gw = IMG_SIZE // PATCH_SIZE
+        total_counts  = np.zeros((3, gh, gw), dtype=np.float32)
+        total_images  = 0
+
+        for split, loader_fn in splits:
+            print(f"\n{name}/{split}")
+            try:
+                ds = loader_fn(args.data_root)
+            except Exception as e:
+                print(f"  skipped ({e})")
+                continue
+            counts = visualize_split(
+                name, split, ds, encoder, masker, device,
+                out_dir, args.n, args.grid_cols,
+            )
+            total_counts += counts
+            total_images += min(args.n, len(ds))
+
+        if total_images > 0:
+            save_avg_bin_heatmap(
+                total_counts, total_images,
+                out_dir / f"{name}_avg_bins.png",
+            )
 
     print(f"\nDone. Output in ./{out_dir}/")
     print("Legend: [original | ign-only (ctx+tgt greyed) | colored (ctx=blue tgt=red ign=green)]")
+    print("Heatmaps: brightness = fraction of images assigning that position to that bin.")
 
 
 if __name__ == "__main__":
