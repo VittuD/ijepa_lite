@@ -9,8 +9,8 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00
 #SBATCH --array=0-3
-#SBATCH --output=sbatch_logs/pool-ablation/%x_%A_%a.out
-#SBATCH --error=sbatch_logs/pool-ablation/%x_%A_%a.err
+#SBATCH --output=sbatch_logs/pool-ablation_seed42/%x_%A_%a.out
+#SBATCH --error=sbatch_logs/pool-ablation_seed42/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
 # Pool-bin ablation at the best operating point from the ctx sweep
@@ -51,4 +51,5 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     data.root=$FAST/datasets/ \
     task.masker_hard_probe.lam=1.0 \
     task.masker_hard_probe.alpha=0.01 \
-    "task.masker_hard_probe.pool=${POOL}"
+    "task.masker_hard_probe.pool=${POOL}" \
+    seed=42
