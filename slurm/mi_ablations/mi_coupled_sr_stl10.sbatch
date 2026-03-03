@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-mi-coupled-sr-stl10
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
+#SBATCH --time=01:30:00
 #SBATCH --output=sbatch_logs/%x_%j.out
 #SBATCH --error=sbatch_logs/%x_%j.err
 

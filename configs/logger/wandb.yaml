@@ -1,7 +1,7 @@
 name: wandb
 project: ijepa-lite
 entity: null
-mode: online   # online | offline | disabled
+mode: offline   # online | offline | disabled
 tags: []
 notes: null
 

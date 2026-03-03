@@ -2,15 +2,15 @@
 #SBATCH --job-name=hard-probe-sweep
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
-#SBATCH --time=01:00:00
+#SBATCH --time=00:30:00
 #SBATCH --array=0-8
-#SBATCH --output=sbatch_logs/%x_%A_%a.out
-#SBATCH --error=sbatch_logs/%x_%A_%a.err
+#SBATCH --output=sbatch_logs/hard-probe-sweep/%x_%A_%a.out
+#SBATCH --error=sbatch_logs/hard-probe-sweep/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
 # 3×3 grid sweep over (λ, α) operating points of the frozen coupled-SR masker.
@@ -35,7 +35,7 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
-export PRETRAIN_CKPT="$WORK/vitturini/outputs/stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
+export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
 
 # ---------------------------------------------------------------------------
 # (λ, α) grid — row-major order matching --array=0-8
@@ -63,4 +63,5 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     experiment=stl10_masker_hard_probe_sweep \
     data.root=$FAST/datasets/ \
     task.masker_hard_probe.lam="${LAM}" \
-    task.masker_hard_probe.alpha="${ALPHA}"
+    task.masker_hard_probe.alpha="${ALPHA}" \
+    logger.mode=offline

@@ -23,7 +23,7 @@ eval_modes:
 masker_probe:
   lr: 1e-3
   rates_lr: 1e-2
-  epochs: 20
+  epochs: 100
   weight_decay: 0.0
 
 logreg:

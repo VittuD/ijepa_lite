@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
-#SBATCH --time=01:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/%x_%j.out
 #SBATCH --error=sbatch_logs/%x_%j.err
 
@@ -22,7 +22,7 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 nvidia-smi -L || true
 
 # TODO: update with the actual coupled-sr run timestamp after training completes
-export PRETRAIN_CKPT="$WORK/vitturini/outputs/stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
+export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m ijepa_lite.run \
@@ -30,4 +30,5 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     data.root=$FAST/datasets/ \
     task.eval_modes.linear_probe=true \
     task.eval_modes.masker_probe=true \
-    task.eval_modes.logreg=true
+    task.eval_modes.logreg=true \
+    logger.mode=offline
