@@ -1,0 +1,65 @@
+# @package _global_
+#
+# Pool-bin ablation on Food101 — transfer test for the STL-10 coupled-SR checkpoint.
+#
+# The masker was trained on STL-10; Food101 is a fully unseen domain (~101 classes,
+# natural food images). This checks whether the ign > ctx+tgt ranking observed on STL-10
+# generalises out-of-domain (masker fixed at λ=1.0, α=0.01).
+#
+# Note: Food101 images are resized to 96×96 (= pretraining resolution).
+#       Expect lower absolute accuracy than STL-10 due to domain shift.
+#
+# Usage — single pool (manual):
+#   python -m ijepa_lite.run \
+#       experiment=food101_masker_pool_ablation \
+#       task.masker_hard_probe.lam=1.0 \
+#       task.masker_hard_probe.alpha=0.01 \
+#       "task.masker_hard_probe.pool=ign"
+#
+# Usage — full 4-pool sweep (slurm array):
+#   sbatch slurm/mi_ablations/food101_masker_pool_ablation.sbatch
+
+defaults:
+  - /task: eval_suite
+  - /model: vit_torchvision
+  - /predictor: base
+  - /data: food101
+  - /masking: multiblock
+  - /masking/compressor: full
+  - /masking/latent: mi_3way_coupled_sr
+  - /loss: mi_3way
+  - /train: eval_suite
+  - _self_
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+
+predictor:
+  depth: 2
+  num_heads: 6
+
+data:
+  root: ${oc.env:FAST,/scratch}/datasets/
+  train_split: train
+  val_split: test
+  batch_size: 256
+  num_workers: 4
+  download: false   # expect Food101 to be pre-downloaded on cluster
+
+task:
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
+  eval_modes:
+    linear_probe: false
+    masker_probe: false
+    logreg: false
+    masker_hard_probe: true
+
+train:
+  epochs: 100
+  lr: 0.1
+  weight_decay: 0.0

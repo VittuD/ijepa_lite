@@ -77,6 +77,10 @@ def _maybe_download_dataset(name: str, root: str, split: str, transform) -> None
         # HF dataset downloads on demand in __init__
         return
 
+    if name == "food101":
+        tv_datasets.Food101(root=root, split=split, download=True, transform=transform)
+        return
+
     raise ValueError(f"Unknown dataset name={name}")
 
 
@@ -124,6 +128,10 @@ def build_dataset(cfg, split: str, transform):
         "imagenet_128": (
             ("train", "validation", "test"),
             lambda r, s, t: HFImageNet128(split=s, transform=t, cache_dir=r),
+        ),
+        "food101": (
+            ("train", "test"),
+            lambda r, s, t: tv_datasets.Food101(root=r, split=s, download=False, transform=t),
         ),
     }
 
