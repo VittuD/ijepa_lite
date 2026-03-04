@@ -92,12 +92,12 @@ def build_encoder(ckpt_path: str, device: torch.device) -> ViTTokens:
     return enc.to(device).eval()
 
 
-def build_fresh_masker(device: torch.device) -> MIRateMasker:
+def build_fresh_masker(device: torch.device, alpha_min: float = 0.01) -> MIRateMasker:
     return MIRateMasker(
         dim=EMBED_DIM, predictor_dim=PRED_DIM, depth=PRED_DEPTH,
         num_heads=PRED_HEADS, mlp_ratio=4.0, dropout=0.0,
         num_patches=N_PATCHES,
-        lam_min=0.01, lam_max=1.0, alpha_min=0.01, alpha_max=0.5,
+        lam_min=0.01, lam_max=1.0, alpha_min=alpha_min, alpha_max=0.5,
         coupled_scalarization=True, ratio_logit_std=1.0,
         h_floor=0.1, floor_weight=5.0, lam_warmup_epochs=0,
     ).to(device)
@@ -221,6 +221,10 @@ def main():
     parser.add_argument("--predictor-ckpt", default=None,
                         help="Warm-start predictor from predictor.* in any JEPA or "
                              "masker-only checkpoint. Fresh init if omitted.")
+    parser.add_argument("--alpha-min",    type=float, default=0.01,
+                        help="Minimum context ratio for masker (default 0.01 ≈ 1 patch). "
+                             "Raise to prevent nCtx=1 collapse, e.g. 0.15 (~22 patches) "
+                             "or 0.25 (~36 patches).")
     parser.add_argument("--data-root",    default=os.environ.get("FAST", "/scratch") + "/datasets/")
     parser.add_argument("--out-dir",      default="masker_only_run")
     parser.add_argument("--epochs",       type=int,   default=400)
@@ -241,7 +245,8 @@ def main():
     encoder = build_encoder(args.encoder_ckpt, device)
 
     print("Building fresh masker + predictor ...")
-    masker    = build_fresh_masker(device)
+    masker    = build_fresh_masker(device, alpha_min=args.alpha_min)
+    print(f"  alpha_min={args.alpha_min}  (min nCtx ≈ {int(args.alpha_min * N_PATCHES)})")
     predictor = build_fresh_predictor(device)
     if args.predictor_ckpt:
         print(f"Warm-starting predictor from : {args.predictor_ckpt}")
