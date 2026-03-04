@@ -158,6 +158,11 @@ def mask_diagnostics(
     if "floor_penalty" in aux:
         stats["mask/floor_penalty"] = float(aux["floor_penalty"])
 
+    # Goldilocks masker — sampled budgets and content-adaptivity diagnostics
+    for key in ("k_tgt", "k_ctx", "tgt_pos_std", "p_tgt_score_std", "tgt_assignment_entropy"):
+        if key in aux:
+            stats[f"mask/{key}"] = float(aux[key])
+
     if not full:
         return stats
 
