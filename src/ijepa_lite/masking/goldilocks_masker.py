@@ -50,10 +50,21 @@ def _content_adaptivity_metrics(
     is_tgt = torch.zeros(B, N, device=p_tgt.device)
     is_tgt.scatter_(1, tgt_idx, 1.0)
 
+    K = tgt_idx.shape[1]
+
     # 1. tgt_pos_std — per-position std of binary assignment across batch.
     #    Near 0 → masker always picks the same positions (positional).
     #    Higher  → different images → different targets (content-adaptive).
     tgt_pos_std = is_tgt.std(dim=0).mean().item()
+
+    # 1b. tgt_pos_std_norm — tgt_pos_std divided by its expected value under a
+    #     random (content-blind) masker: sqrt(p·(1−p)) where p = K/N.
+    #     Ratio ≈ 1 → masker behaves like random selection.
+    #     Ratio < 1 → positional collapse (always same patches).
+    #     Ratio > 1 → more diverse across images than random.
+    p_rand = K / N
+    std_rand = math.sqrt(p_rand * (1.0 - p_rand)) if 0 < p_rand < 1 else 1.0
+    tgt_pos_std_norm = tgt_pos_std / std_rand
 
     # 2. p_tgt_score_std — per-position std of the *soft* score across batch.
     #    More sensitive than binary: detects content-dependence before hard selection.
@@ -67,10 +78,29 @@ def _content_adaptivity_metrics(
     entropy = -(freq * freq.log() + (1 - freq) * (1 - freq).log())
     tgt_assignment_entropy = entropy.mean().item()
 
+    # 4. batch_iou — mean pairwise Jaccard similarity across batch.
+    #    Expected value under random masker: K / (2N − K).
+    #    Near 1 → masker always selects the same patches (positional collapse).
+    #    Near E[iou_random] → content-blind random selection.
+    #    Below E[iou_random] → more diverse than random (ideal).
+    if B > 1:
+        inter = is_tgt @ is_tgt.T                                   # (B, B)
+        ntgt_vec = is_tgt.sum(dim=1, keepdim=True)                  # (B, 1)
+        union = ntgt_vec + ntgt_vec.T - inter
+        iou = inter / union.clamp(min=1.0)
+        upper = torch.triu(torch.ones(B, B, device=p_tgt.device, dtype=torch.bool), diagonal=1)
+        batch_iou = iou[upper].mean().item()
+    else:
+        batch_iou = 1.0
+    iou_random = K / (2 * N - K)
+
     return {
-        "tgt_pos_std": tgt_pos_std,
-        "p_tgt_score_std": p_tgt_score_std,
+        "tgt_pos_std":          tgt_pos_std,
+        "tgt_pos_std_norm":     tgt_pos_std_norm,
+        "p_tgt_score_std":      p_tgt_score_std,
         "tgt_assignment_entropy": tgt_assignment_entropy,
+        "batch_iou":            batch_iou,
+        "batch_iou_random":     iou_random,
     }
 
 
