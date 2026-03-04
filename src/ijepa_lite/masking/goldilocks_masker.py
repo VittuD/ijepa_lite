@@ -212,7 +212,7 @@ class GoldilocksTeacherMasker(LatentMasker):
         # Initialisation
         # ----------------------------------------------------------------
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        nn.init.zeros_(self.ctx_embed.weight)
+        nn.init.trunc_normal_(self.ctx_embed.weight, std=0.02)
         nn.init.zeros_(self.ctx_embed.bias)
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)

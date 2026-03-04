@@ -1,0 +1,22 @@
+# @package masking.latent
+#
+# Diagnostic variant of goldilocks with fixed k_tgt and k_ctx.
+# Use this when you want clean metric trajectories free of per-step budget noise.
+#
+# k_tgt = 36  (geometric midpoint of LogU[4, 72])
+# k_ctx = 64  (arithmetic midpoint of U[32, 96])
+#
+# DO NOT use for final pretraining — the LogU curriculum in goldilocks.yaml
+# is needed to force ordinal patch ranking. Use this only for:
+#   1. Diagnosing masker learning (content-adaptivity metrics)
+#   2. Ablating ctx_embed init or other architectural changes
+name: goldilocks
+
+k_tgt_min: 36
+k_tgt_max: 36
+
+k_ctx_min: 64
+k_ctx_max: 64
+
+beta: 1.0
+z_score_eps: 1e-6
