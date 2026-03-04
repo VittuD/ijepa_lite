@@ -279,6 +279,78 @@ def save_avg_bin_heatmap(
     print(f"  Saved heatmap → {out_path}  (n={n_images})")
 
 
+def save_class_bin_heatmaps(
+    overall_counts: np.ndarray,   # (3, gh, gw)
+    overall_n: int,
+    class_counts: dict,           # label → (3, gh, gw)
+    class_n: dict,                # label → int
+    class_names: list,            # list of str indexed by label
+    out_path: Path,
+    patch_px: int = 32,
+    label_w: int = 140,
+) -> None:
+    """
+    Save a vertically stacked heatmap: overall avg on top, one row per class below.
+
+    Each row shows the 3 bin panels (ctx/tgt/ign) for that class.
+    Brightness = fraction of images in that class assigning that position to that bin.
+    """
+    gh, gw = overall_counts.shape[1], overall_counts.shape[2]
+    panel_w  = gw * patch_px
+    row_h    = gh * patch_px
+    header_h = 22   # space for "ctx / tgt / ign" column headers
+    total_w  = label_w + 3 * panel_w
+
+    sorted_cls = sorted(class_counts.keys())
+    rows = [("overall", overall_counts, overall_n)] + [
+        (class_names[c] if class_names and c < len(class_names) else str(c),
+         class_counts[c], class_n[c])
+        for c in sorted_cls
+    ]
+
+    total_h = header_h + len(rows) * row_h
+    img  = Image.new("RGB", (total_w, total_h), (20, 20, 20))
+    draw = ImageDraw.Draw(img)
+
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    bin_colors = [CTX_RGB, TGT_RGB, IGN_RGB]
+    bin_names  = ["ctx (blue)", "tgt (red)", "ign (green)"]
+
+    # Column headers
+    for b, (color, name) in enumerate(zip(bin_colors, bin_names)):
+        draw.text((label_w + b * panel_w + 4, 4), name, fill=color, font=font)
+
+    # Data rows
+    for row_idx, (name, counts, n_img) in enumerate(rows):
+        y0 = header_h + row_idx * row_h
+        frac = counts / max(n_img, 1)
+
+        # Class label on the left
+        draw.text((4, y0 + row_h // 2 - 5),
+                  f"{name} (n={n_img})", fill=(200, 200, 200), font=font)
+
+        # 3 bin panels
+        for b, color in enumerate(bin_colors):
+            x0_panel = label_w + b * panel_w
+            for i in range(gh):
+                for j in range(gw):
+                    v   = float(frac[b, i, j])
+                    col = tuple(int(c * v) for c in color)
+                    x0  = x0_panel + j * patch_px
+                    y1  = y0 + i * patch_px
+                    draw.rectangle([x0, y1, x0 + patch_px - 1, y1 + patch_px - 1],
+                                   fill=col, outline=(40, 40, 40))
+
+    img.save(out_path)
+    print(f"  Saved per-class heatmap → {out_path}  "
+          f"({len(sorted_cls)} classes, overall n={overall_n})")
+
+
 # ---------------------------------------------------------------------------
 # Main visualization loop
 # ---------------------------------------------------------------------------
@@ -294,25 +366,28 @@ def visualize_split(
     out_dir: Path,
     n: int,
     grid_cols: int,
-) -> np.ndarray:
-    """Returns bin_counts (3, gh, gw) accumulated over all processed images."""
+) -> tuple:
+    """Returns (bin_counts, class_bin_counts, class_img_n) accumulated over all processed images."""
     n = min(n, len(dataset))
     rates = torch.tensor([[LAM, ALPHA]], device=device)   # (1, 2) fixed
     gh = gw = IMG_SIZE // PATCH_SIZE                      # 12x12 patch grid
 
-    cells      = []
-    bin_counts = np.zeros((3, gh, gw), dtype=np.float32)  # ctx/tgt/ign
+    cells            = []
+    bin_counts       = np.zeros((3, gh, gw), dtype=np.float32)
+    class_bin_counts: dict = {}   # label → (3, gh, gw)
+    class_img_n:      dict = {}   # label → int
 
     for start in range(0, n, BATCH_SIZE):
         end  = min(start + BATCH_SIZE, n)
         idxs = range(start, end)
 
-        displays, tensors = [], []
+        displays, tensors, labels_batch = [], [], []
         for i in idxs:
-            img_raw, _ = dataset[i]
-            disp, ten  = _pil_to_display_and_tensor(img_raw)
+            img_raw, lbl   = dataset[i]
+            disp, ten      = _pil_to_display_and_tensor(img_raw)
             displays.append(disp)
             tensors.append(ten)
+            labels_batch.append(int(lbl))
 
         x        = torch.stack(tensors).to(device)         # (B, 3, H, W)
         tokens   = encoder(x)                               # (B, N, D)
@@ -334,9 +409,18 @@ def visualize_split(
             bin_flat[tgt_mask[bi].cpu()] = 1
             bin_map = bin_flat.reshape(gh, gw).numpy()     # (12, 12)
 
-            # Accumulate per-position bin counts
+            # Accumulate overall per-position bin counts
             for b in range(3):
                 bin_counts[b] += (bin_map == b).astype(np.float32)
+
+            # Accumulate per-class bin counts
+            lbl = labels_batch[bi]
+            if lbl not in class_bin_counts:
+                class_bin_counts[lbl] = np.zeros((3, gh, gw), dtype=np.float32)
+                class_img_n[lbl] = 0
+            for b in range(3):
+                class_bin_counts[lbl][b] += (bin_map == b).astype(np.float32)
+            class_img_n[lbl] += 1
 
             orig_np = displays[bi]
             ign_np  = _apply_bin_overlay(orig_np, bin_map, "ign_only")
@@ -362,7 +446,7 @@ def visualize_split(
     nign = N - nctx - ntgt
     print(f"  Saved → {fname}   [{len(cells)} images, nctx={nctx} ntgt={ntgt} nign={nign}]")
 
-    return bin_counts
+    return bin_counts, class_bin_counts, class_img_n
 
 
 # ---------------------------------------------------------------------------
@@ -428,8 +512,11 @@ def main():
 
     for name, splits in datasets_cfg:
         gh = gw = IMG_SIZE // PATCH_SIZE
-        total_counts  = np.zeros((3, gh, gw), dtype=np.float32)
-        total_images  = 0
+        total_counts       = np.zeros((3, gh, gw), dtype=np.float32)
+        total_images       = 0
+        total_class_counts: dict = {}
+        total_class_n:      dict = {}
+        class_names:        list = []
 
         for split, loader_fn in splits:
             print(f"\n{name}/{split}")
@@ -438,18 +525,31 @@ def main():
             except Exception as e:
                 print(f"  skipped ({e})")
                 continue
-            counts = visualize_split(
+            counts, cls_counts, cls_n = visualize_split(
                 name, split, ds, encoder, masker, device,
                 out_dir, args.n, args.grid_cols,
             )
-            total_counts += counts
-            total_images += min(args.n, len(ds))
+            total_counts  += counts
+            total_images  += min(args.n, len(ds))
+            for c, arr in cls_counts.items():
+                total_class_counts[c] = total_class_counts.get(
+                    c, np.zeros_like(arr)) + arr
+                total_class_n[c] = total_class_n.get(c, 0) + cls_n[c]
+            if not class_names and hasattr(ds, "classes"):
+                class_names = list(ds.classes)
 
         if total_images > 0:
             save_avg_bin_heatmap(
                 total_counts, total_images,
                 out_dir / f"{name}_avg_bins.png",
             )
+            if total_class_counts:
+                save_class_bin_heatmaps(
+                    total_counts, total_images,
+                    total_class_counts, total_class_n,
+                    class_names,
+                    out_dir / f"{name}_avg_bins_per_class.png",
+                )
 
     print(f"\nDone. Output in ./{out_dir}/")
     print("Legend: [original | ign-only (ctx+tgt greyed) | colored (ctx=blue tgt=red ign=green)]")
