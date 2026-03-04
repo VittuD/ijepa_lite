@@ -288,18 +288,26 @@ def save_class_bin_heatmaps(
     out_path: Path,
     patch_px: int = 32,
     label_w: int = 140,
+    row_gap: int = 6,             # dark separator pixels between rows
 ) -> None:
     """
     Save a vertically stacked heatmap: overall avg on top, one row per class below.
 
-    Each row shows the 3 bin panels (ctx/tgt/ign) for that class.
-    Brightness = fraction of images in that class assigning that position to that bin.
+    Each row shows the 3 bin panels (ctx/tgt/ign) for that class, separated by a
+    dark gap. Brightness = fraction of images in that class assigning that position
+    to that bin.
+
+    Also prints inter-class std per bin to stdout:
+      For each bin and each spatial position, std across the per-class avg fractions.
+      High std → different classes receive systematically different masking patterns.
+      Near 0  → all classes get the same pattern (purely positional).
     """
     gh, gw = overall_counts.shape[1], overall_counts.shape[2]
-    panel_w  = gw * patch_px
-    row_h    = gh * patch_px
-    header_h = 22   # space for "ctx / tgt / ign" column headers
-    total_w  = label_w + 3 * panel_w
+    panel_w    = gw * patch_px
+    row_h      = gh * patch_px
+    row_stride = row_h + row_gap
+    header_h   = 22   # space for "ctx / tgt / ign" column headers
+    total_w    = label_w + 3 * panel_w
 
     sorted_cls = sorted(class_counts.keys())
     rows = [("overall", overall_counts, overall_n)] + [
@@ -308,7 +316,21 @@ def save_class_bin_heatmaps(
         for c in sorted_cls
     ]
 
-    total_h = header_h + len(rows) * row_h
+    # --- Inter-class std (only over the class rows, not overall) -------------
+    bin_names  = ["ctx", "tgt", "ign"]
+    bin_colors = [CTX_RGB, TGT_RGB, IGN_RGB]
+    interclass_std_mean = [float("nan")] * 3
+    if len(sorted_cls) >= 2:
+        class_fracs = np.stack(
+            [class_counts[c] / max(class_n[c], 1) for c in sorted_cls]
+        )  # (n_classes, 3, gh, gw)
+        per_pos_std = class_fracs.std(axis=0)          # (3, gh, gw)
+        interclass_std_mean = per_pos_std.mean(axis=(1, 2)).tolist()  # (3,)
+    print(f"  Inter-class spatial std  —  "
+          + "  ".join(f"{n}={v:.4f}" for n, v in zip(bin_names, interclass_std_mean)))
+
+    # -------------------------------------------------------------------------
+    total_h = header_h + len(rows) * row_stride - row_gap  # no trailing gap
     img  = Image.new("RGB", (total_w, total_h), (20, 20, 20))
     draw = ImageDraw.Draw(img)
 
@@ -318,21 +340,25 @@ def save_class_bin_heatmaps(
     except Exception:
         font = None
 
-    bin_colors = [CTX_RGB, TGT_RGB, IGN_RGB]
-    bin_names  = ["ctx (blue)", "tgt (red)", "ign (green)"]
-
-    # Column headers
-    for b, (color, name) in enumerate(zip(bin_colors, bin_names)):
-        draw.text((label_w + b * panel_w + 4, 4), name, fill=color, font=font)
+    # Column headers with inter-class std
+    for b, (color, bname) in enumerate(zip(bin_colors, bin_names)):
+        std_str = f"  σ={interclass_std_mean[b]:.4f}" if not float("nan") == interclass_std_mean[b] else ""
+        draw.text((label_w + b * panel_w + 4, 4),
+                  f"{bname} ({['blue','red','green'][b]}){std_str}",
+                  fill=color, font=font)
 
     # Data rows
     for row_idx, (name, counts, n_img) in enumerate(rows):
-        y0 = header_h + row_idx * row_h
+        y0   = header_h + row_idx * row_stride
         frac = counts / max(n_img, 1)
+
+        # Separator line at the top of every row except the first
+        if row_idx > 0:
+            draw.rectangle([0, y0 - row_gap, total_w, y0 - 1], fill=(50, 50, 50))
 
         # Class label on the left
         draw.text((4, y0 + row_h // 2 - 5),
-                  f"{name} (n={n_img})", fill=(200, 200, 200), font=font)
+                  f"{name}\n(n={n_img})", fill=(200, 200, 200), font=font)
 
         # 3 bin panels
         for b, color in enumerate(bin_colors):
