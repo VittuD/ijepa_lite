@@ -1,0 +1,17 @@
+# @package masking.latent
+name: goldilocks
+
+# Target budget — LogUniform(k_tgt_min, k_tgt_max)
+# For STL-10 ViT-S/8: N=144 patches
+k_tgt_min: 4    # ~3%  of patches
+k_tgt_max: 72   # ~50% of patches
+
+# Context budget — Uniform(k_ctx_min, k_ctx_max), contiguous rectangle
+k_ctx_min: 32   # ~22% of patches
+k_ctx_max: 96   # ~67% of patches
+
+# Goldilocks loss weight
+beta: 1.0
+
+# Z-score denominator floor (prevents division by zero on uniform-loss batches)
+z_score_eps: 1e-6

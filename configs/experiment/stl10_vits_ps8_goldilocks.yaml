@@ -1,0 +1,39 @@
+# @package _global_
+#
+# Goldilocks curriculum masker experiment.
+#
+# Replaces MI-rate + surprise with a reconstruction-error-driven curriculum:
+#   target_i = exp(-ê_i² / 2)  where ê_i is z-scored per-patch loss
+#   L_goldilocks = mean((q_i - target_i)²)
+#   L_total = L_pred + β · L_goldilocks
+#
+# Gradient isolation:
+#   - patch_loss.detach() in ijepa.py → masker never sees ∇_θ
+#   - encoder never sees ∇_ψ — two independent gradient paths
+#
+# Architecture context
+# --------------------
+# image_size=96, patch_size=8  →  grid = 12×12 = 144 patches (N)
+# K_tgt ~ LogU[4, 72]          →  3–50% of patches
+# K_ctx ~ U[32, 96]            →  contiguous rectangle, 22–67% of patches
+# Masker transformer = Predictor transformer (depth=2, heads=6, dim=192).
+#
+# Key metrics to watch
+# --------------------
+#   train/loss                  ← full objective (reconstruction + β·goldilocks)
+#   train/reconstruction_loss   ← unweighted mean patch loss
+#   mask/k_tgt                  ← mean sampled target budget
+#   mask/k_ctx                  ← mean sampled context budget
+#   mask/tgt_pos_std            ← content-adaptivity: >0 means different images→different targets
+#   mask/p_tgt_score_std        ← soft score variation across batch positions
+#   mask/tgt_assignment_entropy ← binary entropy of target freq per position
+
+defaults:
+  - stl10_vits_ps8_mi     # base: model, optim, sched, data
+  - /masking/latent: goldilocks
+  - /loss: vanilla         # standard reconstruction — masker owns objective via aux_loss
+  - _self_
+
+masking:
+  compressor:
+    mode: full             # masker scores all N patches directly

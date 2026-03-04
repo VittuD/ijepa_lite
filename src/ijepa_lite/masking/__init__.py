@@ -6,6 +6,7 @@ from ijepa_lite.masking.multiblock_mask import MultiBlockMaskGenerator
 from ijepa_lite.masking.predictor_based_masker import PredictorBasedMasker
 from ijepa_lite.masking.rd_masker import RateDist3WayMasker
 from ijepa_lite.masking.mi_masker import MIRateMasker
+from ijepa_lite.masking.goldilocks_masker import GoldilocksTeacherMasker  # noqa: F401
 from ijepa_lite.masking.registry import build_latent_masker, register, registered_names
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "PredictorBasedMasker",
     "RateDist3WayMasker",
     "MIRateMasker",
+    "GoldilocksTeacherMasker",
     # Registry
     "register",
     "build_latent_masker",
