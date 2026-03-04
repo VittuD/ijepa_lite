@@ -28,9 +28,16 @@ Output (4 grid PNGs + 2 heatmap PNGs):
 Each grid is 25 columns x 20 rows = 500 images.
 Each cell is a 3-panel strip: [original | ign-only | color-coded] = 288x96 px.
 
-Usage:
-  PRETRAIN_CKPT=/path/to/last.pt python hacky_visualize_ign_patches.py \\
+Usage (single checkpoint — encoder and masker from same file):
+  python hacky_visualize_ign_patches.py \\
+      --ckpt /path/to/mi_coupled_last.pt \\
       [--data-root /path/to/datasets] [--out-dir ign_viz] [--n 500] [--device cuda]
+
+Usage (split checkpoints — Phase-2 diagnostic):
+  python hacky_visualize_ign_patches.py \\
+      --encoder-ckpt /path/to/vanilla_last.pt \\
+      --masker-ckpt  /path/to/mi_coupled_last.pt \\
+      [--data-root /path/to/datasets] [--out-dir ign_viz_phase2]
 """
 import argparse
 import os
@@ -364,8 +371,15 @@ def visualize_split(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt",      default=os.environ.get("PRETRAIN_CKPT", ""),
-                        help="Path to pretrained checkpoint (or set PRETRAIN_CKPT env)")
+    parser.add_argument("--ckpt",         default=os.environ.get("PRETRAIN_CKPT", ""),
+                        help="Checkpoint for BOTH encoder and masker (single-ckpt mode). "
+                             "Can also be set via PRETRAIN_CKPT env var.")
+    parser.add_argument("--encoder-ckpt", default=None,
+                        help="Separate checkpoint for the encoder (target_encoder.*). "
+                             "If set, --ckpt / MASKER_CKPT is used only for the masker.")
+    parser.add_argument("--masker-ckpt",  default=os.environ.get("MASKER_CKPT", None),
+                        help="Separate checkpoint for the masker (latent_masker.*). "
+                             "Defaults to --ckpt when not provided.")
     parser.add_argument("--data-root", default=os.environ.get("FAST", "/scratch") + "/datasets/")
     parser.add_argument("--out-dir",   default="ign_viz")
     parser.add_argument("--n",         type=int, default=500, help="Images per split")
@@ -373,20 +387,32 @@ def main():
     parser.add_argument("--device",    default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
-    if not args.ckpt:
-        raise SystemExit("Set PRETRAIN_CKPT or pass --ckpt")
+    encoder_ckpt = args.encoder_ckpt or args.ckpt
+    masker_ckpt  = args.masker_ckpt  or args.ckpt
+
+    if not encoder_ckpt:
+        raise SystemExit("Provide --ckpt, --encoder-ckpt, or set PRETRAIN_CKPT env")
+    if not masker_ckpt:
+        raise SystemExit("Provide --ckpt, --masker-ckpt, or set PRETRAIN_CKPT / MASKER_CKPT env")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device  = torch.device(args.device)
 
-    print(f"Loading checkpoint: {args.ckpt}")
-    sd_full = torch.load(args.ckpt, map_location="cpu", weights_only=True)
-    sd_full = sd_full.get("model", sd_full)
+    print(f"Loading encoder from : {encoder_ckpt}")
+    sd_enc = torch.load(encoder_ckpt, map_location="cpu", weights_only=True)
+    sd_enc = sd_enc.get("model", sd_enc)
+
+    if masker_ckpt == encoder_ckpt:
+        sd_msk = sd_enc
+    else:
+        print(f"Loading masker from  : {masker_ckpt}")
+        sd_msk = torch.load(masker_ckpt, map_location="cpu", weights_only=True)
+        sd_msk = sd_msk.get("model", sd_msk)
 
     print("Building encoder and masker ...")
-    encoder = _build_encoder(sd_full, device)
-    masker  = _build_masker(sd_full, device)
+    encoder = _build_encoder(sd_enc, device)
+    masker  = _build_masker(sd_msk, device)
     print(f"  λ={LAM}  α={ALPHA}  device={device}")
 
     datasets_cfg = [
