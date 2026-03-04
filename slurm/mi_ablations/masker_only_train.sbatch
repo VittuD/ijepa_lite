@@ -51,25 +51,31 @@ export MI_COUPLED_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_p
 # Vanilla JEPA checkpoint (fill in before submitting)
 export VANILLA_CKPT="$WORK/vitturini/outputs/<vanilla_run_dir>/rank0/checkpoints/last.pt"
 
+# Each condition warm-starts the predictor from the same checkpoint as its encoder.
+# idx=0: MI-coupled predictor  (was co-trained with MI-coupled encoder)
+# idx=1: vanilla predictor     (broad ctx/tgt coverage from random multiblock masking)
 ENCODER_CKPTS=("$MI_COUPLED_CKPT" "$VANILLA_CKPT")
+PREDICTOR_CKPTS=("$MI_COUPLED_CKPT" "$VANILLA_CKPT")
 OUT_DIRS=(masker_only_joint_enc masker_only_vanilla_enc)
 
 ENCODER_CKPT=${ENCODER_CKPTS[$SLURM_ARRAY_TASK_ID]}
+PREDICTOR_CKPT=${PREDICTOR_CKPTS[$SLURM_ARRAY_TASK_ID]}
 OUT_DIR=${OUT_DIRS[$SLURM_ARRAY_TASK_ID]}
 
-echo "Array task ${SLURM_ARRAY_TASK_ID}: encoder=${ENCODER_CKPT}  out=${OUT_DIR}"
+echo "Array task ${SLURM_ARRAY_TASK_ID}: encoder=${ENCODER_CKPT}  predictor=${PREDICTOR_CKPT}  out=${OUT_DIR}"
 
 mkdir -p sbatch_logs/masker-only-train
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python hacky_masker_only_train.py \
-    --encoder-ckpt "$ENCODER_CKPT" \
-    --data-root    "$FAST/datasets/" \
-    --out-dir      "$OUT_DIR" \
-    --epochs       400 \
-    --batch-size   512 \
-    --lr           3e-4 \
-    --weight-decay 1e-5 \
-    --log-every    50 \
-    --save-every   50 \
-    --device       cuda
+    --encoder-ckpt   "$ENCODER_CKPT" \
+    --predictor-ckpt "$PREDICTOR_CKPT" \
+    --data-root      "$FAST/datasets/" \
+    --out-dir        "$OUT_DIR" \
+    --epochs         400 \
+    --batch-size     512 \
+    --lr             3e-4 \
+    --weight-decay   1e-5 \
+    --log-every      50 \
+    --save-every     50 \
+    --device         cuda

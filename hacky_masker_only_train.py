@@ -110,6 +110,32 @@ def build_fresh_predictor(device: torch.device) -> Predictor:
         num_patches=N_PATCHES,
     ).to(device)
 
+
+def load_predictor_weights(predictor: Predictor, ckpt_path: str) -> None:
+    """Load predictor weights from a checkpoint.
+
+    Handles two formats:
+      - Main JEPA checkpoint: model["predictor.*"]
+      - Masker-only checkpoint: ckpt["predictor"] (flat state_dict)
+    """
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    if "model" in sd:
+        pred_sd = {k[len("predictor."):]: v
+                   for k, v in sd["model"].items() if k.startswith("predictor.")}
+    elif "predictor" in sd:
+        pred_sd = sd["predictor"]
+    else:
+        pred_sd = {}
+
+    if not pred_sd:
+        print("  [predictor] no predictor keys found — using fresh init")
+        return
+
+    missing, _ = predictor.load_state_dict(pred_sd, strict=False)
+    if missing:
+        print(f"  [predictor] missing: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+    print(f"  [predictor] loaded {len(pred_sd)} tensors from {ckpt_path}")
+
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
@@ -190,8 +216,11 @@ def save_checkpoint(out_dir: Path, epoch: int, masker, predictor, optimizer):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--encoder-ckpt", required=True,
+    parser.add_argument("--encoder-ckpt",   required=True,
                         help="Frozen encoder: target_encoder.* from any JEPA checkpoint")
+    parser.add_argument("--predictor-ckpt", default=None,
+                        help="Warm-start predictor from predictor.* in any JEPA or "
+                             "masker-only checkpoint. Fresh init if omitted.")
     parser.add_argument("--data-root",    default=os.environ.get("FAST", "/scratch") + "/datasets/")
     parser.add_argument("--out-dir",      default="masker_only_run")
     parser.add_argument("--epochs",       type=int,   default=400)
@@ -214,6 +243,9 @@ def main():
     print("Building fresh masker + predictor ...")
     masker    = build_fresh_masker(device)
     predictor = build_fresh_predictor(device)
+    if args.predictor_ckpt:
+        print(f"Warm-starting predictor from : {args.predictor_ckpt}")
+        load_predictor_weights(predictor, args.predictor_ckpt)
     n_params  = sum(p.numel() for p in list(masker.parameters()) + list(predictor.parameters()))
     print(f"  Trainable params : {n_params:,}  (encoder frozen)")
 
