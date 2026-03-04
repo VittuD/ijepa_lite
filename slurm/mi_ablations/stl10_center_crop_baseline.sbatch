@@ -5,10 +5,10 @@
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
 #SBATCH --time=02:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-1
 #SBATCH --output=sbatch_logs/stl10-center-crop/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/stl10-center-crop/%x_%A_%a.err
 
@@ -48,7 +48,7 @@ nvidia-smi -L || true
 
 export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
 
-SEEDS=(0 1 2 42)
+SEEDS=(0 42)
 SEED=${SEEDS[$SLURM_ARRAY_TASK_ID]}
 
 echo "Array task ${SLURM_ARRAY_TASK_ID}: seed=${SEED}  pool=center  n_patches=48  dataset=stl10"
@@ -61,4 +61,6 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     seed=${SEED} \
     task.eval_modes.masker_hard_probe=false \
     task.eval_modes.spatial_probe=true \
-    task.spatial_probe.pool=center
+    task.spatial_probe.pool=center \
+    data.root=$FAST/datasets/ \
+    masker_probe.epochs=20

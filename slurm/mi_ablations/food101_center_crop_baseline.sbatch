@@ -55,4 +55,5 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     seed=${SEED} \
     task.eval_modes.masker_hard_probe=false \
     task.eval_modes.spatial_probe=true \
-    task.spatial_probe.pool=center
+    task.spatial_probe.pool=center \
+    data.root=$FAST/datasets/
