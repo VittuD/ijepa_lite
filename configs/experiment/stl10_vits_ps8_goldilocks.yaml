@@ -30,8 +30,8 @@
 
 defaults:
   - stl10_vits_ps8_mi     # base: model, optim, sched, data
-  - /masking/latent: goldilocks
-  - /loss: vanilla         # standard reconstruction — masker owns objective via aux_loss
+  - override /masking/latent: goldilocks
+  - override /loss: vanilla  # standard reconstruction — masker owns objective via aux_loss
   - _self_
 
 masking:
