@@ -44,7 +44,7 @@ nvidia-smi -L || true
 export MI_COUPLED_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
 
 # Vanilla JEPA checkpoint (fill in before submitting)
-export VANILLA_CKPT="$WORK/vitturini/outputs/<vanilla_run_dir>/rank0/checkpoints/last.pt"
+export VANILLA_CKPT="$WORK/vitturini/outputs/2026-02-21/18-28-32_stl10_vits_ps8_comp4/rank0/checkpoints/last.pt"
 
 ENCODER_CKPTS=("$MI_COUPLED_CKPT" "$MI_COUPLED_CKPT" "$VANILLA_CKPT" "$VANILLA_CKPT")
 ALPHA_MINS=(0.15 0.25 0.15 0.25)
@@ -65,14 +65,14 @@ echo "  alpha_min=${ALPHA_MIN}  out=${OUT_DIR}"
 mkdir -p sbatch_logs/masker-only-amin
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python hacky_masker_only_train.py \
+  python ijepa_lite/hacky_masker_only_train.py \
     --encoder-ckpt   "$ENCODER_CKPT" \
     --predictor-ckpt "$VANILLA_CKPT" \
     --data-root      "$FAST/datasets/" \
     --out-dir        "$OUT_DIR" \
     --alpha-min      "$ALPHA_MIN" \
     --epochs         400 \
-    --batch-size     512 \
+    --batch-size     4096 \
     --lr             3e-4 \
     --weight-decay   1e-5 \
     --log-every      50 \

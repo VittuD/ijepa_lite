@@ -2,7 +2,7 @@
 #SBATCH --job-name=viz-ign-patches
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -43,7 +43,8 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 nvidia-smi -L || true
 
 # MI-coupled checkpoint (encoder + masker in same file)
-export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-02/23-23-53_stl10_vits_ps8_mi_coupled_sr/rank0/checkpoints/last.pt"
+# export PRETRAIN_CKPT="$WORK/vitturini/masker_only_joint_enc/epoch_0299.pt"
+export PRETRAIN_CKPT="$WORK/vitturini/masker_only_joint_enc_pretrain_class/epoch_0299.pt"
 
 # Vanilla JEPA checkpoint (encoder only — for split-checkpoint mode)
 export ENCODER_CKPT="$WORK/vitturini/outputs/2026-02-21/18-28-32_stl10_vits_ps8_comp4/rank0/checkpoints/last.pt"
@@ -51,22 +52,22 @@ export ENCODER_CKPT="$WORK/vitturini/outputs/2026-02-21/18-28-32_stl10_vits_ps8_
 mkdir -p sbatch_logs/viz-ign-patches
 
 # --- Single checkpoint (default) ---
-# srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-#   python ijepa_lite/hacky_visualize_ign_patches.py \
-#     --ckpt      "$PRETRAIN_CKPT" \
-#     --data-root "$FAST/datasets/" \
-#     --out-dir   ign_viz \
-#     --n         500 \
-#     --device    cuda
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+  python ijepa_lite/hacky_visualize_ign_patches.py \
+    --ckpt      "$PRETRAIN_CKPT" \
+    --data-root "$FAST/datasets/" \
+    --out-dir   ign_viz_masker_joint_enc_pretrain_class \
+    --n         500 \
+    --device    cuda
 
 # --- Split checkpoints: vanilla encoder + MI masker (Phase-2 diagnostic) ---
 # Uncomment and fill ENCODER_CKPT above before running.
 #
-srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python ijepa_lite/hacky_visualize_ign_patches.py \
-    --encoder-ckpt "$ENCODER_CKPT" \
-    --masker-ckpt  "$PRETRAIN_CKPT" \
-    --data-root    "$FAST/datasets/" \
-    --out-dir      ign_viz_comp_pretrain \
-    --n            500 \
-    --device       cuda
+# srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+#   python ijepa_lite/hacky_visualize_ign_patches.py \
+#     --encoder-ckpt "$ENCODER_CKPT" \
+#     --masker-ckpt  "$PRETRAIN_CKPT" \
+#     --data-root    "$FAST/datasets/" \
+#     --out-dir      ign_viz_comp_pretrain \
+#     --n            500 \
+#     --device       cuda
