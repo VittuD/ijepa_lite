@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-gldk-ema-fixk
-#SBATCH --account=IscrC_TBoneAI
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=02:00:00
-#SBATCH --output=sbatch_logs/%x_%j.out
-#SBATCH --error=sbatch_logs/%x_%j.err
+#SBATCH --output=sbatch_logs/goldilocks_ema_fixed_k/%x_%j.out
+#SBATCH --error=sbatch_logs/goldilocks_ema_fixed_k/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # Path B diagnostic probe — fixed k_tgt=36, k_ctx=64, 50 epochs
@@ -19,7 +19,7 @@
 #
 # Direct comparison metrics (both runs, same W&B project):
 #   mask/batch_iou          — should converge toward 0.143 faster with EMA signal
-#   mask/tgt_pos_std_norm   — should trend above 1.0 with EMA signal
+#   mask/tgt_pos_std_norm   — should be lower with EMA signal, indicating more consistent masker outputs across images
 #   mask/marginal_score_std — KEY: should DECREASE with EMA signal
 #                             If it stays high → add diversity term
 #   mask/masker_loss        — should be smoother and lower with stable EMA signal
@@ -48,7 +48,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-mkdir -p sbatch_logs
+mkdir -p sbatch_logs/goldilocks_ema_fixed_k
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -56,6 +56,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       experiment=stl10_vits_ps8_goldilocks_ema \
       masking/latent=goldilocks_ema_fixed_k \
       data.root=$FAST/datasets/ \
-      train.epochs=50 \
+      train.epochs=500 \
       train.save_every_epochs=50 \
+      data.batch_size=1024 \
       logger.mode=offline

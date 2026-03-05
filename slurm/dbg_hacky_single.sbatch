@@ -25,7 +25,7 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
-CKPT="$WORK/vitturini/outputs/2026-03-04/20-56-35_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
+CKPT="$WORK/vitturini/outputs/2026-03-05/13-04-34_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
 DATA_ROOT="$FAST/datasets"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \

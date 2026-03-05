@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:20:00
-#SBATCH --output=sbatch_logs/%x_%j.out
-#SBATCH --error=sbatch_logs/%x_%j.err
+#SBATCH --output=sbatch_logs/goldilocks_ema_debug/%x_%j.out
+#SBATCH --error=sbatch_logs/goldilocks_ema_debug/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # Path B smoke test — GoldilocksTeacherMasker with EMA-stabilized signal
@@ -38,11 +38,12 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
-mkdir -p sbatch_logs
+mkdir -p sbatch_logs/goldilocks_ema_debug
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m ijepa_lite.run \
     experiment=stl10_vits_ps8_goldilocks_ema \
+    masking/latent=goldilocks_ema_fixed_k \
     data.root=$FAST/datasets/ \
     data.batch_size=64 \
     data.num_workers=4 \

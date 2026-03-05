@@ -51,13 +51,13 @@ nvidia-smi -L || true
 mkdir -p sbatch_logs/viz-goldilocks
 
 # --- Single checkpoint (default) ---
-export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-05/00-37-16_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
+export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-05/15-56-38_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python hacky_visualize_goldilocks.py \
+  python ijepa_lite/hacky_visualize_goldilocks.py \
     --ckpt      "$PRETRAIN_CKPT" \
     --data-root "$FAST/datasets/" \
-    --out-dir   goldilocks_viz \
+    --out-dir   goldilocks_viz_4blks_500ep \
     --n         500 \
     --device    cuda
 
@@ -68,7 +68,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
 # export MASKER_CKPT="$WORK/vitturini/outputs/<goldilocks_ema_run>/rank0/checkpoints/last.pt"
 #
 # srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-#   python hacky_visualize_goldilocks.py \
+#   python ijepa_lite/hacky_visualize_goldilocks.py \
 #     --encoder-ckpt "$ENCODER_CKPT" \
 #     --masker-ckpt  "$MASKER_CKPT" \
 #     --data-root    "$FAST/datasets/" \
