@@ -15,10 +15,9 @@ Gradient isolation is natural:
   - patch_loss.detach() already in ijepa.py — masker never sees ∇_θ
   - encoder never sees ∇_ψ — masker loss not added to reconstruction backward
 
-Context is a contiguous rectangle (like I-JEPA multiblock) selected first;
-targets are scored and selected from remaining non-context patches.
-The masker receives a binary ctx_flag conditioning so it learns difficulty
-relative to what context is available.
+Targets are scored and selected first (from all N patches); context is then
+drawn as a contiguous rectangle from the remaining non-target patches.
+ctx_embed conditioning is removed — the masker scores patches unconditionally.
 """
 from __future__ import annotations
 
@@ -193,10 +192,6 @@ class GoldilocksTeacherMasker(LatentMasker):
         self.proj_in  = nn.Linear(dim, d)
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, d))
 
-        # Binary context-conditioning: 1 = context patch, 0 = not
-        # Zero-init so pos_embed starts unperturbed
-        self.ctx_embed = nn.Linear(1, d)
-
         layer = nn.TransformerEncoderLayer(
             d_model=d,
             nhead=num_heads,
@@ -221,8 +216,6 @@ class GoldilocksTeacherMasker(LatentMasker):
         # Initialisation
         # ----------------------------------------------------------------
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
-        nn.init.trunc_normal_(self.ctx_embed.weight, std=0.02)
-        nn.init.zeros_(self.ctx_embed.bias)
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)
 
@@ -253,8 +246,11 @@ class GoldilocksTeacherMasker(LatentMasker):
     # Context block sampling — contiguous rectangle on patch grid
     # ------------------------------------------------------------------
 
-    def _sample_ctx_block(self, K_ctx: int, device) -> list:
-        """Return exactly K_ctx flat patch indices forming a contiguous rectangle."""
+    def _sample_ctx_block(self, K_ctx: int, forbidden: set) -> list:
+        """Return exactly K_ctx flat patch indices forming a contiguous rectangle.
+
+        Patches in `forbidden` (i.e. already selected as targets) are excluded.
+        """
         g = self.grid
         log_aspect = random.uniform(
             math.log(self.ctx_min_aspect), math.log(self.ctx_max_aspect)
@@ -265,9 +261,10 @@ class GoldilocksTeacherMasker(LatentMasker):
         top  = random.randint(0, max(0, g - h))
         left = random.randint(0, max(0, g - w))
         rect = [(top + r) * g + (left + c) for r in range(h) for c in range(w)]
+        rect = [i for i in rect if i not in forbidden]
         if len(rect) >= K_ctx:
             return random.sample(rect, K_ctx)
-        pool = [i for i in range(self.num_patches) if i not in set(rect)]
+        pool = [i for i in range(self.num_patches) if i not in forbidden and i not in set(rect)]
         rect += random.sample(pool, min(K_ctx - len(rect), len(pool)))
         return rect[:K_ctx]
 
@@ -302,30 +299,23 @@ class GoldilocksTeacherMasker(LatentMasker):
         # Step 1: sample budgets
         K_ctx = self._sample_k_ctx() if self.training else self.k_ctx_eval
         K_tgt = self._sample_k_tgt() if self.training else self.k_tgt_eval
-        K_ctx = min(K_ctx, N - K_tgt)   # safety: leave room for targets
 
-        # Step 2: context blocks — one rectangle per sample
-        ctx_idx = torch.tensor(
-            [self._sample_ctx_block(K_ctx, device) for _ in range(B)],
-            dtype=torch.long, device=device,
-        )   # (B, K_ctx)
-
-        # Step 3: binary context conditioning (B, N, 1)
-        ctx_flag = torch.zeros(B, N, 1, device=device)
-        ctx_flag.scatter_(1, ctx_idx.unsqueeze(-1), 1.0)
-
-        # Step 4: transformer with context conditioning
+        # Step 2: transformer (unconditional)
         x = self.proj_in(ema_full) + self.pos_embed    # (B, N, d)
-        x = x + self.ctx_embed(ctx_flag)               # inject context visibility
         x = self.norm(self.blocks(x))                  # (B, N, d)
         p_tgt = torch.sigmoid(self.proj_score(x).squeeze(-1))  # (B, N)
 
-        # Step 5: target selection from non-context patches only
-        p_tgt_avail = p_tgt.clone()
-        p_tgt_avail.scatter_(1, ctx_idx, float("-inf"))
-        _, tgt_idx = torch.topk(p_tgt_avail, K_tgt, dim=-1, sorted=False)  # (B, K_tgt)
+        # Step 3: targets from ALL patches
+        _, tgt_idx = torch.topk(p_tgt, K_tgt, dim=-1, sorted=False)  # (B, K_tgt)
 
-        # Step 6: content-adaptivity diagnostics (no_grad)
+        # Step 4: context from non-target patches
+        ctx_idx = torch.tensor(
+            [self._sample_ctx_block(K_ctx, forbidden=set(tgt_idx[b].tolist()))
+             for b in range(B)],
+            dtype=torch.long, device=device,
+        )   # (B, K_ctx)
+
+        # Step 5: content-adaptivity diagnostics (no_grad)
         aux_metrics = _content_adaptivity_metrics(p_tgt, tgt_idx, N)
 
         return MaskOutput(
