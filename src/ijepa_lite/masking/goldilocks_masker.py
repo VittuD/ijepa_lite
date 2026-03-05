@@ -70,6 +70,14 @@ def _content_adaptivity_metrics(
     #    More sensitive than binary: detects content-dependence before hard selection.
     p_tgt_score_std = p_tgt.std(dim=0).mean().item()
 
+    # 2b. marginal_score_std — std of per-position *mean* score across batch.
+    #     Orthogonal to p_tgt_score_std: measures positional concentration.
+    #     Near 0 → average score is uniform across positions (no positional bias).
+    #     High    → some positions always preferred, others always avoided.
+    #     This is the direct diagnostic for whether a marginal diversity term is needed:
+    #     if marginal_score_std is high and not falling, add the diversity regularizer.
+    marginal_score_std = p_tgt.mean(dim=0).std().item()
+
     # 3. tgt_assignment_entropy — per-position binary entropy of target frequency.
     #    H(p) = -p*log(p) - (1-p)*log(1-p), averaged over N positions.
     #    Near 0 → masker always picks or always skips each position.
@@ -98,6 +106,7 @@ def _content_adaptivity_metrics(
         "tgt_pos_std":          tgt_pos_std,
         "tgt_pos_std_norm":     tgt_pos_std_norm,
         "p_tgt_score_std":      p_tgt_score_std,
+        "marginal_score_std":   marginal_score_std,
         "tgt_assignment_entropy": tgt_assignment_entropy,
         "batch_iou":            batch_iou,
         "batch_iou_random":     iou_random,
