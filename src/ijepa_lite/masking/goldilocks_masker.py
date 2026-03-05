@@ -58,9 +58,16 @@ def _content_adaptivity_metrics(
 
     # 1b. tgt_pos_std_norm — tgt_pos_std divided by its expected value under a
     #     random (content-blind) masker: sqrt(p·(1−p)) where p = K/N.
-    #     Ratio ≈ 1 → masker behaves like random selection.
-    #     Ratio < 1 → positional collapse (always same patches).
-    #     Ratio > 1 → more diverse across images than random.
+    #     Mathematically bounded in [0, sqrt(B/(B-1))] ≈ [0, 1] for large B:
+    #     the upper bound comes from Jensen's inequality applied to the concave
+    #     function sqrt(f(1-f)), maximised when all marginal frequencies f_j = K/N.
+    #     Ratio ≈ 1 → marginal selection frequencies are uniform across positions;
+    #               this is the ceiling — consistent with both random and any
+    #               content-adaptive masker whose marginals happen to be uniform.
+    #     Ratio < 1 → positional concentration (some positions over/under-selected).
+    #     Ratio → 0 → positional collapse (same K patches every time).
+    #     NOTE: cannot distinguish a random masker from a content-adaptive one with
+    #     uniform marginals. Use p_tgt_score_std and batch_iou for that.
     p_rand = K / N
     std_rand = math.sqrt(p_rand * (1.0 - p_rand)) if 0 < p_rand < 1 else 1.0
     tgt_pos_std_norm = tgt_pos_std / std_rand
