@@ -32,6 +32,8 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
+export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-05/00-37-16_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
+
 : "${PRETRAIN_CKPT:?ERROR: set PRETRAIN_CKPT to the pretraining checkpoint path}"
 
 mkdir -p sbatch_logs

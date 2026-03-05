@@ -57,6 +57,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       experiment=stl10_vits_ps8_goldilocks \
       masking/latent=goldilocks_fixed_k \
       data.root=$FAST/datasets/ \
-      train.epochs=50 \
+      train.epochs=500 \
       train.save_every_epochs=50 \
+      data.batch_size=1024 \
       logger.mode=offline

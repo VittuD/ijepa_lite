@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-gldk-stl10
-#SBATCH --account=IscrC_TBoneAI
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=06:30:00
-#SBATCH --output=sbatch_logs/%x_%j.out
-#SBATCH --error=sbatch_logs/%x_%j.err
+#SBATCH --output=sbatch_logs/goldilocks_test/%x_%j.out
+#SBATCH --error=sbatch_logs/goldilocks_test/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # P2 full pretraining — GoldilocksTeacherMasker, STL-10, 250 epochs
@@ -43,21 +43,25 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 export WANDB_MODE=offline
 
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export OPENBLAS_NUM_THREADS=4
-export NUMEXPR_NUM_THREADS=4
+# Leonardo boost: 32 cores / 4 GPUs = 8 cores per GPU process
+NPROC=4
+THREADS_PER_PROC=$((SLURM_CPUS_PER_TASK / NPROC))   # = 8
+export OMP_NUM_THREADS=$THREADS_PER_PROC
+export MKL_NUM_THREADS=$THREADS_PER_PROC
+export OPENBLAS_NUM_THREADS=$THREADS_PER_PROC
+export NUMEXPR_NUM_THREADS=$THREADS_PER_PROC
 
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-mkdir -p sbatch_logs
+mkdir -p sbatch_logs/goldilocks_test
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_goldilocks \
       data.root=$FAST/datasets/ \
+      data.batch_size=1024 \
       logger.mode=offline

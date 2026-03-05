@@ -45,10 +45,12 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 export WANDB_MODE=offline
 
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export OPENBLAS_NUM_THREADS=4
-export NUMEXPR_NUM_THREADS=4
+NPROC=2
+THREADS_PER_PROC=$((SLURM_CPUS_PER_TASK / NPROC))   # 16/2 = 8
+export OMP_NUM_THREADS=$THREADS_PER_PROC
+export MKL_NUM_THREADS=$THREADS_PER_PROC
+export OPENBLAS_NUM_THREADS=$THREADS_PER_PROC
+export NUMEXPR_NUM_THREADS=$THREADS_PER_PROC
 
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -70,4 +72,5 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.beta=${BETA} \
       train.epochs=50 \
       train.save_every_epochs=50 \
+      data.batch_size=1024 \
       logger.mode=offline
