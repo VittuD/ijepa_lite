@@ -52,17 +52,13 @@ nvidia-smi -L || true
 
 mkdir -p sbatch_logs/viz-goldilocks
 
-# --- Set checkpoint path ---
-# Fixed-k global_z_score run (most recent):
-export PRETRAIN_CKPT="$WORK/vitturini/outputs/<fill-in-run-dir>/rank0/checkpoints/last.pt"
-
-# Old variable-k checkpoint (17 tgts by default — pass --k-tgt 94 to override):
-# export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-05/15-56-38_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
+# --- Single checkpoint (default) ---
+export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-05/17-54-03_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python ijepa_lite/hacky_visualize_goldilocks.py \
     --ckpt      "$PRETRAIN_CKPT" \
     --data-root "$FAST/datasets/" \
-    --out-dir   goldilocks_viz_gz_500ep \
+    --out-dir   goldilocks_viz_4blks_gz_500ep \
     --n         500 \
     --device    cuda
