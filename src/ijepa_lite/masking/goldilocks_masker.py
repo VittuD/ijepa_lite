@@ -166,6 +166,8 @@ class GoldilocksTeacherMasker(LatentMasker):
         k_ctx_max: int = 96,
         beta: float = 1.0,
         z_score_eps: float = 1e-6,
+        global_z_score: bool = False,
+        running_momentum: float = 0.99,
         # Unused kwargs forwarded by build.py — kept for compatibility
         base_kind: str = "smooth_l1",
         normalize: bool = False,
@@ -210,7 +212,11 @@ class GoldilocksTeacherMasker(LatentMasker):
         self.proj_score = nn.Linear(d, 1)
 
         # Goldilocks loss (no learnable parameters)
-        self.goldilocks_loss = GoldilocksLoss(z_score_eps=z_score_eps)
+        self.goldilocks_loss = GoldilocksLoss(
+            z_score_eps=z_score_eps,
+            global_z_score=global_z_score,
+            running_momentum=running_momentum,
+        )
 
         # ----------------------------------------------------------------
         # Initialisation
