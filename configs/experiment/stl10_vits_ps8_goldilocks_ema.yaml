@@ -1,0 +1,20 @@
+# @package _global_
+#
+# Path B: Goldilocks masker with EMA-stabilized teaching signal.
+#
+# Identical to stl10_vits_ps8_goldilocks except masking/latent=goldilocks_ema.
+# The EMA-based patch_loss breaks the co-adaptation loop between masker and
+# encoder: the masker's difficulty signal always reflects the encoder's state
+# ~τ steps ago (τ ≈ 1/(1−m) ≈ 500 at m=0.998), preventing tight co-adaptation.
+#
+# Key differences from stl10_vits_ps8_goldilocks:
+#   masking/latent: goldilocks_ema  (adds ema_signal: true)
+#
+# NOTE: ema_signal is a no-op until Path B is implemented in goldilocks_masker.py.
+# Running this config before that lands produces identical results to
+# stl10_vits_ps8_goldilocks — useful as a same-config baseline.
+
+defaults:
+  - stl10_vits_ps8_goldilocks   # base: model, optim, sched, data, loss, compressor
+  - override /masking/latent: goldilocks_ema
+  - _self_

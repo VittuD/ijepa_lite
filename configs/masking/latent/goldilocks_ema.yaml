@@ -1,0 +1,23 @@
+# @package masking.latent
+#
+# Path B: Goldilocks masker with EMA-stabilized teaching signal.
+#
+# Structural change from goldilocks.yaml:
+#   ema_signal: true — masker's difficulty signal is computed from EMA encoder
+#   features only (stop-grad on both sides), breaking the co-adaptation loop.
+#
+# NOTE: ema_signal is silently ignored until GoldilocksTeacherMasker implements
+# it. Running this config before Path B lands = vanilla goldilocks behaviour.
+name: goldilocks
+
+k_tgt_min: 4
+k_tgt_max: 72
+
+k_ctx_min: 32
+k_ctx_max: 96
+
+beta: 1.0
+z_score_eps: 1e-6
+
+# Path B switch — activates EMA-based patch_loss in aux_loss
+ema_signal: true

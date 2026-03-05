@@ -1,0 +1,18 @@
+# @package masking.latent
+#
+# Path B diagnostic variant — fixed k_tgt=36, k_ctx=64 + ema_signal.
+# Use for clean metric trajectories when comparing goldilocks vs goldilocks_ema:
+# both configs use identical budgets, so any metric difference is purely from
+# the signal source (online patch_loss vs EMA-based patch_loss).
+name: goldilocks
+
+k_tgt_min: 36
+k_tgt_max: 36
+
+k_ctx_min: 64
+k_ctx_max: 64
+
+beta: 1.0
+z_score_eps: 1e-6
+
+ema_signal: true
