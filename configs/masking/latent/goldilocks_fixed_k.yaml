@@ -15,7 +15,7 @@ name: goldilocks
 k_tgt_min: 94
 k_tgt_max: 94
 
-k_ctx_min: 22
+k_ctx_min: 43
 k_ctx_max: 43
 
 beta: 1.0

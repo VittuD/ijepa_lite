@@ -56,7 +56,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking/latent=goldilocks_fixed_k \
       masking.latent.global_z_score=true \
       data.root=$FAST/datasets/ \
-      train.epochs=500 \
+      train.epochs=5000 \
       train.save_every_epochs=50 \
       data.batch_size=1024 \
       logger.mode=offline

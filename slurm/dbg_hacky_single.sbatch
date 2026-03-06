@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=stl10-logreg
-#SBATCH --account=IscrC_TBoneAI
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
@@ -25,7 +25,7 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
-CKPT="$WORK/vitturini/outputs/2026-03-05/17-54-03_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
+CKPT="$WORK/vitturini/outputs/2026-03-06/01-03-13_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
 DATA_ROOT="$FAST/datasets"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \

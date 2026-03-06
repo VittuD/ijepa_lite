@@ -2,7 +2,7 @@
 #SBATCH --job-name=viz-goldilocks
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -53,12 +53,13 @@ nvidia-smi -L || true
 mkdir -p sbatch_logs/viz-goldilocks
 
 # --- Single checkpoint (default) ---
-export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-05/17-54-03_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
+export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-06/01-03-13_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python ijepa_lite/hacky_visualize_goldilocks.py \
     --ckpt      "$PRETRAIN_CKPT" \
+    --k-tgt     36 \
     --data-root "$FAST/datasets/" \
-    --out-dir   goldilocks_viz_4blks_gz_500ep \
+    --out-dir   goldilocks_viz_4blks_gz_5000ep_36p \
     --n         500 \
     --device    cuda
