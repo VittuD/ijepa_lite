@@ -16,14 +16,22 @@ Objective (see mi_loss.py for full derivation)
           - α · surprise_soft
           + λ · mi_rate
 
-    mi_rate = H(Y|X) − H(Y)   (= −I(X;Y))
+    mi_rate = H(Y|n) − H(Y)   (= −I(n; Y))
 
-Collapse prevention
--------------------
-H(Y|X) → 0 : MI rate reward is self-sharpening — minimising per-patch entropy
-              directly drives decisive assignments without an external sharpener.
-H(Y)   → 0 : penalised because mi_rate = H_cond − H_marg increases
-surprise ↑  : −α · surprise rewards context that is semantically informative
+    n ~ Uniform({1,...,N}) is a randomly sampled patch position.
+    Y ∈ {ctx, tgt, ign} is the role assigned to patch n.
+    I(n; Y) is MI between patch *position* and role within a single image.
+    It is NOT MI between patch content and role — a positional masker
+    achieves the same I(n;Y) as a content-adaptive one.
+
+Role of each term
+-----------------
+H(Y|n) → 0 : self-sharpening — minimising per-patch entropy drives decisive
+              assignments without an external sharpener.
+H(Y) → log3 : collapse prevention — maximising the marginal entropy penalises
+              degenerate solutions where all patches collapse to one role.
+surprise ↑  : the ONLY content-adaptive signal — −α·surprise rewards targets
+              that are semantically far from context in EMA feature space.
 
 proj_score is initialised with trunc_normal_(std=0.02) so that logits at step 0
 are non-uniform (≈ std 0.28 for d=192), breaking the uniform fixed point where

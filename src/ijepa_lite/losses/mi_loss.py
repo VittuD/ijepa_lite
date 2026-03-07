@@ -15,16 +15,24 @@ Where:
     surprise_soft = (Σᵢ p_tgt_i · BS_all_i) / max(Σᵢ p_tgt_i, 1)   (scalar)
 
     soft_3way     = [p_ctx, p_tgt, p_ign]                  (B, N, 3)
-    H(Y|X)        = mean per-patch categorical entropy      ∈ [0, log3]
-    H(Y)          = entropy of the mean class distribution  ∈ [0, log3]
-    mi_rate       = H(Y|X) − H(Y)                          = −I(X;Y)
+    H(Y|n)        = mean per-patch categorical entropy      ∈ [0, log3]
+    H(Y)          = entropy of the mean role distribution   ∈ [0, log3]
+    mi_rate       = H(Y|n) − H(Y)                          = −I(n; Y)
+
+Where n ~ Uniform({1,...,N}) is a randomly sampled patch position and Y its assigned
+role. I(n; Y) is MI between patch *position* and role within a single image — NOT
+between patch *content* and role. A positional masker achieves the same I(n;Y) as a
+content-adaptive one. mi_rate is a confidence + balance regularizer:
+  H(Y|n) → 0   : confident per-patch assignments (self-sharpening)
+  H(Y)   → log3 : balanced role usage across patches (collapse prevention)
+Content-adaptivity is provided by the surprise term, not mi_rate.
 
 Gradient paths
 --------------
 surprise_soft → p_tgt : Concrete relaxation — fully differentiable.
 surprise_soft → p_ctx : via ctx_centroid (blended with image mean, collapse-safe).
 mi_rate       → soft  : penalises high per-patch entropy (encourages hard assignments)
-                         and rewards uniform marginal (class balance).
+                         and rewards uniform marginal (role balance).
 
 λ and α are per-sample (B,) tensors sampled from LogUniform during pre-training.
 """
@@ -87,20 +95,25 @@ class MIRateSurpriseLoss(nn.Module):
         surprise_soft = ((p_tgt * BS_all).sum(-1) / p_tgt_sum).mean()         # scalar
 
         # ------------------------------------------------------------------
-        # MI rate = H(Y|X) − H(Y)   (equals −I(X;Y), so minimising → ↑ MI)
+        # MI rate = H(Y|n) − H(Y) = −I(n; Y)
+        # n = patch position (uniform RV over {1,...,N}), Y = role ∈ {ctx,tgt,ign}.
+        # Minimising mi_rate maximises I(n;Y) within each image:
+        #   H(Y|n) → 0   : confident per-patch assignments (self-sharpening)
+        #   H(Y)   → log3 : balanced role usage (collapse prevention)
+        # NOTE: I(n;Y) is MI between position and role, not content and role.
         # ------------------------------------------------------------------
         soft_3way = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)                # (B, N, 3)
 
-        # H(Y|X): mean per-patch categorical entropy — minimising this
-        # encourages confident (hard) per-patch assignments.
+        # H(Y|n): mean per-patch categorical entropy — minimising this
+        # encourages confident (hard) per-patch role assignments.
         H_cond = -(soft_3way * (soft_3way + 1e-8).log()).sum(-1).mean()       # scalar
 
-        # H(Y): entropy of the mean class distribution (marginal) — maximising
-        # this encourages balanced usage of all three roles across patches.
+        # H(Y): entropy of the mean role distribution (marginal over positions) —
+        # maximising this prevents degenerate role collapse (all-ign, all-ctx, etc.).
         p_bar  = soft_3way.mean(dim=1)                                        # (B, 3)
         H_marg = -(p_bar * (p_bar + 1e-8).log()).sum(-1).mean()               # scalar
 
-        mi_rate = H_cond - H_marg                                             # scalar = −I(X;Y)
+        mi_rate = H_cond - H_marg                                             # scalar = −I(n;Y)
 
         # ------------------------------------------------------------------
         # Total objective
