@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=sbatch_logs/%x_%j.out
 #SBATCH --error=sbatch_logs/%x_%j.err
 
@@ -56,7 +56,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking/latent=goldilocks_fixed_k \
       masking.latent.global_z_score=true \
       data.root=$FAST/datasets/ \
-      train.epochs=5000 \
+      train.epochs=400 \
       train.save_every_epochs=50 \
       data.batch_size=1024 \
       logger.mode=offline

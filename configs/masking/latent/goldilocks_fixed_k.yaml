@@ -12,8 +12,8 @@
 #   2. Ablating ctx_embed init or other architectural changes
 name: goldilocks
 
-k_tgt_min: 94
-k_tgt_max: 94
+k_tgt_min: 36
+k_tgt_max: 36
 
 k_ctx_min: 43
 k_ctx_max: 43
