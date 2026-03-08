@@ -220,6 +220,17 @@ def build_callbacks(cfg):
         )
     )
 
+    # Opt-in inline eval (before WandbCallback so metrics are visible to wandb)
+    eval_every = int(getattr(cfg.train, "eval_every_epochs", 0))
+    if eval_every > 0:
+        from ijepa_lite.callbacks.eval_cb import InlineEvalCallback
+        cbs.append(InlineEvalCallback())
+
+    # Opt-in visualization (piggybacks on save_every cadence)
+    if bool(getattr(cfg.train, "viz_enabled", False)):
+        from ijepa_lite.callbacks.viz_cb import VizCallback
+        cbs.append(VizCallback())
+
     logger_cfg = getattr(cfg, "logger", None)
     logger_name = (
         str(getattr(logger_cfg, "name", "none")).lower() if logger_cfg else "none"

@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Dict
+
+from ijepa_lite.callbacks.base import Callback
+from ijepa_lite.utils.dist import is_rank0, unwrap_model
+
+
+class VizCallback(Callback):
+    """
+    Opt-in visualization of Goldilocks masker scoring at checkpoint cadence.
+
+    Activated when ``cfg.train.viz_enabled`` is True.  Runs at the same cadence
+    as ``save_every_epochs`` — whenever a checkpoint is saved, visualizations
+    are produced too.  Rank 0 only.
+
+    Only activates if the model has a ``latent_masker`` with a
+    ``target_soft``-returning interface (e.g. GoldilocksTeacherMasker).
+    """
+
+    def __init__(self) -> None:
+        self._enabled: bool = False
+        self._save_every: int = 1
+        self._dataset = None
+        self._cfg_viz: Any = None
+        self._image_size: int = 96
+        self._patch_size: int = 8
+
+    def on_run_start(self, cfg: Any, state: dict, model: Any) -> None:
+        self._enabled = bool(getattr(cfg.train, "viz_enabled", False))
+        if not self._enabled or not is_rank0():
+            self._enabled = False
+            return
+
+        # Check that model has a compatible latent masker
+        core = model
+        masker = getattr(core, "latent_masker", None)
+        if masker is None:
+            print("[VizCallback] No latent_masker found — disabling.")
+            self._enabled = False
+            return
+
+        self._save_every = int(
+            getattr(cfg.train, "save_every",
+                    getattr(cfg.train, "save_every_epochs", 1))
+        )
+        self._image_size = int(cfg.model.image_size)
+        self._patch_size = int(cfg.model.patch_size)
+        self._cfg_viz = getattr(cfg.train, "viz", None)
+
+        # Pre-load the dataset (raw, no transforms — viz handles its own)
+        vcfg = self._cfg_viz
+        data_root = str(getattr(vcfg, "data_root", "/scratch/datasets/"))
+        dataset_name = str(getattr(vcfg, "dataset", "stl10"))
+
+        try:
+            from torchvision import datasets as tv_datasets
+            if dataset_name == "stl10":
+                self._dataset = tv_datasets.STL10(data_root, split="test", download=False)
+            elif dataset_name == "food101":
+                self._dataset = tv_datasets.Food101(data_root, split="test", download=False)
+            else:
+                print(f"[VizCallback] Unknown dataset '{dataset_name}' — disabling.")
+                self._enabled = False
+                return
+        except Exception as e:
+            print(f"[VizCallback] Could not load dataset: {e} — disabling.")
+            self._enabled = False
+            return
+
+        print(f"[VizCallback] Enabled: piggybacks on save_every={self._save_every}, "
+              f"dataset={dataset_name}, n_images={int(getattr(vcfg, 'n_images', 100))}")
+
+    def on_epoch_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
+        if not self._enabled or not is_rank0():
+            return
+
+        epoch = int(state.get("epoch", 0))
+        if self._save_every <= 0:
+            return
+        if (epoch + 1) % self._save_every != 0:
+            return
+
+        self._run_viz(cfg, state, epoch)
+
+    def _run_viz(self, cfg: Any, state: dict, epoch: int) -> None:
+        import torch
+
+        from ijepa_lite.viz.goldilocks_viz import (
+            save_avg_score_heatmap,
+            save_class_score_heatmap,
+            visualize_split,
+        )
+
+        vcfg = self._cfg_viz
+        n_images = int(getattr(vcfg, "n_images", 100))
+        out_base = str(getattr(vcfg, "out_dir", "viz_output"))
+        grid_cols = int(getattr(vcfg, "grid_cols", 10))
+        k_tgt = getattr(vcfg, "k_tgt", None)
+        if k_tgt is not None:
+            k_tgt = int(k_tgt)
+
+        out_dir = Path(out_base) / f"epoch_{epoch:05d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        bundle = state.get("_ckpt_bundle")
+        if bundle is None:
+            return
+        model = bundle["model"]
+        core = unwrap_model(model)
+        encoder = core.target_encoder
+        masker = core.latent_masker
+
+        if masker is None:
+            return
+
+        device = next(encoder.parameters()).device
+        encoder.eval()
+        masker.eval()
+
+        dataset_name = str(getattr(vcfg, "dataset", "stl10"))
+
+        score_sums, cls_sums, cls_n = visualize_split(
+            dataset_name=dataset_name,
+            split="test",
+            dataset=self._dataset,
+            encoder=encoder,
+            masker=masker,
+            device=device,
+            out_dir=out_dir,
+            n=n_images,
+            grid_cols=grid_cols,
+            patch_size=self._patch_size,
+            image_size=self._image_size,
+            k_tgt=k_tgt,
+        )
+
+        class_names = []
+        if hasattr(self._dataset, "classes"):
+            class_names = list(self._dataset.classes)
+
+        save_avg_score_heatmap(
+            score_sums, n_images,
+            out_dir / f"{dataset_name}_avg_score.png",
+        )
+        if cls_sums:
+            save_class_score_heatmap(
+                score_sums, n_images,
+                cls_sums, cls_n,
+                class_names,
+                out_dir / f"{dataset_name}_per_class_score.png",
+            )
+
+        print(f"[VizCallback] epoch={epoch}  output -> {out_dir}/")

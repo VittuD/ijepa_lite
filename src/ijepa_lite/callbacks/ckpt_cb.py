@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -92,6 +93,11 @@ class CheckpointCallback(Callback):
             state=state_to_save,
             ema_start=ema_start,
         )
+
+        # Versioned copy: keep epoch-numbered snapshots alongside last.pt.
+        if bool(getattr(cfg.train, "keep_all_checkpoints", False)):
+            versioned_path = os.path.join(ckpt_dir, f"epoch_{epoch:05d}.pt")
+            shutil.copy2(path, versioned_path)
 
         # Signal to the training loop that we saved, so it can trigger
         # callbacks.on_checkpoint_saved (e.g., for W&B artifact logging).
