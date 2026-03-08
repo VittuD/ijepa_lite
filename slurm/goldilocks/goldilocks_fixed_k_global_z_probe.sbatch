@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-gldk-fixk-gz
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=20:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/%x_%j.out
 #SBATCH --error=sbatch_logs/%x_%j.err
 
@@ -56,7 +56,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking/latent=goldilocks_fixed_k \
       masking.latent.global_z_score=true \
       data.root=$FAST/datasets/ \
-      train.epochs=400 \
+      train.epochs=20 \
       train.save_every_epochs=50 \
-      data.batch_size=1024 \
+      data.batch_size=4096 \
       logger.mode=offline

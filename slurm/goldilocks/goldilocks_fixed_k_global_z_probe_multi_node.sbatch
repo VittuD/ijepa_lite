@@ -8,14 +8,14 @@
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=sbatch_logs/%x_%j.out
 #SBATCH --error=sbatch_logs/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # Multi-node (4 nodes, 16 GPUs) version of goldilocks_fixed_k_global_z_probe
 #
-# global_z_score fix probe — fixed k_tgt=94, k_ctx=[22,43], 5000 epochs
+# global_z_score fix probe — fixed k_tgt=36, k_ctx=43, 5000 epochs
 #
 # Run:
 #   sbatch slurm/goldilocks/goldilocks_fixed_k_global_z_probe_multi_node.sbatch
@@ -63,8 +63,9 @@ srun bash -c '
       masking/latent=goldilocks_fixed_k \
       masking.latent.global_z_score=true \
       data.root=$FAST/datasets/ \
-      train.epochs=5000 \
+      train.epochs=20 \
       train.save_every_epochs=50 \
-      data.batch_size=1024 \
+      train.log_every=10 \
+      data.batch_size=4096 \
       logger.mode=offline
 '

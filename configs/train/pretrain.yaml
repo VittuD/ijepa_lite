@@ -2,10 +2,10 @@ epochs: 100
 amp: true
 grad_clip_norm: 1.0
 log_every: 50
-save_every_epochs: 1
-eval_every_epochs: 0
-keep_all_checkpoints: false
-viz_enabled: false
+save_every_epochs: 100
+eval_every_epochs: 100
+keep_all_checkpoints: true
+viz_enabled: true
 
 inline_eval:
   dataset: stl10
@@ -13,7 +13,7 @@ inline_eval:
   train_split: train
   val_split: test
   num_classes: 10
-  batch_size: 256
+  batch_size: 2048
   num_workers: 4
   head_type: mlp
   head_hidden_dim: 384
