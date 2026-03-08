@@ -12,6 +12,21 @@ from ijepa_lite.callbacks.base import Callback
 from ijepa_lite.utils.dist import is_rank0, unwrap_model
 
 
+def _build_dataset_local(name: str, root: str, split: str, transform):
+    """Build a dataset directly — no barrier(), safe for rank-0-only use."""
+    from torchvision import datasets as tv_datasets
+
+    if name == "stl10":
+        return tv_datasets.STL10(root=root, split=split, download=False, transform=transform)
+    if name == "cifar10":
+        return tv_datasets.CIFAR10(root=root, train=(split == "train"), download=False, transform=transform)
+    if name == "cifar100":
+        return tv_datasets.CIFAR100(root=root, train=(split == "train"), download=False, transform=transform)
+    if name == "food101":
+        return tv_datasets.Food101(root=root, split=split, download=False, transform=transform)
+    raise ValueError(f"InlineEvalCallback: unsupported dataset '{name}'")
+
+
 class InlineEvalCallback(Callback):
     """
     Opt-in inline downstream evaluation during pretraining.
@@ -48,9 +63,9 @@ class InlineEvalCallback(Callback):
         self._cfg_inline = icfg
 
         # Build eval dataloaders once and reuse across epochs.
-        from omegaconf import OmegaConf
-
-        # Construct a minimal data-like config for build_dataset
+        # NOTE: we build datasets directly (not via build_dataset) because
+        # build_dataset calls barrier() for DDP coordination, but this callback
+        # only runs on rank 0 — using build_dataset would deadlock.
         data_root = str(getattr(icfg, "data_root", "/scratch/datasets/"))
         dataset_name = str(getattr(icfg, "dataset", "stl10"))
         train_split = str(getattr(icfg, "train_split", "train"))
@@ -64,16 +79,9 @@ class InlineEvalCallback(Callback):
         train_tfm, val_tfm = build_linear_probe_transforms(cfg)
 
         from ijepa_lite.data.collate import SupervisedCollate
-        from ijepa_lite.data.datasets import build_dataset
 
-        data_cfg = OmegaConf.create({
-            "name": dataset_name,
-            "root": data_root,
-            "download": True,
-        })
-
-        ds_train = build_dataset(data_cfg, split=train_split, transform=train_tfm)
-        ds_val = build_dataset(data_cfg, split=val_split, transform=val_tfm)
+        ds_train = _build_dataset_local(dataset_name, data_root, train_split, train_tfm)
+        ds_val = _build_dataset_local(dataset_name, data_root, val_split, val_tfm)
 
         collate = SupervisedCollate()
 
