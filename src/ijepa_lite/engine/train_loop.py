@@ -208,9 +208,11 @@ def train(
                         )
                     )
 
-                extra.update(
-                    {k: float(v) for k, v in out.get("mask_stats", {}).items()}
-                )
+                for k, v in out.get("mask_stats", {}).items():
+                    if str(k).startswith("_hist/"):
+                        extra[k] = v  # numpy array — passed through to WandbCallback
+                    else:
+                        extra[k] = float(v)
 
                 if gnorm is not None:
                     extra["train/grad_norm"] = gnorm
