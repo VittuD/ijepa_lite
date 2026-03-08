@@ -225,6 +225,7 @@ class IJEPAModel(nn.Module):
             num_patches=num_patches,
             masker_loss=masker_aux,
             full=compute_mask_metrics,
+            patch_loss=patch_loss,
         )
 
         # ------------------------------------------------------------------

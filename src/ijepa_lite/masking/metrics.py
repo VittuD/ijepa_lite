@@ -14,6 +14,7 @@ def mask_diagnostics(
     num_patches: int,
     masker_loss: Optional[torch.Tensor] = None,
     full: bool = False,
+    patch_loss: Optional[torch.Tensor] = None,
 ) -> dict[str, float]:
     """
     Compute diagnostic metrics from a MaskOutput.
@@ -166,6 +167,70 @@ def mask_diagnostics(
                 "batch_iou", "batch_iou_random"):
         if key in aux:
             stats[f"mask/{key}"] = float(aux[key])
+
+    # ------------------------------------------------------------------
+    # Goldilocks error distribution diagnostics
+    #
+    # patch_loss is (B, K) per-patch reconstruction error at target positions.
+    # These stats characterise the error landscape the masker trains on:
+    #   - mean, std: overall difficulty level and spread
+    #   - skewness: positive = long tail of hard patches; near 0 = symmetric
+    #   - kurtosis: heavy tails (> 0) vs. light tails (< 0) relative to Gaussian
+    #   - percentile bins: histogram of difficulty distribution
+    #   - score-error correlation: whether high-scoring patches are actually harder
+    #   - z-score stats: properties of the normalised signal the loss sees
+    # ------------------------------------------------------------------
+    if patch_loss is not None and "k_tgt" in aux:
+        pl = patch_loss.float()
+        if pl.dim() == 3:
+            pl = pl.mean(-1)  # (B, K)
+
+        flat = pl.reshape(-1)  # pool across batch for robust stats
+        n = flat.numel()
+
+        pl_mean = flat.mean()
+        pl_std = flat.std()
+        stats["goldilocks/error_mean"] = float(pl_mean.item())
+        stats["goldilocks/error_std"] = float(pl_std.item())
+
+        # Skewness and kurtosis (excess, Fisher definition)
+        if n > 2 and pl_std > 1e-12:
+            centered = flat - pl_mean
+            m3 = (centered.pow(3)).mean()
+            m4 = (centered.pow(4)).mean()
+            stats["goldilocks/error_skewness"] = float((m3 / pl_std.pow(3)).item())
+            stats["goldilocks/error_kurtosis"] = float((m4 / pl_std.pow(4) - 3.0).item())
+
+        # Percentile bins (10th, 25th, 50th, 75th, 90th)
+        for pct in (10, 25, 50, 75, 90):
+            q = torch.quantile(flat, pct / 100.0)
+            stats[f"goldilocks/error_p{pct}"] = float(q.item())
+
+        # IQR and coefficient of variation
+        q25 = torch.quantile(flat, 0.25)
+        q75 = torch.quantile(flat, 0.75)
+        stats["goldilocks/error_iqr"] = float((q75 - q25).item())
+        if pl_mean.abs() > 1e-12:
+            stats["goldilocks/error_cv"] = float((pl_std / pl_mean.abs()).item())
+
+        # Z-scored error stats (what the Goldilocks loss actually sees)
+        # Per-sample z-score to match the local z-score branch
+        mu_s = pl.mean(dim=1, keepdim=True)
+        sigma_s = pl.std(dim=1, keepdim=True).clamp(min=1e-6)
+        z = (pl - mu_s) / sigma_s  # (B, K)
+        stats["goldilocks/z_std_mean"] = float(sigma_s.mean().item())
+        stats["goldilocks/z_range"] = float((z.max() - z.min()).item())
+        # Fraction of patches near zero z-score (|z| < 0.5) — the "Goldilocks zone"
+        stats["goldilocks/z_goldilocks_frac"] = float((z.abs() < 0.5).float().mean().item())
+
+        # Score-error correlation (do high-scoring patches have higher error?)
+        if p_tgt is not None:
+            scores_at_tgt = p_tgt.gather(1, mask_output.target_idx)  # (B, K)
+            sf = scores_at_tgt.float().reshape(-1)
+            if sf.std() > 1e-12 and flat.std() > 1e-12:
+                cov = ((sf - sf.mean()) * (flat - flat.mean())).mean()
+                corr = cov / (sf.std() * flat.std())
+                stats["goldilocks/score_error_corr"] = float(corr.item())
 
     if not full:
         return stats
