@@ -17,8 +17,40 @@ from ijepa_lite.utils.dist import (
 from ijepa_lite.utils.meters import AverageMeter
 
 
+def _build_head(embed_dim: int, num_classes: int, cfg_head) -> nn.Module:
+    """Build a linear or MLP probe head from config.
+
+    cfg_head fields (all optional):
+        type:       "linear" | "mlp"   (default: "linear")
+        hidden_dim: int                (default: embed_dim, only for mlp)
+        num_layers: int                (default: 1, only for mlp — number of hidden layers)
+    """
+    head_type = str(getattr(cfg_head, "type", "linear")).lower() if cfg_head else "linear"
+
+    if head_type == "linear":
+        return nn.Linear(embed_dim, num_classes)
+
+    if head_type == "mlp":
+        hidden_dim = int(getattr(cfg_head, "hidden_dim", embed_dim))
+        num_layers = int(getattr(cfg_head, "num_layers", 1))
+
+        layers: list[nn.Module] = []
+        in_dim = embed_dim
+        for _ in range(num_layers):
+            layers.extend([
+                nn.Linear(in_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(inplace=True),
+            ])
+            in_dim = hidden_dim
+        layers.append(nn.Linear(in_dim, num_classes))
+        return nn.Sequential(*layers)
+
+    raise ValueError(f"Unknown head type='{head_type}'. Supported: 'linear', 'mlp'.")
+
+
 class LinearProbeModel(nn.Module):
-    """Frozen encoder + trainable linear head."""
+    """Frozen encoder + trainable linear/MLP head."""
 
     def __init__(self, encoder: nn.Module, head: nn.Module, pool: str = "mean"):
         super().__init__()
@@ -99,7 +131,11 @@ def linear_probe_eval(
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    head = nn.Linear(int(cfg.model.embed_dim), int(num_classes)).to(device)
+    head = _build_head(
+        int(cfg.model.embed_dim),
+        int(num_classes),
+        getattr(cfg.task, "head", None),
+    ).to(device)
     model = LinearProbeModel(
         encoder=encoder,
         head=head,
