@@ -201,17 +201,13 @@ def mask_diagnostics(
             stats["goldilocks/error_skewness"] = float((m3 / pl_std.pow(3)).item())
             stats["goldilocks/error_kurtosis"] = float((m4 / pl_std.pow(4) - 3.0).item())
 
-        # Percentile bins (10th, 25th, 50th, 75th, 90th)
-        for pct in (10, 25, 50, 75, 90):
-            q = torch.quantile(flat, pct / 100.0)
-            stats[f"goldilocks/error_p{pct}"] = float(q.item())
-
-        # IQR and coefficient of variation
-        q25 = torch.quantile(flat, 0.25)
-        q75 = torch.quantile(flat, 0.75)
-        stats["goldilocks/error_iqr"] = float((q75 - q25).item())
-        if pl_mean.abs() > 1e-12:
-            stats["goldilocks/error_cv"] = float((pl_std / pl_mean.abs()).item())
+        # Raw error values for histogram (wandb.Histogram in WandbCallback).
+        # Cap at 4096 samples to keep serialization light.
+        if n > 4096:
+            idx = torch.randperm(n, device=flat.device)[:4096]
+            stats["_hist/goldilocks/error"] = flat[idx].cpu().numpy()
+        else:
+            stats["_hist/goldilocks/error"] = flat.cpu().numpy()
 
         # Z-scored error stats (what the Goldilocks loss actually sees)
         # Per-sample z-score to match the local z-score branch
@@ -222,6 +218,14 @@ def mask_diagnostics(
         stats["goldilocks/z_range"] = float((z.max() - z.min()).item())
         # Fraction of patches near zero z-score (|z| < 0.5) — the "Goldilocks zone"
         stats["goldilocks/z_goldilocks_frac"] = float((z.abs() < 0.5).float().mean().item())
+
+        # Z-score histogram
+        z_flat = z.reshape(-1)
+        if z_flat.numel() > 4096:
+            idx = torch.randperm(z_flat.numel(), device=z_flat.device)[:4096]
+            stats["_hist/goldilocks/z_score"] = z_flat[idx].cpu().numpy()
+        else:
+            stats["_hist/goldilocks/z_score"] = z_flat.cpu().numpy()
 
         # Score-error correlation (do high-scoring patches have higher error?)
         if p_tgt is not None:

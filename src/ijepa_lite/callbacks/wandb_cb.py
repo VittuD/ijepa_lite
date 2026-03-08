@@ -41,15 +41,27 @@ class WandbCallback(Callback):
             config=full_cfg,
         )
 
+    @staticmethod
+    def _convert_histograms(metrics: dict) -> dict:
+        """Convert ``_hist/`` keys (numpy arrays) to ``wandb.Histogram``."""
+        out = {}
+        for k, v in metrics.items():
+            if str(k).startswith("_hist/"):
+                clean_key = k[len("_hist/"):]
+                out[clean_key] = wandb.Histogram(v)
+            else:
+                out[k] = v
+        return out
+
     def on_step_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
         if self.run is None or not is_rank0():
             return
-        wandb.log(metrics, step=int(state["global_step"]))
+        wandb.log(self._convert_histograms(metrics), step=int(state["global_step"]))
 
     def on_epoch_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
         if self.run is None or not is_rank0():
             return
-        wandb.log(metrics, step=int(state["global_step"]))
+        wandb.log(self._convert_histograms(metrics), step=int(state["global_step"]))
 
     def on_checkpoint_saved(self, cfg: Any, state: dict, path: str) -> None:
         if self.run is None or not is_rank0():

@@ -33,11 +33,13 @@ class ProgressCallback(Callback):
             return
         step = int(state["global_step"])
         if step % int(self.log_every) == 0:
-            msg = " ".join([f"{k}={_fmt(v)}" for k, v in metrics.items()])
+            msg = " ".join([f"{k}={_fmt(v)}" for k, v in metrics.items()
+                           if not str(k).startswith("_hist/")])
             print(f"[step {step}] {msg}")
 
     def on_epoch_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
         if not is_rank0():
             return
-        msg = " ".join([f"{k}={_fmt(v)}" for k, v in metrics.items()])
+        msg = " ".join([f"{k}={_fmt(v)}" for k, v in metrics.items()
+                       if not str(k).startswith("_hist/")])
         print(f"[epoch {state['epoch']}] {msg}")
