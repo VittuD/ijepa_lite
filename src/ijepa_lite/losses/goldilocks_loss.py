@@ -51,11 +51,13 @@ class GoldilocksLoss(nn.Module):
         z_score_eps: float = 1e-6,
         global_z_score: bool = False,
         running_momentum: float = 0.99,
+        log_transform: bool = False,
     ) -> None:
         super().__init__()
         self.z_score_eps = float(z_score_eps)
         self.global_z_score = bool(global_z_score)
         self.running_momentum = float(running_momentum)
+        self.log_transform = bool(log_transform)
 
         if not self.global_z_score:
             warnings.warn(
@@ -78,6 +80,9 @@ class GoldilocksLoss(nn.Module):
     ) -> torch.Tensor:             # scalar
         if patch_loss.dim() == 3:
             patch_loss = patch_loss.mean(-1)          # (B, K)
+
+        if self.log_transform:
+            patch_loss = torch.log(patch_loss.clamp(min=1e-8))
 
         # Soft masker scores at hard-selected positions
         q_i = p_tgt.gather(1, tgt_idx)               # (B, K)

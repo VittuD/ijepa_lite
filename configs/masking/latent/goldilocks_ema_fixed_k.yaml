@@ -21,3 +21,5 @@ ema_signal: true
 # fixed point (sigma->0 -> all targets->1 -> positional collapse ~halfway through
 # training). Set to true to z-score against the running training distribution.
 global_z_score: false
+
+log_transform: false

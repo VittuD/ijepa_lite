@@ -209,6 +209,14 @@ def mask_diagnostics(
         else:
             stats["_hist/goldilocks/error"] = flat.cpu().numpy()
 
+        # Log-transformed error histogram (always computed for comparison)
+        log_err = torch.log(flat.clamp(min=1e-8))
+        if n > 4096:
+            idx_log = torch.randperm(n, device=flat.device)[:4096]
+            stats["_hist/goldilocks/log_error"] = log_err[idx_log].cpu().numpy()
+        else:
+            stats["_hist/goldilocks/log_error"] = log_err.cpu().numpy()
+
         # Z-scored error stats (what the Goldilocks loss actually sees)
         # Per-sample z-score to match the local z-score branch
         mu_s = pl.mean(dim=1, keepdim=True)
