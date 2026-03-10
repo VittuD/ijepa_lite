@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-gldk-fixk-gz-4n
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --job-name=ijepa-gldk-fixk-gz-4n-92tgt-logt
+#SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=4
@@ -9,8 +9,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=20:00:00
-#SBATCH --output=sbatch_logs/%x_%j.out
-#SBATCH --error=sbatch_logs/%x_%j.err
+#SBATCH --output=sbatch_logs/gz_4n/%x_%j.out
+#SBATCH --error=sbatch_logs/gz_4n/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # Multi-node (4 nodes, 16 GPUs) version of goldilocks_fixed_k_global_z_probe
@@ -49,7 +49,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-mkdir -p sbatch_logs
+mkdir -p sbatch_logs/gz_4n
 
 srun bash -c '
   torchrun \
@@ -63,7 +63,7 @@ srun bash -c '
       masking/latent=goldilocks_fixed_k \
       masking.latent.global_z_score=true \
       data.root=$FAST/datasets/ \
-      train.epochs=20 \
+      train.epochs=5000 \
       train.save_every_epochs=50 \
       train.log_every=10 \
       data.batch_size=4096 \
