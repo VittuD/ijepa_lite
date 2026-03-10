@@ -28,3 +28,4 @@ ema_signal: true
 global_z_score: false
 
 log_transform: false
+correlation_loss: false

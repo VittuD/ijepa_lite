@@ -176,6 +176,7 @@ class GoldilocksTeacherMasker(LatentMasker):
         global_z_score: bool = False,
         running_momentum: float = 0.99,
         log_transform: bool = False,
+        correlation_loss: bool = False,
         # Unused kwargs forwarded by build.py — kept for compatibility
         base_kind: str = "smooth_l1",
         normalize: bool = False,
@@ -225,6 +226,7 @@ class GoldilocksTeacherMasker(LatentMasker):
             global_z_score=global_z_score,
             running_momentum=running_momentum,
             log_transform=log_transform,
+            correlation_loss=correlation_loss,
         )
 
         # ----------------------------------------------------------------

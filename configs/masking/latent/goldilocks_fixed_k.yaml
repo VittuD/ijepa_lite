@@ -27,3 +27,4 @@ z_score_eps: 1e-6
 global_z_score: false
 
 log_transform: false
+correlation_loss: false

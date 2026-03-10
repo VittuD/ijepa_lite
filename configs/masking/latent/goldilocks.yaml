@@ -25,3 +25,8 @@ global_z_score: false
 # Raw errors are heavily right-skewed (skew~5); log reduces to ~0.6,
 # making the Gaussian target penalise both tails meaningfully.
 log_transform: false
+
+# Use Pearson correlation instead of MSE for the Goldilocks loss.
+# Invariant to score mean/scale — prevents score suppression when
+# log_transform=true makes the target mean drop below typical sigmoid output.
+correlation_loss: false

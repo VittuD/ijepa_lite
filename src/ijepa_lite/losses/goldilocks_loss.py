@@ -14,6 +14,7 @@ import warnings
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class GoldilocksLoss(nn.Module):
@@ -52,12 +53,14 @@ class GoldilocksLoss(nn.Module):
         global_z_score: bool = False,
         running_momentum: float = 0.99,
         log_transform: bool = False,
+        correlation_loss: bool = False,
     ) -> None:
         super().__init__()
         self.z_score_eps = float(z_score_eps)
         self.global_z_score = bool(global_z_score)
         self.running_momentum = float(running_momentum)
         self.log_transform = bool(log_transform)
+        self.correlation_loss = bool(correlation_loss)
 
         if not self.global_z_score:
             warnings.warn(
@@ -106,5 +109,14 @@ class GoldilocksLoss(nn.Module):
 
         # Gaussian Goldilocks target: 1 at z=0 (median), 0 at tails
         target_i = torch.exp(-0.5 * e_hat.pow(2))    # (B, K) ∈ (0, 1]
+
+        if self.correlation_loss:
+            # Correlation loss: maximize Pearson correlation between scores
+            # and targets. Invariant to mean/scale — only the ranking matters.
+            # Avoids the score-suppression fixed point that MSE hits when
+            # t̄ < q̄_sel (systematic with symmetric z-scores / log_transform).
+            q_c = q_i - q_i.mean(dim=1, keepdim=True)
+            t_c = target_i - target_i.mean(dim=1, keepdim=True)
+            return -F.cosine_similarity(q_c, t_c, dim=1).mean()
 
         return (q_i - target_i).pow(2).mean()
