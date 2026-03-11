@@ -15,6 +15,8 @@
 # ---------------------------------------------------------------------------
 # Marginal H(Y|X) ablation — does the conditional entropy term matter?
 #
+# All term weights are fixed (no LogUniform sampling). Floor penalty disabled.
+#
 # Array layout:
 #   idx   H_cond   neg_H_marg   neg_surprise   pos_embed   exp_name
 #    0    ON       ON           ON             learned     mi_HcondHmargBS_learned
@@ -22,8 +24,7 @@
 #    2    ON       ON           ON             sincos      mi_HcondHmargBS_sincos
 #    3    OFF      ON           ON             sincos      mi_HmargBS_sincos
 #
-# All runs keep floor_penalty=[5,5] and h_floor=0.1.
-# ignore_tax, context_rate, target_rate remain disabled [0,0].
+# floor_penalty, ignore_tax, context_rate, target_rate all disabled [0,0].
 #
 # Run:
 #   sbatch slurm/mi_marginal_ablation/mi_marginal_ablation.sbatch
@@ -51,8 +52,8 @@ nvidia-smi -L
 
 # ---- Per-task configuration ----
 
-# H_cond weight: ON = [0.01,1.0], OFF = [0,0]
-H_COND_WEIGHTS=("[0.01,1.0]" "[0,0]" "[0.01,1.0]" "[0,0]")
+# H_cond weight: ON = [1.0,1.0] (fixed), OFF = [0,0]
+H_COND_WEIGHTS=("[1.0,1.0]" "[0,0]" "[1.0,1.0]" "[0,0]")
 POS_EMBED_KINDS=(learned learned sincos sincos)
 EXP_NAMES=(mi_HcondHmargBS_learned mi_HmargBS_learned mi_HcondHmargBS_sincos mi_HmargBS_sincos)
 
@@ -71,6 +72,9 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       experiment=stl10_vits_ps8_mi \
       exp_name="$EXP_NAME" \
       masking.latent.terms.H_cond.weight="$H_COND" \
+      masking.latent.terms.neg_H_marg.weight='[1.0,1.0]' \
+      masking.latent.terms.neg_surprise.weight='[0.5,0.5]' \
+      masking.latent.terms.floor_penalty.weight='[0,0]' \
       model.pos_embed_kind="$POS_EMBED" \
       data.root=$FAST/datasets/ \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
