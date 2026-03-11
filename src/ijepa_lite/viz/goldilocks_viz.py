@@ -106,25 +106,33 @@ def apply_soft_3way_overlay(
     p_tgt_map: np.ndarray,
     p_ign_map: np.ndarray,
     patch_size: int,
-    alpha: float = ALPHA_SCORE,
+    alpha_max: float = ALPHA_SCORE,
 ) -> np.ndarray:
-    """Soft 3-way overlay: blend ctx=blue, tgt=red, ign=grey by soft probs."""
+    """Soft 3-way overlay: winner's color at intensity proportional to its prob.
+
+    Each patch is colored by the most probable role (ctx=blue, tgt=red, ign=grey).
+    The blend alpha scales with the winning probability: 100% tgt = fully red,
+    34% ctx = faintly blue (near the desaturated original).
+    """
     grey = np.dot(orig_np.astype(float), [0.299, 0.587, 0.114])
     grey3 = np.stack([grey, grey, grey], axis=-1)
     out = grey3.copy()
-    ctx_col = np.array(CTX_RGB, dtype=float)
-    tgt_col = np.array(TGT_RGB, dtype=float)
-    ign_col = np.array(GREY, dtype=float)
+    colors = [np.array(CTX_RGB, dtype=float),
+              np.array(TGT_RGB, dtype=float),
+              np.array(GREY, dtype=float)]
     gh, gw = p_ctx_map.shape
     for i in range(gh):
         for j in range(gw):
-            col = (float(p_ctx_map[i, j]) * ctx_col
-                   + float(p_tgt_map[i, j]) * tgt_col
-                   + float(p_ign_map[i, j]) * ign_col)
+            probs = [float(p_ctx_map[i, j]),
+                     float(p_tgt_map[i, j]),
+                     float(p_ign_map[i, j])]
+            winner = int(np.argmax(probs))
+            col = colors[winner]
+            intensity = probs[winner] * alpha_max
             y0, y1 = i * patch_size, (i + 1) * patch_size
             x0, x1 = j * patch_size, (j + 1) * patch_size
             patch = grey3[y0:y1, x0:x1]
-            out[y0:y1, x0:x1] = ((1 - alpha) * patch + alpha * col).clip(0, 255)
+            out[y0:y1, x0:x1] = ((1 - intensity) * patch + intensity * col).clip(0, 255)
     return out.astype(np.uint8)
 
 
@@ -306,15 +314,18 @@ def save_avg_3way_heatmap(
                 draw.rectangle([x0, y0, x0 + patch_px - 1, y0 + patch_px - 1],
                                fill=col, outline=(40, 40, 40))
 
-    # Blended panel: ctx=blue, tgt=red, ign=grey weighted by mean probs
+    # Winner panel: color of most probable role, intensity = winning prob
+    colors = [ctx_col, tgt_col, ign_col]
+    bg = np.array((20, 20, 20), dtype=float)
     x_off = 3 * (cell_w + gap)
-    draw.text((x_off + 4, 4), "blended (ctx/tgt/ign)", fill=(200, 200, 200), font=font)
+    draw.text((x_off + 4, 4), "winner (ctx/tgt/ign)", fill=(200, 200, 200), font=font)
     for i in range(gh):
         for j in range(gw):
-            col = (means["ctx"][i, j] * ctx_col
-                   + means["tgt"][i, j] * tgt_col
-                   + means["ign"][i, j] * ign_col)
-            col = tuple(int(c) for c in np.clip(col, 0, 255))
+            probs = [means["ctx"][i, j], means["tgt"][i, j], means["ign"][i, j]]
+            winner = int(np.argmax(probs))
+            intensity = probs[winner]
+            col = tuple(int(c) for c in np.clip(
+                (1 - intensity) * bg + intensity * colors[winner], 0, 255))
             x0 = x_off + j * patch_px
             y0 = label_h + i * patch_px
             draw.rectangle([x0, y0, x0 + patch_px - 1, y0 + patch_px - 1],
@@ -345,6 +356,8 @@ def save_class_3way_heatmap(
     ctx_col = np.array(CTX_RGB, dtype=float)
     tgt_col = np.array(TGT_RGB, dtype=float)
     ign_col = np.array(GREY, dtype=float)
+    colors = [ctx_col, tgt_col, ign_col]
+    bg = np.array((20, 20, 20), dtype=float)
 
     sorted_cls = sorted(class_sums.keys())
 
@@ -398,8 +411,11 @@ def save_class_3way_heatmap(
 
         for i in range(gh):
             for j in range(gw):
-                col = mc[i, j] * ctx_col + mt[i, j] * tgt_col + mi[i, j] * ign_col
-                col = tuple(int(c) for c in np.clip(col, 0, 255))
+                probs = [mc[i, j], mt[i, j], mi[i, j]]
+                winner = int(np.argmax(probs))
+                intensity = probs[winner]
+                col = tuple(int(c) for c in np.clip(
+                    (1 - intensity) * bg + intensity * colors[winner], 0, 255))
                 x0 = label_w + j * patch_px
                 y1 = y0 + i * patch_px
                 draw.rectangle([x0, y1, x0 + patch_px - 1, y1 + patch_px - 1],
