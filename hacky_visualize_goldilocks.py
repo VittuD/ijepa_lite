@@ -1,38 +1,29 @@
 #!/usr/bin/env python3
 """
-hacky_visualize_goldilocks.py  (v2)
+hacky_visualize_masker.py
 
-Visualizes the GoldilocksTeacherMasker's scoring and ctx/tgt patch assignments.
+Visualizes any LatentMasker's scoring and ctx/tgt patch assignments by
+loading a checkpoint through the standard build pipeline.
 
 Panels per image (left to right):
-  [original | soft score heatmap | hard assignment (ctx=blue, tgt=red, ignored=grey)]
+  [original | middle panel | hard assignment (ctx=blue, tgt=red, ignored=grey)]
 
-The soft score heatmap is the primary diagnostic: it shows the raw p_tgt scores
-(cold=low, hot=high) overlaid on a desaturated image. With high K/N (e.g. K=94/N=144
-≈ 65%), the hard assignment is near-trivial, so the score heatmap carries the signal.
+Middle panel depends on masker type:
+  - 2-way (Goldilocks): cold->hot heatmap of p_tgt
+  - 3-way (MI):         soft 3-way overlay (ctx=blue, tgt=red, ign=grey)
 
 Aggregate outputs:
-  <out_dir>/<dataset>_avg_score.png          — mean p_tgt per position across all images
-  <out_dir>/<dataset>_per_class_score.png    — mean p_tgt per position per class
+  2-way: <out_dir>/<dataset>_avg_score.png, <dataset>_per_class_score.png
+  3-way: <out_dir>/<dataset>_avg_3way.png,  <dataset>_per_class_3way.png
 
-Numeric output (stdout):
-  marginal_score_std  — near 0 = uniform marginal = no positional bias
-  p_tgt_score_std     — high = scores vary more across images = content-adaptive
-  inter-class score std — > 0.05 = different classes scored differently
-
-Usage (single checkpoint — encoder and masker from same file):
+Usage:
   python hacky_visualize_goldilocks.py \\
       --ckpt /path/to/last.pt \\
-      [--data-root /path/to/datasets] [--out-dir goldilocks_viz] [--n 500]
+      --experiment stl10_vits_ps8_mi \\
+      [--data-root /path/to/datasets] [--out-dir masker_viz] [--n 500]
 
-  Override eval k_tgt (e.g. to avoid 17-tgt display from variable-k checkpoint):
+  Override eval k_tgt (Goldilocks only):
       --k-tgt 94
-
-Usage (split checkpoints):
-  python hacky_visualize_goldilocks.py \\
-      --encoder-ckpt /path/to/encoder.pt \\
-      --masker-ckpt  /path/to/masker.pt \\
-      [--data-root /path/to/datasets] [--out-dir goldilocks_viz_split]
 """
 import argparse
 import os
@@ -40,160 +31,54 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
 from torchvision import datasets as tv_datasets
-from torchvision import transforms
-from torchvision.models.vision_transformer import VisionTransformer
 
-import ijepa_lite.masking.goldilocks_masker  # noqa: F401 — populates registry
-from ijepa_lite.masking.goldilocks_masker import GoldilocksTeacherMasker
-from ijepa_lite.models.vit_tokens import ViTTokens, _remove_classifier_head
-
-# ---------------------------------------------------------------------------
-# Architecture constants — stl10_vits_ps8_goldilocks experiment
-# ---------------------------------------------------------------------------
-IMG_SIZE   = 96
-PATCH_SIZE = 8
-EMBED_DIM  = 384
-DEPTH      = 12
-NUM_HEADS  = 6
-PRED_DIM   = 192
-PRED_DEPTH = 2
-PRED_HEADS = 6
-
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD  = (0.229, 0.224, 0.225)
-
-GRID_COLS    = 25
-BATCH_SIZE   = 32
-ALPHA_SCORE  = 0.70   # blend weight for score heatmap overlay
-ALPHA_ASSIGN = 0.55   # blend weight for hard assignment overlay
-
-CTX_RGB = (70,  130, 180)   # steel blue
-TGT_RGB = (220,  60,  60)   # red
-GREY    = (128, 128, 128)
-
-
-# ---------------------------------------------------------------------------
-# Rendering utilities — imported from the reusable viz module
-# ---------------------------------------------------------------------------
 from ijepa_lite.viz.goldilocks_viz import (
-    apply_assignment_overlay as _apply_assignment_overlay,
-    apply_score_heatmap as _apply_score_heatmap,
-    make_cell as _make_cell,
-    save_avg_score_heatmap as _save_avg_score_heatmap_impl,
-    save_class_score_heatmap as _save_class_score_heatmap_impl,
-    score_color as _score_color,
+    save_avg_3way_heatmap,
+    save_avg_score_heatmap,
+    save_class_3way_heatmap,
+    save_class_score_heatmap,
+    visualize_split,
 )
 
+GRID_COLS = 25
+
 
 # ---------------------------------------------------------------------------
-# Model builders
+# Model loading via build pipeline
 # ---------------------------------------------------------------------------
 
-def _build_encoder(sd_full: dict, device: torch.device) -> ViTTokens:
-    vit = VisionTransformer(
-        image_size=IMG_SIZE,
-        patch_size=PATCH_SIZE,
-        num_layers=DEPTH,
-        num_heads=NUM_HEADS,
-        hidden_dim=EMBED_DIM,
-        mlp_dim=EMBED_DIM * 4,
-        num_classes=1000,
-    )
-    _remove_classifier_head(vit)
-    enc = ViTTokens(vit)
-    prefix = "target_encoder."
-    enc_sd = {k[len(prefix):]: v for k, v in sd_full.items() if k.startswith(prefix)}
-    missing, _ = enc.load_state_dict(enc_sd, strict=False)
+def _load_model(ckpt_path: str, experiment: str, device: torch.device):
+    """Load encoder + masker from checkpoint using the Hydra config pipeline."""
+    from omegaconf import OmegaConf
+    from hydra import compose, initialize_config_dir
+
+    # Resolve config dir
+    config_dir = str(Path(__file__).resolve().parent / "configs")
+
+    with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
+        cfg = compose(config_name="config", overrides=[f"experiment={experiment}"])
+
+    from ijepa_lite.build import build_pretrain_model
+
+    model = build_pretrain_model(cfg).to(device)
+
+    sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    sd = sd.get("model", sd)
+    missing, unexpected = model.load_state_dict(sd, strict=False)
     if missing:
-        print(f"  [encoder] missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
-    enc.requires_grad_(False)
-    return enc.to(device).eval()
+        print(f"  [model] missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
 
+    model.requires_grad_(False)
+    model.eval()
 
-def _build_masker(sd_full: dict, device: torch.device) -> GoldilocksTeacherMasker:
-    num_patches = (IMG_SIZE // PATCH_SIZE) ** 2
-    masker = GoldilocksTeacherMasker(
-        dim=EMBED_DIM,
-        predictor_dim=PRED_DIM,
-        depth=PRED_DEPTH,
-        num_heads=PRED_HEADS,
-        mlp_ratio=4.0,
-        dropout=0.0,
-        num_patches=num_patches,
-    )
-    prefix = "latent_masker."
-    m_sd = {k[len(prefix):]: v for k, v in sd_full.items() if k.startswith(prefix)}
-    missing, unexpected = masker.load_state_dict(m_sd, strict=False)
-    if missing:
-        print(f"  [masker] missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
-    masker.requires_grad_(False)
-    return masker.to(device).eval()
+    encoder = model.target_encoder
+    masker = model.latent_masker
 
+    image_size = int(cfg.model.image_size)
+    patch_size = int(cfg.model.patch_size)
 
-# ---------------------------------------------------------------------------
-# Wrappers delegating to ijepa_lite.viz.goldilocks_viz
-# ---------------------------------------------------------------------------
-from ijepa_lite.viz.goldilocks_viz import visualize_split as _visualize_split_impl
-
-
-_to_tensor_norm = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-])
-_resize_crop = transforms.Compose([
-    transforms.Resize(IMG_SIZE),
-    transforms.CenterCrop(IMG_SIZE),
-])
-
-
-def _pil_to_display_and_tensor(img_raw):
-    if isinstance(img_raw, np.ndarray):
-        if img_raw.ndim == 3 and img_raw.shape[0] == 3:
-            img_raw = np.transpose(img_raw, (1, 2, 0))
-        pil = Image.fromarray(img_raw.astype(np.uint8))
-    else:
-        pil = img_raw
-    pil_rgb  = pil.convert("RGB")
-    pil_crop = _resize_crop(pil_rgb)
-    display  = np.array(pil_crop, dtype=np.uint8)
-    tensor   = _to_tensor_norm(pil_crop)
-    return display, tensor
-
-
-def _save_avg_score_heatmap(score_sums, n_images, out_path, patch_px=40):
-    return _save_avg_score_heatmap_impl(score_sums, n_images, out_path, patch_px)
-
-
-def _save_class_score_heatmap(overall_sums, overall_n, class_sums, class_n,
-                               class_names, out_path, patch_px=32,
-                               label_w=140, row_gap=6):
-    return _save_class_score_heatmap_impl(
-        overall_sums, overall_n, class_sums, class_n, class_names,
-        out_path, patch_px, label_w, row_gap,
-    )
-
-
-@torch.no_grad()
-def visualize_split(
-    dataset_name, split, dataset, encoder, masker, device, out_dir, n, grid_cols,
-):
-    """Delegate to the reusable module, filling in script-level constants."""
-    return _visualize_split_impl(
-        dataset_name=dataset_name,
-        split=split,
-        dataset=dataset,
-        encoder=encoder,
-        masker=masker,
-        device=device,
-        out_dir=out_dir,
-        n=n,
-        grid_cols=grid_cols,
-        patch_size=PATCH_SIZE,
-        image_size=IMG_SIZE,
-        batch_size=BATCH_SIZE,
-    )
+    return encoder, masker, image_size, patch_size
 
 
 # ---------------------------------------------------------------------------
@@ -201,52 +86,44 @@ def visualize_split(
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt",         default=os.environ.get("PRETRAIN_CKPT", ""))
-    parser.add_argument("--encoder-ckpt", default=None)
-    parser.add_argument("--masker-ckpt",  default=os.environ.get("MASKER_CKPT", None))
+    parser = argparse.ArgumentParser(
+        description="Visualize any LatentMasker checkpoint."
+    )
+    parser.add_argument("--ckpt", default=os.environ.get("PRETRAIN_CKPT", ""),
+                        help="Path to checkpoint file")
+    parser.add_argument("--experiment", required=True,
+                        help="Hydra experiment config name (e.g. stl10_vits_ps8_mi)")
     parser.add_argument("--data-root", default=os.environ.get("FAST", "/scratch") + "/datasets/")
-    parser.add_argument("--out-dir",   default="goldilocks_viz")
-    parser.add_argument("--n",         type=int, default=500)
+    parser.add_argument("--out-dir", default="masker_viz")
+    parser.add_argument("--n", type=int, default=500)
     parser.add_argument("--grid-cols", type=int, default=GRID_COLS)
-    parser.add_argument("--device",    default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--k-tgt",     type=int, default=None,
-                        help="Override masker k_tgt_eval (e.g. 94 for fixed-k checkpoints). "
-                             "Default: use masker's own k_tgt_eval.")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--k-tgt", type=int, default=None,
+                        help="Override masker k_tgt_eval (Goldilocks only).")
     args = parser.parse_args()
 
-    encoder_ckpt = args.encoder_ckpt or args.ckpt
-    masker_ckpt  = args.masker_ckpt  or args.ckpt
-
-    if not encoder_ckpt:
-        raise SystemExit("Provide --ckpt, --encoder-ckpt, or set PRETRAIN_CKPT env")
+    if not args.ckpt:
+        raise SystemExit("Provide --ckpt or set PRETRAIN_CKPT env")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    device  = torch.device(args.device)
+    device = torch.device(args.device)
 
-    print(f"Loading encoder from : {encoder_ckpt}")
-    sd_enc = torch.load(encoder_ckpt, map_location="cpu", weights_only=True)
-    sd_enc = sd_enc.get("model", sd_enc)
+    print(f"Loading checkpoint: {args.ckpt}")
+    print(f"Experiment config:  {args.experiment}")
+    encoder, masker, image_size, patch_size = _load_model(
+        args.ckpt, args.experiment, device,
+    )
 
-    if masker_ckpt == encoder_ckpt:
-        sd_msk = sd_enc
-    else:
-        print(f"Loading masker from  : {masker_ckpt}")
-        sd_msk = torch.load(masker_ckpt, map_location="cpu", weights_only=True)
-        sd_msk = sd_msk.get("model", sd_msk)
+    if masker is None:
+        raise SystemExit("No latent_masker found in the model — nothing to visualize.")
 
-    print("Building encoder and masker ...")
-    encoder = _build_encoder(sd_enc, device)
-    masker  = _build_masker(sd_msk, device)
-
-    if args.k_tgt is not None:
-        print(f"  Overriding k_tgt_eval: {masker.k_tgt_eval} → {args.k_tgt}")
+    if args.k_tgt is not None and hasattr(masker, "k_tgt_eval"):
+        print(f"  Overriding k_tgt_eval: {masker.k_tgt_eval} -> {args.k_tgt}")
         masker.k_tgt_eval = args.k_tgt
 
-    print(f"  k_tgt_eval={masker.k_tgt_eval}  k_ctx_eval={masker.k_ctx_eval}  "
-          f"K/N={masker.k_tgt_eval}/{masker.num_patches}={masker.k_tgt_eval/masker.num_patches:.2f}  "
-          f"device={device}")
+    print(f"  image_size={image_size}  patch_size={patch_size}  "
+          f"num_patches={(image_size // patch_size) ** 2}  device={device}")
 
     datasets_cfg = [
         ("stl10", [
@@ -260,12 +137,19 @@ def main():
     ]
 
     for name, splits in datasets_cfg:
-        gh = gw = IMG_SIZE // PATCH_SIZE
-        total_score_sums        = np.zeros((gh, gw), dtype=np.float64)
-        total_images            = 0
+        gh = gw = image_size // patch_size
+        # Lazy accumulators — set after first split reveals masker type
+        is_3way = None
+        total_images = 0
+        total_class_n: dict = {}
+        class_names: list = []
+        # 2-way
+        total_score_sums = np.zeros((gh, gw), dtype=np.float64)
         total_class_score_sums: dict = {}
-        total_class_n:          dict = {}
-        class_names:            list = []
+        # 3-way
+        _zero = lambda: np.zeros((gh, gw), dtype=np.float64)
+        total_role_sums = {"ctx": _zero(), "tgt": _zero(), "ign": _zero()}
+        total_class_role_sums: dict = {}
 
         for split, loader_fn in splits:
             print(f"\n{name}/{split}")
@@ -275,34 +159,77 @@ def main():
                 print(f"  skipped ({e})")
                 continue
 
-            score_sums, cls_sums, cls_n = visualize_split(
-                name, split, ds, encoder, masker, device,
-                out_dir, args.n, args.grid_cols,
+            sums, cls_sums, cls_n, three_way = visualize_split(
+                dataset_name=name,
+                split=split,
+                dataset=ds,
+                encoder=encoder,
+                masker=masker,
+                device=device,
+                out_dir=out_dir,
+                n=args.n,
+                grid_cols=args.grid_cols,
+                patch_size=patch_size,
+                image_size=image_size,
             )
-            total_score_sums += score_sums
-            total_images     += min(args.n, len(ds))
-            for c, arr in cls_sums.items():
-                total_class_score_sums[c] = total_class_score_sums.get(
-                    c, np.zeros_like(arr)) + arr
-                total_class_n[c] = total_class_n.get(c, 0) + cls_n[c]
+
+            if is_3way is None:
+                is_3way = three_way
+
+            total_images += min(args.n, len(ds))
+
+            if is_3way:
+                for role in ("ctx", "tgt", "ign"):
+                    total_role_sums[role] += sums[role]
+                for c, role_dict in cls_sums.items():
+                    if c not in total_class_role_sums:
+                        total_class_role_sums[c] = {
+                            "ctx": _zero(), "tgt": _zero(), "ign": _zero(),
+                        }
+                    for role in ("ctx", "tgt", "ign"):
+                        total_class_role_sums[c][role] += role_dict[role]
+                    total_class_n[c] = total_class_n.get(c, 0) + cls_n[c]
+            else:
+                total_score_sums += sums
+                for c, arr in cls_sums.items():
+                    total_class_score_sums[c] = total_class_score_sums.get(
+                        c, np.zeros_like(arr)) + arr
+                    total_class_n[c] = total_class_n.get(c, 0) + cls_n[c]
+
             if not class_names and hasattr(ds, "classes"):
                 class_names = list(ds.classes)
 
         if total_images > 0:
-            _save_avg_score_heatmap(
-                total_score_sums, total_images,
-                out_dir / f"{name}_avg_score.png",
-            )
-            if total_class_score_sums:
-                _save_class_score_heatmap(
-                    total_score_sums, total_images,
-                    total_class_score_sums, total_class_n,
-                    class_names,
-                    out_dir / f"{name}_per_class_score.png",
+            if is_3way:
+                save_avg_3way_heatmap(
+                    total_role_sums, total_images,
+                    out_dir / f"{name}_avg_3way.png",
                 )
+                if total_class_role_sums:
+                    save_class_3way_heatmap(
+                        total_role_sums, total_images,
+                        total_class_role_sums, total_class_n,
+                        class_names,
+                        out_dir / f"{name}_per_class_3way.png",
+                    )
+            else:
+                save_avg_score_heatmap(
+                    total_score_sums, total_images,
+                    out_dir / f"{name}_avg_score.png",
+                )
+                if total_class_score_sums:
+                    save_class_score_heatmap(
+                        total_score_sums, total_images,
+                        total_class_score_sums, total_class_n,
+                        class_names,
+                        out_dir / f"{name}_per_class_score.png",
+                    )
 
     print(f"\nDone. Output in ./{out_dir}/")
-    print("Legend: [original | soft score (cold=low, hot=high) | assignment (ctx=blue tgt=red ignored=grey)]")
+    if is_3way:
+        print("Legend: [original | soft 3-way (ctx=blue tgt=red ign=grey) | hard assignment]")
+    else:
+        print("Legend: [original | soft score (cold=low, hot=high) | assignment (ctx=blue tgt=red ignored=grey)]")
 
 
 if __name__ == "__main__":

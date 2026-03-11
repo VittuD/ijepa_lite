@@ -12,21 +12,10 @@
 #SBATCH --error=sbatch_logs/viz-ign-patches/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Visualize the masker's 3-way token partition (ctx/tgt/ign) for 500 train
-# + 500 test images from STL-10 and Food101.
+# Visualize the MI masker's 3-way token partition (ctx/tgt/ign).
 #
-# Two modes:
-#
-#   Single checkpoint (default):
-#     Both encoder and masker are loaded from PRETRAIN_CKPT.
-#     Output: ign_viz/
-#
-#   Split checkpoints (Phase-2 diagnostic):
-#     Encoder from ENCODER_CKPT (vanilla JEPA), masker from MASKER_CKPT.
-#     Uncomment the split-checkpoint srun block and set ENCODER_CKPT below.
-#     Output: ign_viz_phase2/
-#
-# Output lands relative to the repo root (Hydra chdir is NOT used).
+# Uses the unified viz script which auto-detects 3-way maskers and shows
+# soft 3-way overlays (ctx=blue, tgt=red, ign=grey) in the middle panel.
 #
 # Submit:
 #   sbatch slurm/mi_ablations/visualize_ign_patches.sbatch
@@ -42,32 +31,15 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
-# MI-coupled checkpoint (encoder + masker in same file)
-# export PRETRAIN_CKPT="$WORK/vitturini/masker_only_joint_enc/epoch_0299.pt"
 export PRETRAIN_CKPT="$WORK/vitturini/masker_only_joint_enc_pretrain_class/epoch_0299.pt"
-
-# Vanilla JEPA checkpoint (encoder only — for split-checkpoint mode)
-export ENCODER_CKPT="$WORK/vitturini/outputs/2026-02-21/18-28-32_stl10_vits_ps8_comp4/rank0/checkpoints/last.pt"
 
 mkdir -p sbatch_logs/viz-ign-patches
 
-# --- Single checkpoint (default) ---
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python ijepa_lite/hacky_visualize_ign_patches.py \
-    --ckpt      "$PRETRAIN_CKPT" \
-    --data-root "$FAST/datasets/" \
-    --out-dir   ign_viz_masker_joint_enc_pretrain_class \
-    --n         500 \
-    --device    cuda
-
-# --- Split checkpoints: vanilla encoder + MI masker (Phase-2 diagnostic) ---
-# Uncomment and fill ENCODER_CKPT above before running.
-#
-# srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-#   python ijepa_lite/hacky_visualize_ign_patches.py \
-#     --encoder-ckpt "$ENCODER_CKPT" \
-#     --masker-ckpt  "$PRETRAIN_CKPT" \
-#     --data-root    "$FAST/datasets/" \
-#     --out-dir      ign_viz_comp_pretrain \
-#     --n            500 \
-#     --device       cuda
+  python ijepa_lite/hacky_visualize_goldilocks.py \
+    --ckpt       "$PRETRAIN_CKPT" \
+    --experiment stl10_vits_ps8_mi \
+    --data-root  "$FAST/datasets/" \
+    --out-dir    mi_viz \
+    --n          500 \
+    --device     cuda

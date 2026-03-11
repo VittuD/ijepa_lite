@@ -12,29 +12,15 @@
 #SBATCH --error=sbatch_logs/viz-goldilocks/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Visualize GoldilocksTeacherMasker scoring and ctx/tgt assignments.
+# Visualize masker scoring and ctx/tgt assignments.
+#
+# Uses the build pipeline to load the correct masker type from the experiment
+# config. Automatically detects 2-way (Goldilocks) vs 3-way (MI) maskers
+# and adjusts the middle panel accordingly.
 #
 # Panels per image (left to right):
-#   [original | soft score heatmap (cold=low, hot=high) | hard assignment (ctx=blue, tgt=red)]
-#
-# The soft score heatmap is the primary diagnostic. With high K/N (e.g. K=94/N=144),
-# the hard assignment is near-trivial — the score heatmap carries the signal.
-#
-# Output per dataset (STL-10, Food101):
-#   <out_dir>/<dataset>_train.png           — image grid
-#   <out_dir>/<dataset>_test.png            — image grid
-#   <out_dir>/<dataset>_avg_score.png       — mean p_tgt per position (positional bias check)
-#   <out_dir>/<dataset>_per_class_score.png — mean p_tgt per class (content-adaptivity check)
-#
-# Numeric output (stdout):
-#   marginal_score_std   — near 0 = uniform marginals = no positional bias
-#   p_tgt_score_std      — high = scores vary across images = content-adaptive
-#   inter-class score std — > 0.05 = content-adaptive scoring across classes
-#
-# Checkpoint notes:
-#   - Fixed-k checkpoints (goldilocks_fixed_k): k_tgt_eval is already 94, no --k-tgt needed.
-#   - Variable-k checkpoints (goldilocks.yaml, k∈[4,72]): k_tgt_eval=17 by default.
-#     Use --k-tgt 94 to visualize with a larger budget, or omit to see the 17-tgt eval mode.
+#   2-way: [original | soft score heatmap (cold=low, hot=high) | hard assignment]
+#   3-way: [original | soft 3-way (ctx=blue, tgt=red, ign=grey) | hard assignment]
 #
 # Run:
 #   sbatch slurm/goldilocks/visualize_goldilocks.sbatch
@@ -52,14 +38,14 @@ nvidia-smi -L || true
 
 mkdir -p sbatch_logs/viz-goldilocks
 
-# --- Single checkpoint (default) ---
 export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-07/19-39-54_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python ijepa_lite/hacky_visualize_goldilocks.py \
-    --ckpt      "$PRETRAIN_CKPT" \
-    --k-tgt     36 \
-    --data-root "$FAST/datasets/" \
-    --out-dir   goldilocks_viz_4blks_gz_5000ep_36p_65kbsz \
-    --n         500 \
-    --device    cuda
+    --ckpt       "$PRETRAIN_CKPT" \
+    --experiment stl10_vits_ps8_goldilocks \
+    --k-tgt      36 \
+    --data-root  "$FAST/datasets/" \
+    --out-dir    goldilocks_viz \
+    --n          500 \
+    --device     cuda

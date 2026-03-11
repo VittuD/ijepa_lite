@@ -89,7 +89,9 @@ class VizCallback(Callback):
         import torch
 
         from ijepa_lite.viz.goldilocks_viz import (
+            save_avg_3way_heatmap,
             save_avg_score_heatmap,
+            save_class_3way_heatmap,
             save_class_score_heatmap,
             visualize_split,
         )
@@ -122,7 +124,7 @@ class VizCallback(Callback):
 
         dataset_name = str(getattr(vcfg, "dataset", "stl10"))
 
-        score_sums, cls_sums, cls_n = visualize_split(
+        sums, cls_sums, cls_n, is_3way = visualize_split(
             dataset_name=dataset_name,
             split="test",
             dataset=self._dataset,
@@ -141,16 +143,29 @@ class VizCallback(Callback):
         if hasattr(self._dataset, "classes"):
             class_names = list(self._dataset.classes)
 
-        save_avg_score_heatmap(
-            score_sums, n_images,
-            out_dir / f"{dataset_name}_avg_score.png",
-        )
-        if cls_sums:
-            save_class_score_heatmap(
-                score_sums, n_images,
-                cls_sums, cls_n,
-                class_names,
-                out_dir / f"{dataset_name}_per_class_score.png",
+        if is_3way:
+            save_avg_3way_heatmap(
+                sums, n_images,
+                out_dir / f"{dataset_name}_avg_3way.png",
             )
+            if cls_sums:
+                save_class_3way_heatmap(
+                    sums, n_images,
+                    cls_sums, cls_n,
+                    class_names,
+                    out_dir / f"{dataset_name}_per_class_3way.png",
+                )
+        else:
+            save_avg_score_heatmap(
+                sums, n_images,
+                out_dir / f"{dataset_name}_avg_score.png",
+            )
+            if cls_sums:
+                save_class_score_heatmap(
+                    sums, n_images,
+                    cls_sums, cls_n,
+                    class_names,
+                    out_dir / f"{dataset_name}_per_class_score.png",
+                )
 
         print(f"[VizCallback] epoch={epoch}  output -> {out_dir}/")
