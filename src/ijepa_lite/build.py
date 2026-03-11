@@ -165,12 +165,10 @@ def _build_latent_masker(
         # RD masker: distortion function (registry.py filters these for non-RD maskers)
         "base_kind": str(getattr(cfg.loss, "base_kind", getattr(cfg.loss, "kind", "smooth_l1"))),
         "normalize": bool(getattr(cfg.loss, "normalize", False)),
-        # RD masker: λ distribution bounds
+        # RD masker: λ distribution bounds (not used by MI masker)
         "lam_min": float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "lam_min", 1e-3)),
         "lam_max": float(getattr(getattr(cfg.masking, "latent", None) or cfg.masking, "lam_max", 1.0)),
-        # RD masker: α (surprise) and β (ignore tax) LogUniform bounds.
-        # Backward-compat: if old-style single `alpha` is present, derive
-        # alpha_min = alpha/10, alpha_max = alpha.
+        # RD masker: α, β, λ_tgt LogUniform bounds (not used by MI masker)
         "alpha_min": float(getattr(latent_cfg, "alpha_min",
                            getattr(latent_cfg, "alpha", 0.01) / 10
                            if latent_cfg is not None else 0.01)),
@@ -470,7 +468,7 @@ def build_eval_masker(cfg, sd_full: dict, device: torch.device):
         )
         return None
 
-    known_optional = {"_ema_mi_rate", "_ema_surprise"}
+    known_optional: set[str] = set()
     missing, unexpected = masker.load_state_dict(sd_masker, strict=False)
     real_missing = [k for k in missing if k not in known_optional]
     if real_missing:

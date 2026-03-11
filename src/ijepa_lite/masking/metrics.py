@@ -159,6 +159,17 @@ def mask_diagnostics(
     if "floor_penalty" in aux:
         stats["mask/floor_penalty"] = float(aux["floor_penalty"])
 
+    # Compositional masker — per-term sampled weights
+    if "weights" in aux and isinstance(aux["weights"], dict):
+        for wk, wv in aux["weights"].items():
+            stats[f"mask/weight/{wk}"] = float(wv)
+
+    # Rate metrics from compositional terms
+    if "R_ctx" in aux:
+        stats["mask/R_ctx"] = float(aux["R_ctx"])
+    if "R_tgt" in aux:
+        stats["mask/R_tgt"] = float(aux["R_tgt"])
+
     # Goldilocks masker — sampled budgets and content-adaptivity diagnostics
     for key in ("k_tgt", "k_ctx",
                 "tgt_pos_std", "tgt_pos_std_norm",

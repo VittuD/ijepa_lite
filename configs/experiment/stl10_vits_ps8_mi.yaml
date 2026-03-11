@@ -1,74 +1,50 @@
 # @package _global_
 #
-# MI-rate 3-way masker experiment — directly comparable to the RD baseline
-# (stl10_vits_ps8_rd.yaml).
-#
-# All training hyperparameters (lr, wd, schedule, batch, EMA) are
-# intentionally identical to the RD experiment. The only differences are:
-#
-#   /masking/latent: rd_3way  ->  mi_3way
-#   /loss:           rd_3way  ->  mi_3way
+# MI-rate 3-way masker experiment — modular compositional loss.
 #
 # Architecture context
 # --------------------
-# image_size=96, patch_size=8  ->  grid = 12×12 = 144 patches (N)
-# λ ~ LogUniform(0.005, 0.15)  ->  MI-rate multiplier; capped so λ·log(3) ≲ recon_loss,
-#                                  preventing the fixed-partition degenerate solution.
-# α ~ LogUniform(0.05, 0.8)    ->  surprise bonus weight (−α · surprise_soft)
-# No external sharpener: the loss drives hardness. proj_score init std=0.02 ensures
-# H(Y|X) gradient is non-zero from step 0 (breaks uniform fixed point).
-#
+# image_size=96, patch_size=8  ->  grid = 12x12 = 144 patches (N)
 # Masker transformer = Predictor transformer (depth=2, heads=6, dim=192).
 # The masker sees all 144 EMA tokens (compressor=full) and produces a 3-way
 # categorical assignment (ctx / tgt / ignore) for each patch.
 #
-# Objective
-# ---------
-#   total = reconstruction_loss
-#         - α · surprise_soft          (Concrete relaxation, no REINFORCE)
-#         + λ · mi_rate
+# Loss terms (see masking/latent/mi_3way.yaml for default weights)
+# ----------------------------------------------------------------
+#   H_cond       : +H(Y|n)  — minimise conditional entropy (decisive assignments)
+#   neg_H_marg   : -H(Y)    — maximise marginal entropy (role balance)
+#   neg_surprise  : -surprise — maximise Bayesian surprise (content-adaptive signal)
+#   floor_penalty : ReLU(h - H(Y|n))^2 — prevent entropy collapse
 #
-#   surprise_soft = Σᵢ p_tgt_i · ||EMA_i − ctx_centroid||²
-#   mi_rate       = H(Y|X) − H(Y)   (= −I(X;Y))
-#   H(Y|X)        = mean per-patch categorical entropy   — minimised by decisive assignments
-#   H(Y)          = entropy of mean class distribution   — maximised for class balance
+# Per-step term weights are sampled from LogUniform[lo, hi].
+# [0, 0] disables a term; [x, x] fixes it.
 #
-# Key metrics (compare against stl10_vits_ps8_rd.yaml)
-# -------------------------------------------------------
-#   train/loss                  <- full MI-rate objective
-#   train/reconstruction_loss   <- unweighted mean patch loss (direct baseline comparison)
-#   mask/surprise_mean          <- soft-weighted surprise (masker's own signal)
-#   mask/mi_rate                <- H(Y|X) − H(Y); should ↓ over training (I(X;Y) increasing)
-#   mask/entropy_conditional    <- H(Y|X); healthy: ↓ toward 0
-#   mask/entropy_marginal       <- H(Y);   healthy: stays near log(3) ≈ 1.1
-#   mask/lambda                 <- λ sampled this step
-#   mask/alpha                  <- α sampled this step
-#   mask/expected_nctx          <- compare to baseline mask/nctx = 43
-#   mask/expected_ntgt          <- compare to baseline mask/ntgt = 94
-#   mask/expected_nign          <- ignored patches (should stay < 0.8·N)
-#   mask/entropy_3way           <- per-patch assignment uncertainty; should decay
-#   mask/batch_iou              <- collapse monitor; expected baseline ≈ 0.45
-#   mask/floor_penalty          <- should be ~0 in healthy training; spikes = H(Y|X) below floor
+# Key metrics
+# -----------
+#   train/loss                  <- full compositional objective
+#   train/reconstruction_loss   <- unweighted mean patch loss
+#   mask/surprise_mean          <- soft-weighted surprise
+#   mask/mi_rate                <- H(Y|n) - H(Y); should decrease over training
+#   mask/entropy_conditional    <- H(Y|n); healthy: decreases toward 0
+#   mask/entropy_marginal       <- H(Y);   healthy: stays near log(3) ~ 1.1
+#   mask/floor_penalty          <- should be ~0; spikes = H(Y|n) below floor
+#   mask/weight/H_cond          <- sampled weight this step
+#   mask/weight/neg_H_marg      <- sampled weight this step
+#   mask/weight/neg_surprise    <- sampled weight this step
 #
 # Ablation commands
 # -----------------
-# Disable MI-rate term (pure surprise + reconstruction):
-#   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi \
-#       masking.latent.lam_max=1e-6 masking.latent.lam_min=1e-7
+# Disable surprise term:
+#   ... masking.latent.terms.neg_surprise.weight='[0,0]'
 #
-# Disable surprise bonus (MI-rate + recon only):
-#   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi \
-#       masking.latent.alpha_max=1e-6 masking.latent.alpha_min=1e-7
-#
-# Smaller compressor (cut masker input from 144 to 36 tokens):
-#   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi \
-#       masking/compressor=spatial_stride masking.compressor.stride=2
+# Fixed H_cond weight (no LogUniform):
+#   ... masking.latent.terms.H_cond.weight='[0.5,0.5]'
 #
 # Disable entropy floor (reproduce collapse dynamics):
-#   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi masking.latent.h_floor=0.0
+#   ... masking.latent.terms.floor_penalty.weight='[0,0]'
 #
-# Disable λ warmup (immediate full range):
-#   python -m ijepa_lite.run experiment=stl10_vits_ps8_mi masking.latent.lam_warmup_epochs=0
+# Enable ignore tax:
+#   ... masking.latent.terms.ignore_tax.weight='[0.01,0.1]'
 
 defaults:
   - /task: pretrain

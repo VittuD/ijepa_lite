@@ -115,7 +115,7 @@ def train(
         # warmup=0 means disabled: _progress stays at its init value (1.0 = full range).
         _masker = getattr(core, "latent_masker", None)
         if _masker is not None and hasattr(_masker, "set_progress"):
-            warmup = getattr(_masker, "lam_warmup_epochs", 0)
+            warmup = getattr(_masker, "warmup_epochs", 0)
             if warmup > 0:
                 _masker.set_progress(epoch / warmup)
 

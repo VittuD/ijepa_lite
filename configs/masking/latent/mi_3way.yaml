@@ -1,25 +1,23 @@
 # @package masking.latent
 name: mi_3way
 
-# λ — MI rate multiplier: λ·[H(Y|X) − H(Y)]
-lam_min: 0.01
-lam_max: 1.0
+terms:
+  H_cond:
+    weight: [0.01, 1.0]
+  neg_H_marg:
+    weight: [0.01, 1.0]
+  neg_surprise:
+    weight: [0.01, 0.5]
+  floor_penalty:
+    weight: [5.0, 5.0]
+    h_floor: 0.1
+  ignore_tax:
+    weight: [0, 0]
+  context_rate:
+    weight: [0, 0]
+  target_rate:
+    weight: [0, 0]
 
-# α — semantic surprise bonus weight: −α·surprise_soft
-alpha_min: 0.01
-alpha_max: 0.5
-
-# Hard floors on patch counts.
+warmup_epochs: 0
 ntgt_min: 4
 nctx_min: 1
-
-# Entropy floor — quadratic penalty when H(Y|X) drops below h_floor (nats).
-# Prevents masker gradient from dying at the H(Y|X)=0 fixed point.
-# log(3) ≈ 1.099 is the maximum (uniform); 0.1 keeps patches ~90% decisive.
-# floor_weight=5.0: at H_cond=0 the restoring force (2·fw·h_floor=1.0) exceeds
-# the worst-case MI collapsing gradient (λ_max≈0.88), so the floor can dominate.
-h_floor: 0.1
-floor_weight: 5.0
-
-# λ-range warmup — disabled (lam_warmup_epochs=0 → full range from step 0).
-lam_warmup_epochs: 0
