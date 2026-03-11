@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fetch summary of recent wandb runs for comparison.
 
-Prints config diffs and key metrics at step 0, 1k, 2k, 3k, and last step
-for the most recent N runs in the project.
+Prints config diffs (flattened leaf keys) and key metrics at step 0, 1k, 2k,
+3k, and last step for the most recent N runs in the project.
 
 Usage:
     python scripts/fetch_wandb_runs.py [--n 6] [--project ijepa-lite] [--entity vitturini-davide]
@@ -16,40 +16,52 @@ import wandb
 
 # Metrics to extract at each checkpoint step
 METRICS = [
-    "val/acc",
-    "val/loss",
+    "inline_eval/val_acc1",
+    "inline_eval/train_acc1",
     "train/loss",
+    "train/reconstruction_loss",
     "mask/masker_loss",
     "mask/expected_ntgt",
     "goldilocks/error_skewness",
     "goldilocks/error_kurtosis",
+    "goldilocks/score_error_corr",
+    "goldilocks/z_std_mean",
     "mask/batch_iou",
     "mask/tgt_pos_std_norm",
+    "mask/marginal_score_std",
 ]
 
-# Config keys that are always the same — skip when showing diffs
-SKIP_CONFIG_KEYS = {
-    "wandb_version", "_wandb",
-}
+SKIP_CONFIG_KEYS = {"wandb_version", "_wandb"}
 
 CHECKPOINT_STEPS = [0, 1000, 2000, 3000]  # plus "last"
 
 
+def flatten_dict(d, prefix=""):
+    """Flatten nested dict to dot-separated leaf keys."""
+    out = {}
+    for k, v in d.items():
+        key = f"{prefix}{k}" if not prefix else f"{prefix}.{k}"
+        if isinstance(v, dict):
+            out.update(flatten_dict(v, key))
+        else:
+            out[key] = v
+    return out
+
+
 def get_config_diffs(runs):
-    """Find config keys that differ across runs."""
+    """Find flattened config keys that differ across runs."""
     all_configs = []
     all_keys = set()
     for r in runs:
-        cfg = {k: v for k, v in r.config.items() if k not in SKIP_CONFIG_KEYS}
-        all_configs.append(cfg)
-        all_keys.update(cfg.keys())
+        raw = {k: v for k, v in r.config.items() if k not in SKIP_CONFIG_KEYS}
+        flat = flatten_dict(raw)
+        all_configs.append(flat)
+        all_keys.update(flat.keys())
 
     diff_keys = []
     for k in sorted(all_keys):
-        vals = [cfg.get(k, "<missing>") for cfg in all_configs]
-        # Flatten dicts/lists to string for comparison
-        str_vals = [json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else str(v) for v in vals]
-        if len(set(str_vals)) > 1:
+        vals = [str(cfg.get(k, "<missing>")) for cfg in all_configs]
+        if len(set(vals)) > 1:
             diff_keys.append(k)
 
     return diff_keys, all_configs
@@ -59,14 +71,20 @@ def get_metrics_at_steps(run, steps, metrics):
     """Sample metrics from run history at specific steps."""
     results = {}
 
-    # Fetch full history for the metrics we care about (plus _step)
     keys = ["_step"] + metrics
-    history = list(run.scan_history(keys=keys, min_step=0, max_step=run.lastHistoryStep + 1))
+    try:
+        history = list(run.scan_history(keys=keys))
+    except Exception:
+        # Fallback: try .history() which works for some offline-synced runs
+        try:
+            history = list(run.history(keys=keys, pandas=False))
+        except Exception:
+            return results
 
     if not history:
         return results
 
-    # Build a step -> row lookup
+    # Build step -> row lookup
     by_step = {}
     for row in history:
         s = row.get("_step")
@@ -74,19 +92,19 @@ def get_metrics_at_steps(run, steps, metrics):
             by_step[s] = row
 
     all_steps = sorted(by_step.keys())
+    if not all_steps:
+        return results
 
     for target in steps:
-        # Find closest step
-        closest = min(all_steps, key=lambda s: abs(s - target)) if all_steps else None
-        if closest is not None and abs(closest - target) < 200:
+        closest = min(all_steps, key=lambda s: abs(s - target))
+        if abs(closest - target) < 200:
             results[target] = {m: by_step[closest].get(m) for m in metrics}
             results[target]["_actual_step"] = closest
 
     # Always include last step
-    if all_steps:
-        last = all_steps[-1]
-        results["last"] = {m: by_step[last].get(m) for m in metrics}
-        results["last"]["_actual_step"] = last
+    last = all_steps[-1]
+    results["last"] = {m: by_step[last].get(m) for m in metrics}
+    results["last"]["_actual_step"] = last
 
     return results
 
@@ -125,23 +143,24 @@ def main():
     diff_keys, all_configs = get_config_diffs(runs)
 
     print("=" * 80)
-    print("CONFIG DIFFS (only keys that vary across runs)")
+    print("CONFIG DIFFS (only leaf keys that vary across runs)")
     print("=" * 80)
 
-    # Header
-    header = f"{'key':<40s}"
+    # Compute column widths
+    col_width = 22
+    key_width = max(len(k) for k in diff_keys) + 2 if diff_keys else 40
+
+    header = f"{'key':<{key_width}s}"
     for i, r in enumerate(runs):
-        header += f" | R{i} ({r.name[:15]})"
+        header += f" | R{i:<{col_width - 4}}"
     print(header)
     print("-" * len(header))
 
     for k in diff_keys:
-        row = f"{k:<40s}"
+        row = f"{k:<{key_width}s}"
         for cfg in all_configs:
             v = cfg.get(k, "—")
-            if isinstance(v, (dict, list)):
-                v = json.dumps(v, sort_keys=True)
-            row += f" | {str(v)[:20]:<20s}"
+            row += f" | {str(v):<{col_width - 3}s}"
         print(row)
 
     # --- Metrics at checkpoints ---
@@ -151,17 +170,18 @@ def main():
     print("=" * 80)
 
     for i, r in enumerate(runs):
-        print(f"\n--- R{i}: {r.name} (state={r.state}, steps={r.lastHistoryStep}) ---")
-        # Show differing config
-        diff_cfg = {k: all_configs[i].get(k, "—") for k in diff_keys}
-        print(f"    Config: {json.dumps(diff_cfg, default=str)}")
+        last_step = r.lastHistoryStep if r.lastHistoryStep else "?"
+        print(f"\n--- R{i}: {r.name} (state={r.state}, steps={last_step}) ---")
+
+        # Show only differing config as compact summary
+        diff_cfg = {k.split(".")[-1]: all_configs[i].get(k, "—") for k in diff_keys}
+        print(f"    Config: {diff_cfg}")
 
         data = get_metrics_at_steps(r, CHECKPOINT_STEPS, METRICS)
         if not data:
             print("    (no history)")
             continue
 
-        # Table header
         step_labels = [str(s) for s in CHECKPOINT_STEPS] + ["last"]
         hdr = f"  {'metric':<35s}"
         for sl in step_labels:
@@ -169,7 +189,6 @@ def main():
         print(hdr)
         print("  " + "-" * (len(hdr) - 2))
 
-        # Actual steps row
         actual_row = f"  {'(_actual_step)':<35s}"
         for sl in step_labels:
             key = int(sl) if sl != "last" else "last"
@@ -188,6 +207,23 @@ def main():
                 else:
                     row += f" | {'—':>10s}"
             print(row)
+
+    # --- Summary table: val/acc at last step ---
+    print()
+    print("=" * 80)
+    print("SUMMARY: val/acc at last step")
+    print("=" * 80)
+    print(f"{'Run':<5s} {'k_tgt':<7s} {'log_t':<7s} {'corr':<7s} {'val/acc':>10s} {'step':>6s}")
+    print("-" * 50)
+    for i, r in enumerate(runs):
+        cfg = all_configs[i]
+        k_tgt = cfg.get("masking.latent.k_tgt_min", "?")
+        logt = cfg.get("masking.latent.log_transform", False)
+        corr = cfg.get("masking.latent.correlation_loss", False)
+        data = get_metrics_at_steps(r, [], METRICS)
+        acc = fmt_val(data.get("last", {}).get("inline_eval/val_acc1"))
+        step = data.get("last", {}).get("_actual_step", "?")
+        print(f"R{i:<4} {str(k_tgt):<7s} {str(logt):<7s} {str(corr):<7s} {acc:>10s} {str(step):>6s}")
 
 
 if __name__ == "__main__":
