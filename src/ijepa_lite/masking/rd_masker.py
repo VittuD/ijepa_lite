@@ -113,6 +113,7 @@ class RateDist3WayMasker(LatentMasker):
         ntgt_min: int = 4,
         base_kind: str = "smooth_l1",  # unused; kept for build.py compatibility
         normalize: bool = False,       # unused; kept for build.py compatibility
+        pos_embed_kind: str = "learned",
     ) -> None:
         super().__init__()
 
@@ -147,12 +148,17 @@ class RateDist3WayMasker(LatentMasker):
 
         d = predictor_dim
 
+        import math as _math
+        from ijepa_lite.models.pos_embed import build_pos_embed_2d
+
+        _grid = int(_math.isqrt(num_patches))
+
         # ----------------------------------------------------------------
         # Transformer backbone — identical to PredictorBasedMasker
         # ----------------------------------------------------------------
         self.proj_in = nn.Linear(dim, d)
 
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, d))
+        self.pos_embed = build_pos_embed_2d(pos_embed_kind, _grid, d)
         self.selection_token = nn.Parameter(torch.zeros(1, 1, d))
 
         # (λ_ctx, α, β, λ_tgt) conditioning — takes log(λ_ctx, α, β, λ_tgt) as a 4-vector
@@ -187,7 +193,6 @@ class RateDist3WayMasker(LatentMasker):
         # ----------------------------------------------------------------
         # Initialisation
         # ----------------------------------------------------------------
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.selection_token, std=0.02)
         nn.init.normal_(self.rates_proj.weight, std=0.01)
         nn.init.zeros_(self.rates_proj.bias)

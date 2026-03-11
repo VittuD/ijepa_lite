@@ -87,6 +87,7 @@ class PredictorBasedMasker(LatentMasker):
         context_ratio: float,
         temperature: float = 1.0,
         entropy_coeff: float = 0.01,
+        pos_embed_kind: str = "learned",
     ) -> None:
         super().__init__()
 
@@ -97,6 +98,11 @@ class PredictorBasedMasker(LatentMasker):
         self.entropy_coeff = float(entropy_coeff)
         self.predictor_dim = int(predictor_dim)
 
+        import math as _math
+        from ijepa_lite.models.pos_embed import build_pos_embed_2d
+
+        _grid = int(_math.isqrt(num_patches))
+
         # ----------------------------------------------------------------
         # Same building blocks as Predictor
         # ----------------------------------------------------------------
@@ -106,7 +112,7 @@ class PredictorBasedMasker(LatentMasker):
 
         # Positional embeddings for all N patch positions.
         # Shared with selection queries; not applied to compressed inputs.
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, predictor_dim))
+        self.pos_embed = build_pos_embed_2d(pos_embed_kind, _grid, predictor_dim)
 
         # Learned selection query token — the masker analog of mask_token.
         # One shared token expanded to N queries, each placed at its patch position
@@ -133,7 +139,6 @@ class PredictorBasedMasker(LatentMasker):
         self.proj_score = nn.Linear(predictor_dim, 1)
 
         # Initialisation — matches Predictor
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.selection_token, std=0.02)
         # Score head near-zero init → soft-uniform selection at training start
         nn.init.zeros_(self.proj_score.weight)

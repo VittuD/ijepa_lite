@@ -162,6 +162,8 @@ def _build_latent_masker(
         "num_heads": int(getattr(pred_cfg, "num_heads", 6)),
         "mlp_ratio": float(getattr(pred_cfg, "mlp_ratio", 4.0)),
         "dropout": float(getattr(pred_cfg, "dropout", 0.0)),
+        # Positional embedding kind — shared with encoder and predictor
+        "pos_embed_kind": str(getattr(cfg.model, "pos_embed_kind", "learned")),
         # RD masker: distortion function (registry.py filters these for non-RD maskers)
         "base_kind": str(getattr(cfg.loss, "base_kind", getattr(cfg.loss, "kind", "smooth_l1"))),
         "normalize": bool(getattr(cfg.loss, "normalize", False)),
@@ -314,6 +316,8 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
 
     num_patches = (int(cfg.model.image_size) // int(cfg.model.patch_size)) ** 2
 
+    pos_embed_kind = str(getattr(cfg.model, "pos_embed_kind", "learned"))
+
     pred = Predictor(
         dim=int(cfg.model.embed_dim),
         predictor_dim=int(cfg.predictor.predictor_dim),
@@ -322,6 +326,7 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         mlp_ratio=float(getattr(cfg.predictor, "mlp_ratio", 4.0)),
         dropout=float(getattr(cfg.predictor, "dropout", 0.0)),
         num_patches=num_patches,
+        pos_embed_kind=pos_embed_kind,
     )
 
     loss_fn = _build_loss(cfg)

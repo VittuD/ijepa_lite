@@ -30,17 +30,23 @@ class Predictor(nn.Module):
         mlp_ratio: float,
         dropout: float,
         num_patches: int,
+        pos_embed_kind: str = "learned",
     ):
         super().__init__()
         self.dim = dim
         self.predictor_dim = predictor_dim
         self.num_patches = num_patches
 
+        from ijepa_lite.models.pos_embed import build_pos_embed_2d
+        import math
+
+        grid_size = int(math.isqrt(num_patches))
+
         # Bottleneck projections
         self.proj_in = nn.Linear(dim, predictor_dim)
         self.proj_out = nn.Linear(predictor_dim, dim)
 
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, predictor_dim))
+        self.pos_embed = build_pos_embed_2d(pos_embed_kind, grid_size, predictor_dim)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
 
         layer = nn.TransformerEncoderLayer(
@@ -57,7 +63,6 @@ class Predictor(nn.Module):
         )
         self.norm = nn.LayerNorm(predictor_dim)
 
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.mask_token, std=0.02)
 
     def forward(

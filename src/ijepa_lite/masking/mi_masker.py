@@ -63,6 +63,7 @@ class MIRateMasker(LatentMasker):
         ntgt_min: int = 4,
         nctx_min: int = 1,
         warmup_epochs: int = 0,
+        pos_embed_kind: str = "learned",
         # Unused — kept for build.py kwarg filtering
         base_kind: str = "smooth_l1",
         normalize: bool = False,
@@ -79,12 +80,16 @@ class MIRateMasker(LatentMasker):
 
         d = predictor_dim
 
+        from ijepa_lite.models.pos_embed import build_pos_embed_2d
+
+        grid_size = int(math.isqrt(num_patches))
+
         # ----------------------------------------------------------------
         # Transformer backbone
         # ----------------------------------------------------------------
         self.proj_in = nn.Linear(dim, d)
 
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, d))
+        self.pos_embed = build_pos_embed_2d(pos_embed_kind, grid_size, d)
         self.selection_token = nn.Parameter(torch.zeros(1, 1, d))
 
         layer = nn.TransformerEncoderLayer(
@@ -110,7 +115,6 @@ class MIRateMasker(LatentMasker):
         # ----------------------------------------------------------------
         # Initialisation
         # ----------------------------------------------------------------
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.selection_token, std=0.02)
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)

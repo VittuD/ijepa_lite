@@ -180,6 +180,7 @@ class GoldilocksTeacherMasker(LatentMasker):
         # Unused kwargs forwarded by build.py — kept for compatibility
         base_kind: str = "smooth_l1",
         normalize: bool = False,
+        pos_embed_kind: str = "learned",
     ) -> None:
         super().__init__()
 
@@ -197,11 +198,13 @@ class GoldilocksTeacherMasker(LatentMasker):
 
         d = predictor_dim
 
+        from ijepa_lite.models.pos_embed import build_pos_embed_2d
+
         # ----------------------------------------------------------------
-        # Transformer backbone (mirrors mi_masker.py lines 178–219)
+        # Transformer backbone (mirrors mi_masker.py)
         # ----------------------------------------------------------------
         self.proj_in  = nn.Linear(dim, d)
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, d))
+        self.pos_embed = build_pos_embed_2d(pos_embed_kind, self.grid, d)
 
         layer = nn.TransformerEncoderLayer(
             d_model=d,
@@ -232,7 +235,6 @@ class GoldilocksTeacherMasker(LatentMasker):
         # ----------------------------------------------------------------
         # Initialisation
         # ----------------------------------------------------------------
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)
 

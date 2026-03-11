@@ -187,4 +187,12 @@ def build_torchvision_vit_tokens(cfg) -> ViTTokens:
     if bool(getattr(cfg, "remove_head", True)):
         _remove_classifier_head(vit)
 
+    # Replace torchvision's learned pos_embedding if sincos is requested
+    pos_kind = str(getattr(cfg, "pos_embed_kind", "learned"))
+    if pos_kind != "learned":
+        from ijepa_lite.models.pos_embed import build_pos_embed_2d_with_cls
+        grid_size = image_size // patch_size
+        new_pe = build_pos_embed_2d_with_cls(pos_kind, grid_size, embed_dim)
+        vit.encoder.pos_embedding = new_pe
+
     return ViTTokens(vit)
