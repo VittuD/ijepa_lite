@@ -399,9 +399,35 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     lr = float(cfg.optim.lr)
     betas = tuple(float(x) for x in cfg.optim.betas)
     eps = float(cfg.optim.eps)
+    masker_lr_scale = float(getattr(cfg.optim, "masker_lr_scale", 1.0))
+
+    # Split params: masker submodules get a separate LR group
+    core = model.module if hasattr(model, "module") else model
+    masker_modules = set()
+    if getattr(core, "latent_masker", None) is not None:
+        masker_modules.update(core.latent_masker.parameters())
+    if getattr(core, "token_compressor", None) is not None:
+        masker_modules.update(core.token_compressor.parameters())
+
+    base_params = []
+    masker_params = []
+    for p in model.parameters():
+        if not p.requires_grad:
+            continue
+        if p in masker_modules:
+            masker_params.append(p)
+        else:
+            base_params.append(p)
+
+    param_groups = [{"params": base_params, "lr": lr}]
+    if masker_params:
+        param_groups.append({
+            "params": masker_params,
+            "lr": lr * masker_lr_scale,
+        })
 
     opt = torch.optim.AdamW(
-        (p for p in model.parameters() if p.requires_grad),
+        param_groups,
         lr=lr,
         betas=betas,
         eps=eps,

@@ -197,6 +197,7 @@ def train(
 
                 global_loss = (sum_t / cnt_t.clamp(min=1.0)).item()
                 lr = float(optimizer.param_groups[0]["lr"])
+                masker_lr = float(optimizer.param_groups[-1]["lr"]) if len(optimizer.param_groups) > 1 else lr
 
                 extra = token_metrics(out["pred"], out["target"])
 
@@ -232,16 +233,20 @@ def train(
                             )
                         )
 
+                    metrics = {
+                        "train/loss": float(global_loss),
+                        "train/reconstruction_loss": float(out["reconstruction_loss"].item()),
+                        "train/lr": lr,
+                        "train/epoch": float(epoch),
+                        **extra,
+                    }
+                    if masker_lr != lr:
+                        metrics["train/masker_lr"] = masker_lr
+
                     callbacks.on_step_end(
                         cfg=cfg,
                         state=state,
-                        metrics={
-                            "train/loss": float(global_loss),
-                            "train/reconstruction_loss": float(out["reconstruction_loss"].item()),
-                            "train/lr": lr,
-                            "train/epoch": float(epoch),
-                            **extra,
-                        },
+                        metrics=metrics,
                     )
 
         if scheduler is not None:
