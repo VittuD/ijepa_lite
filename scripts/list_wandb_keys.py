@@ -1,34 +1,15 @@
 #!/usr/bin/env python3
-"""List all available history keys from a wandb run.
+"""List all available history keys from the last N wandb runs.
 
 Usage:
-    python scripts/list_wandb_keys.py [--project ijepa-lite] [--entity vitturini-davide] [--run-index 0]
+    python scripts/list_wandb_keys.py [--project ijepa-lite] [--entity vitturini-davide] [--n 4]
 """
 import argparse
 
 import wandb
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project", default="ijepa-lite")
-    parser.add_argument("--entity", default="vitturini-davide")
-    parser.add_argument("--run-index", type=int, default=0,
-                        help="Index of run (0 = most recent)")
-    args = parser.parse_args()
-
-    api = wandb.Api()
-    runs = list(api.runs(
-        f"{args.entity}/{args.project}",
-        order="-created_at",
-        per_page=args.run_index + 1,
-    ))
-
-    if len(runs) <= args.run_index:
-        print(f"Only {len(runs)} runs found, index {args.run_index} out of range.")
-        return
-
-    run = runs[args.run_index]
+def print_run_info(run):
     print(f"Run: {run.name} (id={run.id}, state={run.state})")
     print(f"lastHistoryStep: {run.lastHistoryStep}")
     print()
@@ -90,6 +71,33 @@ def main():
     flat_cfg = flatten(run.config)
     for k in sorted(flat_cfg.keys()):
         print(f"  {k:<55s} = {flat_cfg[k]}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--project", default="ijepa-lite")
+    parser.add_argument("--entity", default="vitturini-davide")
+    parser.add_argument("--n", type=int, default=4,
+                        help="Number of most recent runs to show (default: 4)")
+    args = parser.parse_args()
+
+    api = wandb.Api()
+    runs = list(api.runs(
+        f"{args.entity}/{args.project}",
+        order="-created_at",
+        per_page=args.n,
+    ))
+
+    if not runs:
+        print("No runs found.")
+        return
+
+    for i, run in enumerate(runs):
+        print()
+        print("#" * 60)
+        print(f"# RUN {i} of {len(runs) - 1}")
+        print("#" * 60)
+        print_run_info(run)
 
 
 if __name__ == "__main__":

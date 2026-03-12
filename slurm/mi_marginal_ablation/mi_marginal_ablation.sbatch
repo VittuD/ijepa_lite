@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-mi-marginal
-#SBATCH --account=IscrC_TBoneAI
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -77,5 +77,6 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.floor_penalty.weight='[0,0]' \
       model.pos_embed_kind="$POS_EMBED" \
       data.root=$FAST/datasets/ \
+      data.batch_size=2048 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
