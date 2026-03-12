@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-vanilla-multiblock-stl10
-#SBATCH --account=IscrC_TBoneAI
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -33,4 +33,10 @@ nvidia-smi -L
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
-    -m ijepa_lite.run experiment=stl10_vits_ps8_multiblock data.root=$FAST/datasets/ logger.mode=offline
+    -m ijepa_lite.run \
+      experiment=stl10_vits_ps8_multiblock \
+      exp_name=vanilla_multiblock_stl10 \
+      data.root=$FAST/datasets/ \
+      data.batch_size=2048 \
+      train.viz.out_dir="viz_output_vanilla_multiblock_stl10" \
+      logger.mode=offline

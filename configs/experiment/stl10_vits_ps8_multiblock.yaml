@@ -28,7 +28,7 @@ data:
   root: /scratch/ijepa_lite/data
   pretrain_split: unlabeled
   download: true
-  batch_size: 512
+  batch_size: 2048
   num_workers: 10
   prefetch_factor: 4
 
