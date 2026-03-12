@@ -27,6 +27,8 @@ class VizCallback(Callback):
         self._cfg_viz: Any = None
         self._image_size: int = 96
         self._patch_size: int = 8
+        self._is_multiblock: bool = False
+        self._collateMasker = None
 
     def on_run_start(self, cfg: Any, state: dict, model: Any) -> None:
         self._enabled = bool(getattr(cfg.train, "viz_enabled", False))
@@ -37,10 +39,16 @@ class VizCallback(Callback):
         # Check that model has a compatible latent masker
         core = model
         masker = getattr(core, "latent_masker", None)
-        if masker is None:
+        is_multiblock = (masker is None and
+                         getattr(cfg.masking, "name", None) == "multiblock")
+        if masker is None and not is_multiblock:
             print("[VizCallback] No latent_masker found — disabling.")
             self._enabled = False
             return
+        self._is_multiblock = is_multiblock
+        if is_multiblock:
+            from ijepa_lite.build import build_masker
+            self._collateMasker = build_masker(cfg)
 
         self._save_every = int(
             getattr(cfg.train, "save_every",
@@ -88,6 +96,52 @@ class VizCallback(Callback):
     def _run_viz(self, cfg: Any, state: dict, epoch: int) -> None:
         import torch
 
+        vcfg = self._cfg_viz
+        n_images = int(getattr(vcfg, "n_images", 100))
+        out_base = str(getattr(vcfg, "out_dir", "viz_output"))
+        grid_cols = int(getattr(vcfg, "grid_cols", 10))
+
+        out_dir = Path(out_base) / f"epoch_{epoch:05d}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        dataset_name = str(getattr(vcfg, "dataset", "stl10"))
+        class_names = []
+        if hasattr(self._dataset, "classes"):
+            class_names = list(self._dataset.classes)
+
+        if self._is_multiblock:
+            from ijepa_lite.viz.goldilocks_viz import (
+                save_avg_coverage_heatmap,
+                save_class_coverage_heatmap,
+                visualize_split_multiblock,
+            )
+
+            sums, cls_sums, cls_n = visualize_split_multiblock(
+                dataset_name=dataset_name,
+                split="test",
+                dataset=self._dataset,
+                masker=self._collateMasker,
+                out_dir=out_dir,
+                n=n_images,
+                grid_cols=grid_cols,
+                patch_size=self._patch_size,
+                image_size=self._image_size,
+            )
+
+            save_avg_coverage_heatmap(
+                sums, n_images,
+                out_dir / f"{dataset_name}_avg_coverage.png",
+            )
+            if cls_sums:
+                save_class_coverage_heatmap(
+                    sums, n_images,
+                    cls_sums, cls_n,
+                    class_names,
+                    out_dir / f"{dataset_name}_per_class_coverage.png",
+                )
+            print(f"[VizCallback] epoch={epoch}  output -> {out_dir}/")
+            return
+
         from ijepa_lite.viz.goldilocks_viz import (
             save_avg_3way_heatmap,
             save_avg_score_heatmap,
@@ -96,16 +150,9 @@ class VizCallback(Callback):
             visualize_split,
         )
 
-        vcfg = self._cfg_viz
-        n_images = int(getattr(vcfg, "n_images", 100))
-        out_base = str(getattr(vcfg, "out_dir", "viz_output"))
-        grid_cols = int(getattr(vcfg, "grid_cols", 10))
         k_tgt = getattr(vcfg, "k_tgt", None)
         if k_tgt is not None:
             k_tgt = int(k_tgt)
-
-        out_dir = Path(out_base) / f"epoch_{epoch:05d}"
-        out_dir.mkdir(parents=True, exist_ok=True)
 
         bundle = state.get("_ckpt_bundle")
         if bundle is None:
@@ -122,8 +169,6 @@ class VizCallback(Callback):
         encoder.eval()
         masker.eval()
 
-        dataset_name = str(getattr(vcfg, "dataset", "stl10"))
-
         sums, cls_sums, cls_n, is_3way = visualize_split(
             dataset_name=dataset_name,
             split="test",
@@ -138,10 +183,6 @@ class VizCallback(Callback):
             image_size=self._image_size,
             k_tgt=k_tgt,
         )
-
-        class_names = []
-        if hasattr(self._dataset, "classes"):
-            class_names = list(self._dataset.classes)
 
         if is_3way:
             save_avg_3way_heatmap(

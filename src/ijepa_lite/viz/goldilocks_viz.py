@@ -427,6 +427,299 @@ def save_class_3way_heatmap(
 
 
 # ---------------------------------------------------------------------------
+# Multiblock-specific overlays and visualization
+# ---------------------------------------------------------------------------
+
+# Fixed per-block color palette (M up to 8)
+_BLOCK_COLORS = [
+    (220,  60,  60),   # red
+    (255, 165,   0),   # orange
+    ( 60, 160,  60),   # green
+    (140,  60, 200),   # purple
+    (  0, 200, 200),   # cyan
+    (200, 200,   0),   # yellow
+    (255, 105, 180),   # pink
+    (100, 100, 220),   # blue-violet
+]
+
+
+def apply_multiblock_overlay(
+    orig_np: np.ndarray,
+    context_idx: np.ndarray,
+    target_idx_3d: np.ndarray,
+    patch_size: int,
+    image_size: int,
+    alpha: float = ALPHA_ASSIGN,
+) -> np.ndarray:
+    """Per-block colored overlay: ctx=blue, each target block k→distinct color, ignored=grey.
+
+    Parameters
+    ----------
+    context_idx  : (Nctx,) int array of context patch flat indices
+    target_idx_3d: (M, K) int array of target block patch flat indices
+    """
+    N = (image_size // patch_size) ** 2
+    gh = gw = image_size // patch_size
+
+    # Build role map: -1=ignored, 0=ctx, 1..M=target block k
+    role = np.full(N, -1, dtype=np.int32)
+    role[context_idx] = 0
+    M = target_idx_3d.shape[0]
+    for k in range(M):
+        role[target_idx_3d[k]] = k + 1
+
+    role_map = role.reshape(gh, gw)
+    out = orig_np.copy().astype(float)
+
+    for i in range(gh):
+        for j in range(gw):
+            r = role_map[i, j]
+            if r == -1:
+                col = np.array(GREY, dtype=float)
+            elif r == 0:
+                col = np.array(CTX_RGB, dtype=float)
+            else:
+                col = np.array(_BLOCK_COLORS[(r - 1) % len(_BLOCK_COLORS)], dtype=float)
+            y0, y1 = i * patch_size, (i + 1) * patch_size
+            x0, x1 = j * patch_size, (j + 1) * patch_size
+            orig_patch = orig_np[y0:y1, x0:x1].astype(float)
+            out[y0:y1, x0:x1] = (1.0 - alpha) * orig_patch + alpha * col
+
+    return out.clip(0, 255).astype(np.uint8)
+
+
+@torch.no_grad()
+def visualize_split_multiblock(
+    dataset_name: str,
+    split: str,
+    dataset,
+    masker,
+    out_dir: Path,
+    n: int,
+    grid_cols: int,
+    patch_size: int,
+    image_size: int,
+    batch_size: int = BATCH_SIZE,
+) -> tuple:
+    """Visualize multiblock masker (content-independent).
+
+    Does NOT require an encoder — calls ``masker(B)`` directly.
+
+    Returns
+    -------
+    (sums, cls_sums, cls_n)
+    sums     = {"ctx": (gh,gw) float64, "tgt": (gh,gw) float64}
+    cls_sums = {label: {"ctx":..., "tgt":...}}
+    cls_n    = {label: int}
+    """
+    from torchvision import transforms
+
+    _resize_crop = transforms.Compose([
+        transforms.Resize(image_size),
+        transforms.CenterCrop(image_size),
+    ])
+
+    n = min(n, len(dataset))
+    gh = gw = image_size // patch_size
+    N = gh * gw
+
+    cells = []
+    _zero = lambda: np.zeros((gh, gw), dtype=np.float64)
+    sums = {"ctx": _zero(), "tgt": _zero()}
+    cls_sums: dict = {}
+    cls_n: dict = {}
+
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        idxs = range(start, end)
+        B = end - start
+
+        displays, labels_batch = [], []
+        for i in idxs:
+            img_raw, lbl = dataset[i]
+            if isinstance(img_raw, np.ndarray):
+                if img_raw.ndim == 3 and img_raw.shape[0] == 3:
+                    img_raw = np.transpose(img_raw, (1, 2, 0))
+                pil = Image.fromarray(img_raw.astype(np.uint8))
+            else:
+                pil = img_raw
+            pil_crop = _resize_crop(pil.convert("RGB"))
+            displays.append(np.array(pil_crop, dtype=np.uint8))
+            labels_batch.append(int(lbl))
+
+        mask_out = masker(B)
+
+        ctx_idx  = mask_out.context_idx.cpu().numpy()   # (B, Nctx)
+        tgt_idx  = mask_out.target_idx.cpu().numpy()    # (B, M, K)
+
+        for bi in range(B):
+            ci = ctx_idx[bi]           # (Nctx,)
+            ti = tgt_idx[bi]           # (M, K)
+            lbl = labels_batch[bi]
+
+            # Accumulate frequency maps
+            ctx_freq = np.zeros(N, dtype=np.float64)
+            ctx_freq[ci] = 1.0
+            tgt_freq = np.zeros(N, dtype=np.float64)
+            tgt_freq[ti.ravel()] = 1.0
+
+            sums["ctx"] += ctx_freq.reshape(gh, gw)
+            sums["tgt"] += tgt_freq.reshape(gh, gw)
+
+            if lbl not in cls_sums:
+                cls_sums[lbl] = {"ctx": _zero(), "tgt": _zero()}
+                cls_n[lbl] = 0
+            cls_sums[lbl]["ctx"] += ctx_freq.reshape(gh, gw)
+            cls_sums[lbl]["tgt"] += tgt_freq.reshape(gh, gw)
+            cls_n[lbl] += 1
+
+            orig_np = displays[bi]
+
+            # Panel 2: binary assignment (ctx=blue, all tgt=red, ign=grey)
+            bin_flat = np.full(N, 2, dtype=np.int64)
+            bin_flat[ci] = 0
+            bin_flat[ti.ravel()] = 1
+            bin_map = bin_flat.reshape(gh, gw)
+            assign_np = apply_assignment_overlay(orig_np, bin_map, patch_size)
+
+            # Panel 3: per-block colored overlay
+            multiblock_np = apply_multiblock_overlay(
+                orig_np, ci, ti, patch_size, image_size
+            )
+
+            cells.append(make_cell(orig_np, assign_np, multiblock_np))
+
+        print(f"  {dataset_name}/{split}: {end}/{n}", end="\r")
+
+    print()
+
+    if cells:
+        cell_w, cell_h = cells[0].size
+        n_rows = (len(cells) + grid_cols - 1) // grid_cols
+        grid = Image.new("RGB", (grid_cols * cell_w, n_rows * cell_h), (30, 30, 30))
+        for k, cell in enumerate(cells):
+            r, c = divmod(k, grid_cols)
+            grid.paste(cell, (c * cell_w, r * cell_h))
+        fname = out_dir / f"{dataset_name}_{split}_multiblock.png"
+        grid.save(fname)
+        print(f"  Saved -> {fname}  [{len(cells)} images]")
+
+    return sums, cls_sums, cls_n
+
+
+def save_avg_coverage_heatmap(
+    sums: dict,
+    n: int,
+    path: Path,
+    patch_px: int = 40,
+) -> None:
+    """Two-panel heatmap: ctx frequency | tgt frequency (cold→hot)."""
+    gh, gw = sums["ctx"].shape
+    means = {k: v / max(n, 1) for k, v in sums.items()}
+
+    cell_h = gh * patch_px
+    cell_w = gw * patch_px
+    label_h = 24
+    gap = 8
+    total_w = 2 * cell_w + gap
+    total_h = cell_h + label_h
+
+    img = Image.new("RGB", (total_w, total_h), (20, 20, 20))
+    draw = ImageDraw.Draw(img)
+
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    panels = [("ctx frequency", means["ctx"], 0),
+              ("tgt frequency", means["tgt"], cell_w + gap)]
+
+    for title, mean_map, x_off in panels:
+        draw.text((x_off + 4, 4), title, fill=(200, 200, 200), font=font)
+        for i in range(gh):
+            for j in range(gw):
+                col = score_color(float(mean_map[i, j]))
+                x0 = x_off + j * patch_px
+                y0 = label_h + i * patch_px
+                draw.rectangle([x0, y0, x0 + patch_px - 1, y0 + patch_px - 1],
+                               fill=col, outline=(40, 40, 40))
+
+    img.save(path)
+    print(f"  Saved coverage heatmap -> {path}  (n={n})")
+
+
+def save_class_coverage_heatmap(
+    sums: dict,
+    n: int,
+    cls_sums: dict,
+    cls_n: dict,
+    class_names: list,
+    path: Path,
+    patch_px: int = 32,
+    label_w: int = 140,
+    row_gap: int = 6,
+) -> None:
+    """Per-class tgt coverage heatmap (should be uniform for geometric masker)."""
+    gh, gw = sums["tgt"].shape
+    panel_w = gw * patch_px
+    row_h = gh * patch_px
+    row_stride = row_h + row_gap
+    header_h = 22
+
+    sorted_cls = sorted(cls_sums.keys())
+
+    interclass_std = float("nan")
+    if len(sorted_cls) >= 2:
+        class_means = np.stack(
+            [cls_sums[c]["tgt"] / max(cls_n[c], 1) for c in sorted_cls]
+        )
+        interclass_std = float(class_means.std(axis=0).mean())
+    print(f"  Inter-class tgt std = {interclass_std:.4f}  "
+          f"(~0 expected for geometric/content-independent masker)")
+
+    rows = [("overall", sums["tgt"] / max(n, 1), n)] + [
+        (class_names[c] if class_names and c < len(class_names) else str(c),
+         cls_sums[c]["tgt"] / max(cls_n[c], 1), cls_n[c])
+        for c in sorted_cls
+    ]
+
+    total_w = label_w + panel_w
+    total_h = header_h + len(rows) * row_stride - row_gap
+    img = Image.new("RGB", (total_w, total_h), (20, 20, 20))
+    draw = ImageDraw.Draw(img)
+
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    draw.text((label_w + 4, 4),
+              f"tgt coverage  (inter-class std={interclass_std:.4f})",
+              fill=(200, 200, 200), font=font)
+
+    for row_idx, (name, mean_map, n_img) in enumerate(rows):
+        y0 = header_h + row_idx * row_stride
+        if row_idx > 0:
+            draw.rectangle([0, y0 - row_gap, total_w, y0 - 1], fill=(50, 50, 50))
+        draw.text((4, y0 + row_h // 2 - 5),
+                  f"{name}\n(n={n_img})", fill=(200, 200, 200), font=font)
+        for i in range(gh):
+            for j in range(gw):
+                col = score_color(float(mean_map[i, j]))
+                x0 = label_w + j * patch_px
+                y1 = y0 + i * patch_px
+                draw.rectangle([x0, y1, x0 + patch_px - 1, y1 + patch_px - 1],
+                               fill=col, outline=(40, 40, 40))
+
+    img.save(path)
+    print(f"  Saved per-class coverage heatmap -> {path}  "
+          f"({len(sorted_cls)} classes, overall n={n})")
+
+
+# ---------------------------------------------------------------------------
 # Main visualization driver
 # ---------------------------------------------------------------------------
 
