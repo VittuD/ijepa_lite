@@ -47,8 +47,8 @@ class VizCallback(Callback):
             return
         self._is_multiblock = is_multiblock
         if is_multiblock:
-            from ijepa_lite.build import build_masker
-            self._collateMasker = build_masker(cfg)
+            from ijepa_lite.build import _build_collate_masker
+            self._collateMasker = _build_collate_masker(cfg)
 
         self._save_every = int(
             getattr(cfg.train, "save_every",
