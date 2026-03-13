@@ -103,12 +103,78 @@ class MultiBlockMaskGenerator(CollateMasker):
         w = max(1, min(g, int(round(math.sqrt(area / aspect)))))
         return h, w
 
-    def _sample_rect_indices(self, h: int, w: int) -> list[int]:
-        """Return flat patch indices for a randomly placed h-by-w rectangle (sorted)."""
+    # ------------------------------------------------------------------
+    # Acceptable-regions block placement (matches original I-JEPA)
+    # ------------------------------------------------------------------
+
+    def _sample_block_mask(
+        self,
+        h: int,
+        w: int,
+        acceptable_regions: list[list[list[int]]],
+    ) -> tuple[list[int], list[list[int]]]:
+        """
+        Place an h-by-w rectangle on the grid, masked by acceptable_regions.
+
+        Each entry in *acceptable_regions* is a 2D grid (list-of-lists, g×g)
+        with 1 = available, 0 = claimed. The rectangle is AND-ed with all of
+        them so it only keeps cells that are free under every prior block.
+
+        Returns
+        -------
+        indices : sorted flat patch indices for the block
+        mask_complement : g×g grid that is 1 everywhere EXCEPT the placed
+                          rectangle (to be appended to acceptable_regions)
+        """
         g = self.grid
-        top = random.randint(0, max(0, g - h))
-        left = random.randint(0, max(0, g - w))
-        return sorted((top + r) * g + (left + c) for r in range(h) for c in range(w))
+        tries = 0
+
+        while True:
+            # Sample a random placement.
+            top = random.randint(0, max(0, g - h))
+            left = random.randint(0, max(0, g - w))
+
+            # Build the rectangle mask (g×g), then AND with acceptable_regions.
+            mask = [[0] * g for _ in range(g)]
+            for r in range(top, min(top + h, g)):
+                for c in range(left, min(left + w, g)):
+                    mask[r][c] = 1
+
+            # Apply acceptable_regions (drop entries from the tail for relaxation).
+            n_regions = max(0, len(acceptable_regions) - tries)
+            for region in acceptable_regions[:n_regions]:
+                for r in range(g):
+                    for c in range(g):
+                        mask[r][c] &= region[r][c]
+
+            # Flatten → nonzero → sorted indices.
+            indices = sorted(
+                r * g + c for r in range(g) for c in range(g) if mask[r][c]
+            )
+
+            if len(indices) >= self.min_keep:
+                break
+
+            # Resample placement up to max_resample_tries, then relax.
+            tries += 1
+            if tries > self.max_resample_tries + len(acceptable_regions):
+                # Fully relaxed and still failing — take whatever we got.
+                if not indices:
+                    # Extreme fallback: just use the raw rectangle.
+                    indices = sorted(
+                        (top + dr) * g + (left + dc)
+                        for dr in range(h)
+                        for dc in range(w)
+                    )
+                break
+
+        # Build complement: 1 everywhere except the original rectangle.
+        complement = [[1] * g for _ in range(g)]
+        for r in range(top, min(top + h, g)):
+            for c in range(left, min(left + w, g)):
+                complement[r][c] = 0
+
+        return indices, complement
 
     # ------------------------------------------------------------------
     # Per-image sampling (given pre-sampled block sizes)
@@ -121,6 +187,10 @@ class MultiBlockMaskGenerator(CollateMasker):
         """
         Generate target blocks and context for one image.
 
+        Uses acceptable_regions to ensure blocks land in open space.
+        Each placed block adds its complement to the acceptable_regions
+        list, so subsequent blocks avoid it.
+
         Parameters
         ----------
         tgt_sizes : list of (h, w) per target block — shared across batch.
@@ -130,62 +200,64 @@ class MultiBlockMaskGenerator(CollateMasker):
         tgt_blocks : list of M lists (variable length per block)
         ctx        : list of length ≤ Nctx
         """
-        n = self.num_patches
-
-        occupied: set[int] = set()
+        acceptable_regions: list[list[list[int]]] = []
         tgt_blocks: list[list[int]] = []
 
-        # 1) Target blocks — use the full rectangle.
-        for h, w in tgt_sizes:
-            for _attempt in range(self.max_resample_tries + 1):
-                rect = self._sample_rect_indices(h, w)
+        if self.allow_overlap:
+            # No acceptable_regions needed — just place freely.
+            for h, w in tgt_sizes:
+                g = self.grid
+                top = random.randint(0, max(0, g - h))
+                left = random.randint(0, max(0, g - w))
+                indices = sorted(
+                    (top + r) * g + (left + c)
+                    for r in range(h)
+                    for c in range(w)
+                )
+                tgt_blocks.append(indices)
 
-                if self.allow_overlap:
-                    picked = rect
-                    break
-
-                picked = [i for i in rect if i not in occupied]
-                if picked:
-                    break
-            else:
-                # Fallback: use whatever non-occupied indices we got
-                if not picked:
-                    remaining = sorted(set(range(n)) - occupied)
-                    picked = remaining[:max(1, h * w)]
-
-            tgt_blocks.append(picked)
-
-            if not self.allow_overlap:
-                occupied.update(picked)
-
-        # 2) Context rectangle minus targets.
-        ctx_candidates: list[int] = []
-
-        for _attempt in range(self.max_resample_tries + 1):
-            h, w = self._sample_rect_size(
+            # Context.
+            ctx_h, ctx_w = self._sample_rect_size(
                 self.ctx_min_scale,
                 self.ctx_max_scale,
                 self.ctx_min_aspect,
                 self.ctx_max_aspect,
             )
-            rect = self._sample_rect_indices(h, w)
+            top = random.randint(0, max(0, g - ctx_h))
+            left = random.randint(0, max(0, g - ctx_w))
+            ctx = sorted(
+                (top + r) * g + (left + c)
+                for r in range(ctx_h)
+                for c in range(ctx_w)
+            )
+            nctx = min(self.nctx, len(ctx))
+            if nctx < len(ctx):
+                ctx = sorted(random.sample(ctx, nctx))
+            return tgt_blocks, ctx
 
-            if self.allow_overlap:
-                ctx_candidates = rect
-            else:
-                ctx_candidates = [i for i in rect if i not in occupied]
+        # --- Non-overlapping path: use acceptable_regions ---
 
-            if ctx_candidates:
-                break
-        else:
-            if not ctx_candidates:
-                ctx_candidates = sorted(set(range(n)) - occupied)
+        # 1) Target blocks.
+        for h, w in tgt_sizes:
+            indices, complement = self._sample_block_mask(
+                h, w, acceptable_regions,
+            )
+            tgt_blocks.append(indices)
+            acceptable_regions.append(complement)
 
-        nctx = min(self.nctx, len(ctx_candidates))
-        if nctx < len(ctx_candidates):
-            ctx = sorted(random.sample(ctx_candidates, nctx))
-        else:
-            ctx = ctx_candidates
+        # 2) Context block — same mechanism, naturally excludes targets.
+        ctx_h, ctx_w = self._sample_rect_size(
+            self.ctx_min_scale,
+            self.ctx_max_scale,
+            self.ctx_min_aspect,
+            self.ctx_max_aspect,
+        )
+        ctx, _ = self._sample_block_mask(
+            ctx_h, ctx_w, acceptable_regions,
+        )
+        nctx = min(self.nctx, len(ctx))
+        if nctx < len(ctx):
+            ctx = sorted(random.sample(ctx, nctx))
 
         return tgt_blocks, ctx
 
