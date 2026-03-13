@@ -54,6 +54,7 @@ class MultiBlockMaskGenerator(CollateMasker):
         allow_overlap: bool = False,
         min_keep: int = 10,
         max_resample_tries: int = 20,
+        unclaimed: str = "ignore",
     ):
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
@@ -75,6 +76,10 @@ class MultiBlockMaskGenerator(CollateMasker):
         self.allow_overlap = bool(allow_overlap)
         self.min_keep = max(1, int(min_keep))
         self.max_resample_tries = int(max_resample_tries)
+
+        if unclaimed not in ("ignore", "context", "target"):
+            raise ValueError(f"unclaimed must be 'ignore', 'context', or 'target', got {unclaimed!r}")
+        self.unclaimed = unclaimed
 
         self.nctx = max(1, int(round(self.num_patches * float(context_ratio))))
 
@@ -258,6 +263,21 @@ class MultiBlockMaskGenerator(CollateMasker):
         nctx = min(self.nctx, len(ctx))
         if nctx < len(ctx):
             ctx = sorted(random.sample(ctx, nctx))
+
+        # Redistribute unclaimed patches if requested.
+        if self.unclaimed != "ignore":
+            claimed: set[int] = set(ctx)
+            for block in tgt_blocks:
+                claimed.update(block)
+            unclaimed = sorted(set(range(self.num_patches)) - claimed)
+
+            if self.unclaimed == "context":
+                ctx = sorted(ctx + unclaimed)
+            elif self.unclaimed == "target":
+                for i, idx in enumerate(unclaimed):
+                    tgt_blocks[i % len(tgt_blocks)].append(idx)
+                for block in tgt_blocks:
+                    block.sort()
 
         return tgt_blocks, ctx
 

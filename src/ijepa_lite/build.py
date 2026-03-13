@@ -80,6 +80,7 @@ def _build_collate_masker(cfg) -> Optional[CollateMasker]:
             ctx_max_aspect=float(ctx_aspect[1]),
             allow_overlap=bool(getattr(cfg.masking, "allow_overlap", False)),
             min_keep=int(getattr(cfg.masking, "min_keep", 10)),
+            unclaimed=str(getattr(cfg.masking, "unclaimed", "ignore")),
         )
 
     raise ValueError(f"Unknown masking.name={name!r}")
