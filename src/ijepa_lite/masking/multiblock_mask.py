@@ -1,4 +1,18 @@
 # FILE: src/ijepa_lite/masking/multiblock_mask.py
+"""
+Multi-block mask generator faithful to the original I-JEPA design.
+
+Key design choices (matching facebook/ijepa):
+  - Target block (h, w) is sampled **once per batch** — all images share the
+    same block dimensions, only the placement varies.
+  - Each target block IS the full rectangle (no subsampling within it).
+  - K = h * w varies across batches but is fixed within a batch → (B, M, K)
+    is always a regular tensor.
+  - Context block is sampled per-image, excluding target patches.
+  - When allow_overlap=False and the `acceptable_regions` constraint removes
+    patches from a block, blocks are truncated to min_keep across the batch
+    so all images share the same K (mirrors the original collation logic).
+"""
 from __future__ import annotations
 
 import math
@@ -13,21 +27,11 @@ class MultiBlockMaskGenerator(CollateMasker):
     """
     CPU-side multi-block mask generator intended to run in DataLoader workers.
 
-    Behavior (per sample):
-      - Sample M target rectangles (optionally non-overlapping).
-      - Sample one context rectangle, then remove target patches when overlap is disallowed.
-      - Return fixed-shape tensors for batching.
-
     Returns:
         MaskOutput with:
           context_idx: LongTensor (B, Nctx)
-          target_idx:  LongTensor (B, M, K)
-          context_soft / target_soft: None  (deterministic, no gradient path)
-
-    Notes on shapes:
-      - Nctx is derived from context_ratio, but may be clipped when many patches are
-        occupied by targets (when allow_overlap=False).
-      - K is derived from target_ratio / M and is fixed per instance.
+          target_idx:  LongTensor (B, M, K)   — K varies across calls
+          context_soft / target_soft: None
     """
 
     def __init__(
@@ -56,7 +60,6 @@ class MultiBlockMaskGenerator(CollateMasker):
         self.num_patches = self.grid * self.grid
 
         self.num_target_blocks = int(num_target_blocks)
-        m = self.num_target_blocks
 
         self.tgt_min_scale = float(tgt_min_scale)
         self.tgt_max_scale = float(tgt_max_scale)
@@ -71,10 +74,11 @@ class MultiBlockMaskGenerator(CollateMasker):
         self.allow_overlap = bool(allow_overlap)
         self.max_resample_tries = int(max_resample_tries)
 
-        self.k_per_block = max(
-            1, int(round(self.num_patches * float(target_ratio) / max(1, m)))
-        )
         self.nctx = max(1, int(round(self.num_patches * float(context_ratio))))
+
+    # ------------------------------------------------------------------
+    # Rectangle sampling helpers
+    # ------------------------------------------------------------------
 
     def _sample_rect_size(
         self,
@@ -97,63 +101,65 @@ class MultiBlockMaskGenerator(CollateMasker):
         w = max(1, min(g, int(round(math.sqrt(area / aspect)))))
         return h, w
 
-    def _sample_rect_indices(self, h: int, w: int) -> set[int]:
-        """Return the set of flat patch indices for a randomly placed h-by-w rectangle."""
+    def _sample_rect_indices(self, h: int, w: int) -> list[int]:
+        """Return flat patch indices for a randomly placed h-by-w rectangle (sorted)."""
         g = self.grid
         top = random.randint(0, max(0, g - h))
         left = random.randint(0, max(0, g - w))
-        return {(top + r) * g + (left + c) for r in range(h) for c in range(w)}
+        return sorted((top + r) * g + (left + c) for r in range(h) for c in range(w))
 
-    def _sample_one(self) -> tuple[list[list[int]], list[int]]:
+    # ------------------------------------------------------------------
+    # Per-image sampling (given pre-sampled block sizes)
+    # ------------------------------------------------------------------
+
+    def _sample_one(
+        self,
+        tgt_sizes: list[tuple[int, int]],
+    ) -> tuple[list[list[int]], list[int]]:
         """
-        Generate target blocks and context indices for one image.
+        Generate target blocks and context for one image.
 
-        Returns:
-            tgt_blocks: list of M lists, each length K
-            ctx:        list of length Nctx (possibly clipped)
+        Parameters
+        ----------
+        tgt_sizes : list of (h, w) per target block — shared across batch.
+
+        Returns
+        -------
+        tgt_blocks : list of M lists (variable length per block)
+        ctx        : list of length ≤ Nctx
         """
         n = self.num_patches
-        m = self.num_target_blocks
-        k = self.k_per_block
 
         occupied: set[int] = set()
         tgt_blocks: list[list[int]] = []
 
-        # 1) Target blocks.
-        for _ in range(m):
-            candidates: set[int] = set()
-
-            for attempt in range(self.max_resample_tries + 1):
-                h, w = self._sample_rect_size(
-                    self.tgt_min_scale,
-                    self.tgt_max_scale,
-                    self.tgt_min_aspect,
-                    self.tgt_max_aspect,
-                )
+        # 1) Target blocks — use the full rectangle.
+        for h, w in tgt_sizes:
+            for _attempt in range(self.max_resample_tries + 1):
                 rect = self._sample_rect_indices(h, w)
 
                 if self.allow_overlap:
-                    candidates = rect
+                    picked = rect
                     break
 
-                candidates = rect - occupied
-                if candidates:
+                picked = [i for i in rect if i not in occupied]
+                if picked:
                     break
+            else:
+                # Fallback: use whatever non-occupied indices we got
+                if not picked:
+                    remaining = sorted(set(range(n)) - occupied)
+                    picked = remaining[:max(1, h * w)]
 
-                # Last attempt: accept an empty candidate set and rely on fallback sampling.
-                if attempt == self.max_resample_tries:
-                    candidates = set()
-
-            picked = _sample_k(candidates, k, fallback_pool=_complement(occupied, n))
             tgt_blocks.append(picked)
 
             if not self.allow_overlap:
                 occupied.update(picked)
 
-        # 2) Context rectangle minus targets (when overlap is disallowed).
-        ctx_candidates: set[int] = set()
+        # 2) Context rectangle minus targets.
+        ctx_candidates: list[int] = []
 
-        for attempt in range(self.max_resample_tries + 1):
+        for _attempt in range(self.max_resample_tries + 1):
             h, w = self._sample_rect_size(
                 self.ctx_min_scale,
                 self.ctx_max_scale,
@@ -165,21 +171,19 @@ class MultiBlockMaskGenerator(CollateMasker):
             if self.allow_overlap:
                 ctx_candidates = rect
             else:
-                ctx_candidates = rect - occupied
+                ctx_candidates = [i for i in rect if i not in occupied]
 
             if ctx_candidates:
                 break
+        else:
+            if not ctx_candidates:
+                ctx_candidates = sorted(set(range(n)) - occupied)
 
-            if attempt == self.max_resample_tries:
-                ctx_candidates = set()
-
-        # If the sampled rectangle produced no usable context indices, fall back to any non-occupied patch.
-        if not ctx_candidates:
-            ctx_candidates = _complement(occupied, n)
-
-        max_ctx = n - len(occupied)
-        nctx = min(self.nctx, max_ctx)
-        ctx = _sample_k(ctx_candidates, nctx, fallback_pool=_complement(occupied, n))
+        nctx = min(self.nctx, len(ctx_candidates))
+        if nctx < len(ctx_candidates):
+            ctx = sorted(random.sample(ctx_candidates, nctx))
+        else:
+            ctx = ctx_candidates
 
         return tgt_blocks, ctx
 
@@ -191,57 +195,58 @@ class MultiBlockMaskGenerator(CollateMasker):
         """
         Generate masks for a batch.
 
-        Returns:
-            MaskOutput with:
-              context_idx: LongTensor (B, Nctx)
-              target_idx:  LongTensor (B, M, K)
-        """
-        ctx_list: list[list[int]] = []
-        tgt_list: list[list[list[int]]] = []
+        Block sizes are sampled once (shared across all images in the batch),
+        matching the original I-JEPA design. K = h*w per block varies across
+        calls but is fixed within a batch.
 
-        for _ in range(int(batch_size)):
-            tgt_blocks, ctx = self._sample_one()
-            ctx_list.append(ctx)
-            tgt_list.append(tgt_blocks)
+        When allow_overlap=False, the acceptable-region constraint can reduce
+        block sizes differently per image. We truncate to min_keep per block
+        (same as original I-JEPA collation) so the tensor stays regular.
+        """
+        B = int(batch_size)
+        M = self.num_target_blocks
+
+        # Sample block sizes once for the whole batch.
+        tgt_sizes = [
+            self._sample_rect_size(
+                self.tgt_min_scale,
+                self.tgt_max_scale,
+                self.tgt_min_aspect,
+                self.tgt_max_aspect,
+            )
+            for _ in range(M)
+        ]
+
+        all_tgt: list[list[list[int]]] = []
+        all_ctx: list[list[int]] = []
+
+        for _ in range(B):
+            tgt_blocks, ctx = self._sample_one(tgt_sizes)
+            all_tgt.append(tgt_blocks)
+            all_ctx.append(ctx)
+
+        # Truncate each block to min_keep across the batch (collation).
+        min_keep = [
+            min(len(all_tgt[b][m]) for b in range(B))
+            for m in range(M)
+        ]
+        for b in range(B):
+            for m in range(M):
+                all_tgt[b][m] = all_tgt[b][m][:min_keep[m]]
+
+        # Truncate context to min across batch.
+        min_ctx = min(len(all_ctx[b]) for b in range(B))
+        for b in range(B):
+            all_ctx[b] = all_ctx[b][:min_ctx]
+
+        # Build tensors.
+        # target_idx: (B, M, K) where K = sum would lose block structure;
+        # keep per-block: stack as (B, M, max_k) — but blocks may differ in k.
+        # Use uniform K per block (after min_keep truncation).
+        tgt_tensor = torch.tensor(all_tgt, dtype=torch.long)   # (B, M, K)
+        ctx_tensor = torch.tensor(all_ctx, dtype=torch.long)    # (B, Nctx)
 
         return MaskOutput(
-            context_idx=torch.tensor(ctx_list, dtype=torch.long),  # (B, Nctx)
-            target_idx=torch.tensor(tgt_list, dtype=torch.long),   # (B, M, K)
+            context_idx=ctx_tensor,
+            target_idx=tgt_tensor,
         )
-
-
-# ------------------------------------------------------------------
-# Private helpers (unchanged)
-# ------------------------------------------------------------------
-
-def _complement(occupied: set[int], n: int) -> set[int]:
-    """Return the set {0, ..., n-1} excluding occupied."""
-    return set(range(n)) - occupied
-
-
-def _sample_k(pool: set[int], k: int, fallback_pool: set[int]) -> list[int]:
-    """
-    Sample exactly k unique indices.
-
-    Strategy:
-      - If pool has >= k elements, sample from pool.
-      - Otherwise, take all of pool and fill the remainder from fallback_pool.
-      - If still short, sample with replacement from the union to reach length k.
-    """
-    pool_list = list(pool)
-    if len(pool_list) >= k:
-        return random.sample(pool_list, k)
-
-    chosen = pool_list[:]
-    needed = k - len(chosen)
-
-    remaining = list(fallback_pool - pool)
-    if len(remaining) >= needed:
-        chosen += random.sample(remaining, needed)
-        return chosen
-
-    chosen += remaining
-    universe = list(pool | fallback_pool)
-    while len(chosen) < k:
-        chosen.append(random.choice(universe))
-    return chosen[:k]
