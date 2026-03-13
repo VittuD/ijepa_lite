@@ -52,6 +52,7 @@ class MultiBlockMaskGenerator(CollateMasker):
         ctx_min_aspect: float = 0.75,
         ctx_max_aspect: float = 1.50,
         allow_overlap: bool = False,
+        min_keep: int = 10,
         max_resample_tries: int = 20,
     ):
         self.image_size = int(image_size)
@@ -72,6 +73,7 @@ class MultiBlockMaskGenerator(CollateMasker):
         self.ctx_max_aspect = float(ctx_max_aspect)
 
         self.allow_overlap = bool(allow_overlap)
+        self.min_keep = max(1, int(min_keep))
         self.max_resample_tries = int(max_resample_tries)
 
         self.nctx = max(1, int(round(self.num_patches * float(context_ratio))))
@@ -206,16 +208,14 @@ class MultiBlockMaskGenerator(CollateMasker):
         B = int(batch_size)
         M = self.num_target_blocks
 
-        # Sample block sizes once for the whole batch.
-        tgt_sizes = [
-            self._sample_rect_size(
-                self.tgt_min_scale,
-                self.tgt_max_scale,
-                self.tgt_min_aspect,
-                self.tgt_max_aspect,
-            )
-            for _ in range(M)
-        ]
+        # Sample ONE block size for ALL M target blocks (original I-JEPA design).
+        h, w = self._sample_rect_size(
+            self.tgt_min_scale,
+            self.tgt_max_scale,
+            self.tgt_min_aspect,
+            self.tgt_max_aspect,
+        )
+        tgt_sizes = [(h, w)] * M
 
         all_tgt: list[list[list[int]]] = []
         all_ctx: list[list[int]] = []
@@ -225,16 +225,25 @@ class MultiBlockMaskGenerator(CollateMasker):
             all_tgt.append(tgt_blocks)
             all_ctx.append(ctx)
 
-        # Truncate to a single min_keep K across ALL blocks and images so
-        # the (B, M, K) tensor is regular.  This mirrors the original I-JEPA
-        # collation which uses one min_keep_pred for every block.
-        min_keep = min(
+        # Truncate to a single K across ALL blocks and images so the
+        # (B, M, K) tensor is regular.  Floor at self.min_keep (original
+        # I-JEPA uses min_keep=10).
+        K = min(
             len(all_tgt[b][m]) for b in range(B) for m in range(M)
         )
-        min_keep = max(1, min_keep)
+        K = max(K, self.min_keep)
         for b in range(B):
             for m in range(M):
-                all_tgt[b][m] = all_tgt[b][m][:min_keep]
+                block = all_tgt[b][m]
+                if len(block) > K:
+                    all_tgt[b][m] = block[:K]
+                elif len(block) < K:
+                    # Pad with random non-occupied patches to reach min_keep
+                    have = set(block)
+                    pool = [i for i in range(self.num_patches) if i not in have]
+                    random.shuffle(pool)
+                    block = block + pool[:K - len(block)]
+                    all_tgt[b][m] = block[:K]
 
         # Truncate context to min across batch.
         min_ctx = min(len(all_ctx[b]) for b in range(B))

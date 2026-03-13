@@ -4,6 +4,7 @@ target_ratio: 0.25
 context_ratio: 0.75
 num_target_blocks: 4
 allow_overlap: false
+min_keep: 10
 
 ctx_scale:  [0.85, 1.00]
 ctx_aspect: [0.75, 1.50]
