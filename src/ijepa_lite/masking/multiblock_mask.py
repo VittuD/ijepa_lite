@@ -225,24 +225,22 @@ class MultiBlockMaskGenerator(CollateMasker):
             all_tgt.append(tgt_blocks)
             all_ctx.append(ctx)
 
-        # Truncate each block to min_keep across the batch (collation).
-        min_keep = [
-            min(len(all_tgt[b][m]) for b in range(B))
-            for m in range(M)
-        ]
+        # Truncate to a single min_keep K across ALL blocks and images so
+        # the (B, M, K) tensor is regular.  This mirrors the original I-JEPA
+        # collation which uses one min_keep_pred for every block.
+        min_keep = min(
+            len(all_tgt[b][m]) for b in range(B) for m in range(M)
+        )
+        min_keep = max(1, min_keep)
         for b in range(B):
             for m in range(M):
-                all_tgt[b][m] = all_tgt[b][m][:min_keep[m]]
+                all_tgt[b][m] = all_tgt[b][m][:min_keep]
 
         # Truncate context to min across batch.
         min_ctx = min(len(all_ctx[b]) for b in range(B))
         for b in range(B):
             all_ctx[b] = all_ctx[b][:min_ctx]
 
-        # Build tensors.
-        # target_idx: (B, M, K) where K = sum would lose block structure;
-        # keep per-block: stack as (B, M, max_k) — but blocks may differ in k.
-        # Use uniform K per block (after min_keep truncation).
         tgt_tensor = torch.tensor(all_tgt, dtype=torch.long)   # (B, M, K)
         ctx_tensor = torch.tensor(all_ctx, dtype=torch.long)    # (B, Nctx)
 
