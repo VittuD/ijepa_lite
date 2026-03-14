@@ -13,12 +13,15 @@ CLS note: I-JEPA doesn't explicitly train CLS, but it participates in
 self-attention across all layers, so it develops attention patterns.
 They're noisier than DINO's but still informative.
 
+All three modes (cls, mean, rollout) are run automatically into subdirs
+of --out-dir.
+
 Usage:
   python hacky_visualize_attention.py \
       --ckpt /path/to/last.pt \
       --experiment stl10_vits_ps8_multiblock \
       [--data-root /path/to/datasets] [--out-dir attn_viz] [--n 200] \
-      [--layer -1] [--mode cls]
+      [--layer -1]
 """
 import argparse
 import math
@@ -466,16 +469,14 @@ def main():
                         default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--layer", type=int, default=-1,
                         help="Transformer layer index (-1 = last layer)")
-    parser.add_argument("--mode", choices=["cls", "mean", "rollout"], default="cls",
-                        help="cls: CLS->patch attention, mean: avg received attention, "
-                             "rollout: attention rollout across all layers")
+    # All 3 modes (cls, mean, rollout) are run automatically into subdirs.
     args = parser.parse_args()
 
     if not args.ckpt:
         raise SystemExit("Provide --ckpt or set PRETRAIN_CKPT env")
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_root = Path(args.out_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
     print(f"Loading checkpoint: {args.ckpt}")
@@ -488,7 +489,7 @@ def main():
     print(f"  image_size={image_size}  patch_size={patch_size}  "
           f"num_patches={(image_size // patch_size) ** 2}  "
           f"num_heads={num_heads}  num_layers={num_layers}  "
-          f"layer={resolved_layer}  mode={args.mode}  device={device}")
+          f"layer={resolved_layer}  device={device}")
 
     datasets_cfg = [
         ("stl10", [
@@ -501,57 +502,65 @@ def main():
         ]),
     ]
 
-    for name, splits in datasets_cfg:
-        gh = gw = image_size // patch_size
-        total_score_sums = np.zeros((gh, gw), dtype=np.float64)
-        total_class_sums = {}
-        total_class_counts = {}
-        total_images = 0
-        class_names = []
+    all_modes = ["cls", "mean", "rollout"]
 
-        for split, loader_fn in splits:
-            print(f"\n{name}/{split}")
-            try:
-                ds = loader_fn(args.data_root)
-            except Exception as e:
-                print(f"  skipped ({e})")
-                continue
+    for mode in all_modes:
+        mode_dir = out_root / mode
+        mode_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n{'='*60}")
+        print(f"  Mode: {mode}")
+        print(f"  Output: {mode_dir}")
+        print(f"{'='*60}")
 
-            if not class_names and hasattr(ds, "classes"):
-                class_names = list(ds.classes)
+        for name, splits in datasets_cfg:
+            gh = gw = image_size // patch_size
+            total_score_sums = np.zeros((gh, gw), dtype=np.float64)
+            total_class_sums = {}
+            total_class_counts = {}
+            total_images = 0
+            class_names = []
 
-            sums, cls_sums, cls_counts, count = process_dataset(
-                model, ds, device, image_size, patch_size, num_heads,
-                args.layer, args.mode, out_dir, name, split,
-                args.n, args.grid_cols,
-            )
-            total_score_sums += sums
-            total_images += count
-            for c, arr in cls_sums.items():
-                total_class_sums[c] = total_class_sums.get(
-                    c, np.zeros((gh, gw), dtype=np.float64)) + arr
-                total_class_counts[c] = total_class_counts.get(c, 0) + cls_counts[c]
+            for split, loader_fn in splits:
+                print(f"\n{name}/{split}")
+                try:
+                    ds = loader_fn(args.data_root)
+                except Exception as e:
+                    print(f"  skipped ({e})")
+                    continue
 
-        if total_images > 0:
-            save_avg_heatmap(
-                total_score_sums, total_images,
-                out_dir / f"{name}_avg_attn_{args.mode}.png",
-                title=f"Avg {args.mode} attention (layer {resolved_layer})",
-            )
-            if total_class_sums:
-                save_per_class_heatmap(
-                    total_score_sums, total_images,
-                    total_class_sums, total_class_counts,
-                    class_names,
-                    out_dir / f"{name}_per_class_attn_{args.mode}.png",
-                    title=f"Per-class {args.mode} attention (layer {resolved_layer})",
+                if not class_names and hasattr(ds, "classes"):
+                    class_names = list(ds.classes)
+
+                sums, cls_sums, cls_counts, count = process_dataset(
+                    model, ds, device, image_size, patch_size, num_heads,
+                    args.layer, mode, mode_dir, name, split,
+                    args.n, args.grid_cols,
                 )
+                total_score_sums += sums
+                total_images += count
+                for c, arr in cls_sums.items():
+                    total_class_sums[c] = total_class_sums.get(
+                        c, np.zeros((gh, gw), dtype=np.float64)) + arr
+                    total_class_counts[c] = total_class_counts.get(c, 0) + cls_counts[c]
 
-    print(f"\nDone. Output in ./{out_dir}/")
-    print(f"Mode: {args.mode} | Layer: {resolved_layer}")
-    if args.mode == "cls":
-        print("Note: CLS is not explicitly trained in I-JEPA — patterns may be "
-              "less semantic than DINO. Try --mode rollout or --mode mean for comparison.")
+            if total_images > 0:
+                save_avg_heatmap(
+                    total_score_sums, total_images,
+                    mode_dir / f"{name}_avg_attn_{mode}.png",
+                    title=f"Avg {mode} attention (layer {resolved_layer})",
+                )
+                if total_class_sums:
+                    save_per_class_heatmap(
+                        total_score_sums, total_images,
+                        total_class_sums, total_class_counts,
+                        class_names,
+                        mode_dir / f"{name}_per_class_attn_{mode}.png",
+                        title=f"Per-class {mode} attention (layer {resolved_layer})",
+                    )
+
+    print(f"\nDone. Output in ./{out_root}/  (subdirs: {', '.join(all_modes)})")
+    print("Note: CLS is not explicitly trained in I-JEPA — patterns may be "
+          "less semantic than DINO.")
 
 
 if __name__ == "__main__":

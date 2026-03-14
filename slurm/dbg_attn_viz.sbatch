@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
-#SBATCH --time=00:10:00
+#SBATCH --time=00:15:00
 #SBATCH --output=sbatch_logs/attn_viz/%x_%j.out
 #SBATCH --error=sbatch_logs/attn_viz/%x_%j.err
 
@@ -25,9 +25,8 @@ export CKPT="$WORK/vitturini/outputs/2026-03-13/10-30-44_vanilla_baseline_multib
 export EXPERIMENT="stl10_vits_ps8_multiblock"
 export DATA_ROOT="$FAST/datasets/"
 export N=100
-export MODE="mean"
 export LAYER=-1
-export OUT_DIR="$WORK/vitturini/attn_viz_output/${SLURM_JOB_ID}_${MODE}"
+export OUT_DIR="$WORK/vitturini/attn_viz_output/${SLURM_JOB_ID}"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python $WORK/vitturini/ijepa_lite/hacky_visualize_attention.py \
@@ -36,5 +35,4 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     --data-root "$DATA_ROOT" \
     --out-dir "$OUT_DIR" \
     --n "$N" \
-    --mode "$MODE" \
     --layer "$LAYER"
