@@ -210,7 +210,7 @@ def attention_rollout(attn_maps, grid_h, grid_w):
 # Visualization helpers
 # ---------------------------------------------------------------------------
 
-def _heatmap_image(heatmap_np, cmap="inferno"):
+def _heatmap_image(heatmap_np, cmap="viridis"):
     """Convert a [0,1]-normalized heatmap to an RGB image via colormap."""
     cm = plt.get_cmap(cmap)
     return cm(heatmap_np)[..., :3]  # (H, W, 3)
@@ -268,7 +268,7 @@ def save_per_head_grid(img_np, per_head_maps, out_path, grid_h, grid_w):
         r, c = idx // cols, idx % cols
         hmap = per_head_maps[h].numpy()
         hmap = (hmap - hmap.min()) / (hmap.max() - hmap.min() + 1e-8)
-        axes[r, c].imshow(hmap, cmap="inferno", interpolation="nearest")
+        axes[r, c].imshow(hmap, cmap="viridis", interpolation="nearest")
         axes[r, c].set_title(f"head {h}", fontsize=8)
 
     plt.tight_layout(pad=0.3)
@@ -279,7 +279,7 @@ def save_per_head_grid(img_np, per_head_maps, out_path, grid_h, grid_w):
 def save_avg_heatmap(score_sums, count, out_path, title="Average attention"):
     avg = score_sums / max(count, 1)
     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-    im = ax.imshow(avg, cmap="inferno", interpolation="nearest")
+    im = ax.imshow(avg, cmap="viridis", interpolation="nearest")
     ax.set_title(title, fontsize=10)
     ax.axis("off")
     plt.colorbar(im, ax=ax, fraction=0.046)
@@ -304,7 +304,7 @@ def save_per_class_heatmap(score_sums_global, count_global,
 
     # Global average
     avg_global = score_sums_global / max(count_global, 1)
-    axes[0, 0].imshow(avg_global, cmap="inferno", interpolation="nearest")
+    axes[0, 0].imshow(avg_global, cmap="viridis", interpolation="nearest")
     axes[0, 0].set_title("all", fontsize=8)
 
     sorted_classes = sorted(class_score_sums.keys())
@@ -312,7 +312,7 @@ def save_per_class_heatmap(score_sums_global, count_global,
         idx = i + 1
         r, c_idx = idx // cols, idx % cols
         avg = class_score_sums[c] / max(class_counts[c], 1)
-        axes[r, c_idx].imshow(avg, cmap="inferno", interpolation="nearest")
+        axes[r, c_idx].imshow(avg, cmap="viridis", interpolation="nearest")
         name = class_names[c] if c < len(class_names) else str(c)
         axes[r, c_idx].set_title(name, fontsize=7)
 
