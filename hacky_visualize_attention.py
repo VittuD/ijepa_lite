@@ -210,22 +210,10 @@ def attention_rollout(attn_maps, grid_h, grid_w):
 # Visualization helpers
 # ---------------------------------------------------------------------------
 
-def _overlay_heatmap(img_np, heatmap_np, alpha=0.5, cmap="inferno"):
-    """Overlay a [0,1]-normalized heatmap on an RGB image."""
+def _heatmap_image(heatmap_np, cmap="inferno"):
+    """Convert a [0,1]-normalized heatmap to an RGB image via colormap."""
     cm = plt.get_cmap(cmap)
-    heatmap_color = cm(heatmap_np)[..., :3]  # (H, W, 3)
-    # Upsample heatmap to image size
-    if heatmap_color.shape[:2] != img_np.shape[:2]:
-        heatmap_color = np.array(
-            torch.nn.functional.interpolate(
-                torch.tensor(heatmap_color).permute(2, 0, 1).unsqueeze(0).float(),
-                size=img_np.shape[:2],
-                mode="bilinear",
-                align_corners=False,
-            )[0].permute(1, 2, 0)
-        )
-    blended = (1 - alpha) * img_np + alpha * heatmap_color
-    return blended.clip(0, 1)
+    return cm(heatmap_np)[..., :3]  # (H, W, 3)
 
 
 def save_grid(images_panels, out_path, grid_cols=10):
@@ -280,7 +268,7 @@ def save_per_head_grid(img_np, per_head_maps, out_path, grid_h, grid_w):
         r, c = idx // cols, idx % cols
         hmap = per_head_maps[h].numpy()
         hmap = (hmap - hmap.min()) / (hmap.max() - hmap.min() + 1e-8)
-        axes[r, c].imshow(_overlay_heatmap(img_np, hmap))
+        axes[r, c].imshow(hmap, cmap="inferno", interpolation="nearest")
         axes[r, c].set_title(f"head {h}", fontsize=8)
 
     plt.tight_layout(pad=0.3)
@@ -420,8 +408,8 @@ def process_dataset(model, dataset, device, image_size, patch_size, num_heads,
             ) + hmap_norm
             class_counts[label] = class_counts.get(label, 0) + 1
 
-            overlay = _overlay_heatmap(img_np, hmap_norm)
-            all_panels.append([img_np, overlay])
+            hmap_rgb = _heatmap_image(hmap_norm)
+            all_panels.append([img_np, hmap_rgb])
 
         print(f"\r  Processed {min(batch_end, n)}/{n}", end="", flush=True)
 
