@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=08:00:00
-#SBATCH --output=sbatch_logs/%x_%j.out
-#SBATCH --error=sbatch_logs/%x_%j.err
+#SBATCH --output=sbatch_logs/vanilla_baseline/%x_%j.out
+#SBATCH --error=sbatch_logs/vanilla_baseline/%x_%j.err
 
 set -euo pipefail
 
@@ -35,8 +35,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_multiblock \
-      exp_name=vanilla_multiblock_stl10 \
+      exp_name=vanilla_baseline_multiblock_stl10 \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
-      train.viz.out_dir="viz_output_vanilla_multiblock_stl10" \
+      train.viz.out_dir="viz_output_vanilla_baseline_multiblock_stl10" \
       logger.mode=offline

@@ -35,8 +35,8 @@ EXPERIMENTS=(
   stl10_vits_ps8_multiblock_unclaimed_tgt
 )
 EXP_NAMES=(
-  unclaimed_to_ctx
-  unclaimed_to_tgt
+  vanilla_unclaimed_to_ctx
+  vanilla_unclaimed_to_tgt
 )
 
 EXP=${EXPERIMENTS[$SLURM_ARRAY_TASK_ID]}
