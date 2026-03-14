@@ -61,6 +61,7 @@ class IJEPAModel(nn.Module):
         # New: learned masker path.
         latent_masker: Optional[LatentMasker] = None,
         token_compressor: Optional[TokenCompressor] = None,
+        predict_blocks_jointly: bool = True,
     ) -> None:
         super().__init__()
 
@@ -77,6 +78,8 @@ class IJEPAModel(nn.Module):
         self.loss_fn = loss_fn
         self.ema_momentum = float(ema_momentum)
         self._mask_generator = mask_generator   # fallback only
+
+        self.predict_blocks_jointly = predict_blocks_jointly
 
         # Registered as submodules so their params are checkpointed and optimised.
         self.latent_masker = latent_masker
@@ -340,6 +343,32 @@ class IJEPAModel(nn.Module):
     ):
         m = tgt_idx.shape[1]
         k = tgt_idx.shape[2]
+
+        # -- Separate prediction: each block predicted independently -----------
+        if not self.predict_blocks_jointly:
+            preds_list = []
+            tgts_list = []
+            ploss_list = []
+            for i in range(m):
+                block_idx = tgt_idx[:, i, :]  # (B, K)
+                block_tgt = tgt_tokens_all.gather(
+                    1, block_idx.unsqueeze(-1).expand(-1, -1, d)
+                )  # (B, K, D)
+                block_pred = self.predictor(
+                    ctx_tokens, ctx_idx=ctx_idx, tgt_idx=block_idx
+                )  # (B, K, D)
+                block_ploss = self.loss_fn(block_pred, block_tgt, reduction="none")  # (B, K)
+                preds_list.append(block_pred)
+                tgts_list.append(block_tgt)
+                ploss_list.append(block_ploss)
+
+            pred = torch.stack(preds_list, dim=1)        # (B, M, K, D)
+            tgt_tokens = torch.stack(tgts_list, dim=1)   # (B, M, K, D)
+            patch_loss_cat = torch.cat(ploss_list, dim=1) # (B, M*K)
+            loss = patch_loss_cat.mean()
+            return loss, pred, tgt_tokens, patch_loss_cat
+
+        # -- Joint prediction (default): all blocks concatenated ---------------
         tgt_idx_cat = tgt_idx.reshape(b, m * k)  # (B, M*K)
 
         tgt_tokens_cat = tgt_tokens_all.gather(

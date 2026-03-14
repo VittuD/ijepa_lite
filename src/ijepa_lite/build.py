@@ -347,6 +347,7 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         mask_generator=None,
         latent_masker=latent_masker,
         token_compressor=compressor,
+        predict_blocks_jointly=bool(getattr(cfg.model, "predict_blocks_jointly", True)),
     )
 
 
