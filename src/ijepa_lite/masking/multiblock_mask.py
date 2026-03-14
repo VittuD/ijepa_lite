@@ -264,20 +264,8 @@ class MultiBlockMaskGenerator(CollateMasker):
         if nctx < len(ctx):
             ctx = sorted(random.sample(ctx, nctx))
 
-        # Redistribute unclaimed patches if requested.
-        if self.unclaimed != "ignore":
-            claimed: set[int] = set(ctx)
-            for block in tgt_blocks:
-                claimed.update(block)
-            unclaimed = sorted(set(range(self.num_patches)) - claimed)
-
-            if self.unclaimed == "context":
-                ctx = sorted(ctx + unclaimed)
-            elif self.unclaimed == "target":
-                for i, idx in enumerate(unclaimed):
-                    tgt_blocks[i % len(tgt_blocks)].append(idx)
-                for block in tgt_blocks:
-                    block.sort()
+        if self.unclaimed == "target":
+            tgt_blocks.append([])  # placeholder, filled by __call__
 
         return tgt_blocks, ctx
 
@@ -320,12 +308,14 @@ class MultiBlockMaskGenerator(CollateMasker):
         # Truncate to a single K across ALL blocks and images so the
         # (B, M, K) tensor is regular.  Floor at self.min_keep (original
         # I-JEPA uses min_keep=10).
+        # Use actual block count (may be M+1 when unclaimed="target").
+        actual_M = len(all_tgt[0])
         K = min(
-            len(all_tgt[b][m]) for b in range(B) for m in range(M)
+            len(all_tgt[b][m]) for b in range(B) for m in range(actual_M)
         )
         K = max(K, self.min_keep)
         for b in range(B):
-            for m in range(M):
+            for m in range(actual_M):
                 block = all_tgt[b][m]
                 if len(block) > K:
                     all_tgt[b][m] = block[:K]
@@ -337,10 +327,46 @@ class MultiBlockMaskGenerator(CollateMasker):
                     block = block + pool[:K - len(block)]
                     all_tgt[b][m] = block[:K]
 
-        # Truncate context to min across batch.
-        min_ctx = min(len(all_ctx[b]) for b in range(B))
-        for b in range(B):
-            all_ctx[b] = all_ctx[b][:min_ctx]
+        # Truncate context to min across batch (skipped for unclaimed="context").
+        if self.unclaimed != "context":
+            min_ctx = min(len(all_ctx[b]) for b in range(B))
+            for b in range(B):
+                all_ctx[b] = all_ctx[b][:min_ctx]
+
+        # --- Redistribute unclaimed patches (after all truncation) ---
+        if self.unclaimed == "context":
+            # Recompute ctx as complement of all target patches → zero grey.
+            for b in range(B):
+                tgt_set = set()
+                for m in range(actual_M):
+                    tgt_set.update(all_tgt[b][m])
+                all_ctx[b] = sorted(set(range(self.num_patches)) - tgt_set)
+            # Ensure constant ctx size across batch (should already be constant
+            # since each image has exactly actual_M * K target patches).
+            min_ctx = min(len(all_ctx[b]) for b in range(B))
+            for b in range(B):
+                all_ctx[b] = all_ctx[b][:min_ctx]
+
+        elif self.unclaimed == "target":
+            # Fill the placeholder block (last block) with unclaimed patches.
+            for b in range(B):
+                tgt_set = set()
+                for m in range(actual_M - 1):  # exclude placeholder
+                    tgt_set.update(all_tgt[b][m])
+                ctx_set = set(all_ctx[b])
+                unclaimed_patches = sorted(
+                    set(range(self.num_patches)) - tgt_set - ctx_set
+                )
+                block = unclaimed_patches
+                if len(block) > K:
+                    block = block[:K]
+                elif len(block) < K:
+                    have = set(block)
+                    pool = [i for i in range(self.num_patches) if i not in have]
+                    random.shuffle(pool)
+                    block = block + pool[:K - len(block)]
+                    block = block[:K]
+                all_tgt[b][-1] = block
 
         tgt_tensor = torch.tensor(all_tgt, dtype=torch.long)   # (B, M, K)
         ctx_tensor = torch.tensor(all_ctx, dtype=torch.long)    # (B, Nctx)
