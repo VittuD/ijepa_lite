@@ -9,8 +9,8 @@
 #SBATCH --gres=gpu:4
 #SBATCH --time=08:00:00
 #SBATCH --array=0-1
-#SBATCH --output=sbatch_logs/%x_%A_%a.out
-#SBATCH --error=sbatch_logs/%x_%A_%a.err
+#SBATCH --output=sbatch_logs/unclaimed_ablation/%x_%A_%a.out
+#SBATCH --error=sbatch_logs/unclaimed_ablation/%x_%A_%a.err
 
 set -euo pipefail
 

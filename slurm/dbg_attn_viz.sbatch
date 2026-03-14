@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:1
-#SBATCH --time=00:30:00
+#SBATCH --time=00:10:00
 #SBATCH --output=sbatch_logs/attn_viz/%x_%j.out
 #SBATCH --error=sbatch_logs/attn_viz/%x_%j.err
 
@@ -21,15 +21,20 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
-CKPT="${1:?Usage: sbatch dbg_attn_viz.sbatch <ckpt_path> [experiment]}"
-EXPERIMENT="${2:-stl10_vits_ps8_multiblock}"
+export CKPT="$WORK/vitturini/outputs/2026-03-13/10-30-44_vanilla_baseline_multiblock_stl10/rank0/checkpoints/last.pt"
+export EXPERIMENT="stl10_vits_ps8_multiblock"
+export OUT_DIR="$WORK/vitturini/attn_viz_output"
+export DATA_ROOT="$FAST/datasets/"
+export N=100
+export MODE="cls"
+export LAYER=-1
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python $WORK/vitturini/ijepa_lite/hacky_visualize_attention.py \
     --ckpt "$CKPT" \
     --experiment "$EXPERIMENT" \
-    --data-root "$FAST/datasets/" \
-    --out-dir "$WORK/vitturini/attn_viz_output" \
-    --n 200 \
-    --mode cls \
-    --layer -1
+    --data-root "$DATA_ROOT" \
+    --out-dir "$OUT_DIR" \
+    --n "$N" \
+    --mode "$MODE" \
+    --layer "$LAYER"
