@@ -83,6 +83,38 @@ class NegSurpriseTerm(MaskerTerm):
 
 
 # ------------------------------------------------------------------
+# −centroid distance — ||μ_ctx − μ_tgt||² (minimise → maximise)
+#
+# Same as neg_surprise but without the within-target variance term.
+# See bias-variance decomposition:
+#   E_tgt[||z_i − μ_ctx||²] = ||μ_tgt − μ_ctx||² + Var_tgt
+# ------------------------------------------------------------------
+
+class NegCentroidDistTerm(MaskerTerm):
+    name = "neg_centroid_dist"
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        # Context centroid (collapse-safe, blended with image mean)
+        image_mean = ema_full.mean(dim=1)                                    # (B, D)
+        p_ctx_sum = p_ctx.sum(dim=1, keepdim=True)                           # (B, 1)
+        ctx_weighted = (p_ctx.unsqueeze(-1) * ema_full).sum(dim=1)           # (B, D)
+        virtual_w = (1.0 - p_ctx_sum).clamp(min=0.0)                        # (B, 1)
+        ctx_centroid = (ctx_weighted + virtual_w * image_mean) \
+                       / (p_ctx_sum + virtual_w).clamp(min=1e-6)             # (B, D)
+
+        # Target centroid (same blending for symmetry)
+        p_tgt_sum = p_tgt.sum(dim=1, keepdim=True)                           # (B, 1)
+        tgt_weighted = (p_tgt.unsqueeze(-1) * ema_full).sum(dim=1)           # (B, D)
+        virtual_w_tgt = (1.0 - p_tgt_sum).clamp(min=0.0)                    # (B, 1)
+        tgt_centroid = (tgt_weighted + virtual_w_tgt * image_mean) \
+                       / (p_tgt_sum + virtual_w_tgt).clamp(min=1e-6)         # (B, D)
+
+        dist = (ctx_centroid - tgt_centroid).pow(2).mean(-1).mean()          # scalar
+
+        return -dist, {"centroid_dist_mean": float(dist.detach().item())}
+
+
+# ------------------------------------------------------------------
 # Floor penalty — ReLU(h_floor − H(Y|n))²
 # ------------------------------------------------------------------
 
@@ -156,6 +188,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "H_cond": HCondTerm,
     "neg_H_marg": NegHMargTerm,
     "neg_surprise": NegSurpriseTerm,
+    "neg_centroid_dist": NegCentroidDistTerm,
     "floor_penalty": FloorPenaltyTerm,
     "ignore_tax": IgnoreTaxTerm,
     "context_rate": ContextRateTerm,

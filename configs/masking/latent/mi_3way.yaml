@@ -8,6 +8,8 @@ terms:
     weight: [0.01, 1.0]
   neg_surprise:
     weight: [0.01, 0.5]
+  neg_centroid_dist:
+    weight: [0, 0]
   floor_penalty:
     weight: [5.0, 5.0]
     h_floor: 0.1
