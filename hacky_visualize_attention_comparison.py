@@ -292,13 +292,15 @@ def _heatmap_image(heatmap_np, cmap="viridis"):
     return cm(heatmap_np)[..., :3]
 
 
-def save_comparison_grid(panels_list, out_path, grid_cols=10):
+def save_comparison_grid(panels_list, out_path, grid_cols=10, labels=None):
     """
-    panels_list: list of (img_np, hmap_ours_np, hmap_orig_np) tuples.
-    Each is an RGB array.
+    panels_list: list of tuples, each tuple = panels for one sample.
+    labels: column header labels (e.g. ["image", "ours", "I-JEPA"] or ["image", "I-JEPA"]).
     """
     n = len(panels_list)
-    n_panels = 3  # [image | ours | original]
+    n_panels = len(panels_list[0])
+    if labels is None:
+        labels = [f"panel {i}" for i in range(n_panels)]
     n_rows = math.ceil(n / grid_cols)
 
     fig, axes = plt.subplots(
@@ -314,16 +316,14 @@ def save_comparison_grid(panels_list, out_path, grid_cols=10):
     for col in range(grid_cols):
         base = col * n_panels
         if col == 0:
-            axes[0, base].set_title("image", fontsize=7, pad=2)
-            axes[0, base + 1].set_title("ours", fontsize=7, pad=2)
-            axes[0, base + 2].set_title("I-JEPA", fontsize=7, pad=2)
+            for j, label in enumerate(labels):
+                axes[0, base + j].set_title(label, fontsize=7, pad=2)
 
-    for i, (img, hm_ours, hm_orig) in enumerate(panels_list):
+    for i, panels in enumerate(panels_list):
         row = i // grid_cols
         base = (i % grid_cols) * n_panels
-        axes[row, base].imshow(img)
-        axes[row, base + 1].imshow(hm_ours)
-        axes[row, base + 2].imshow(hm_orig)
+        for j, panel in enumerate(panels):
+            axes[row, base + j].imshow(panel)
 
     plt.tight_layout(pad=0.2)
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -350,26 +350,30 @@ def save_avg_heatmap(score_sums, count, out_path, title="Average attention"):
 def process(our_model, orig_model, dataset, device,
             our_img_size, our_patch_size, orig_img_size, orig_patch_size,
             mode, out_dir, n, grid_cols):
-    our_gh = our_gw = our_img_size // our_patch_size      # 12×12
+    has_ours = our_model is not None
     orig_gh = orig_gw = orig_img_size // orig_patch_size   # 16×16
 
-    tfm_ours = _make_transform(our_img_size)
     tfm_orig = _make_transform(orig_img_size)
+    tfm_ours = _make_transform(our_img_size) if has_ours else None
 
-    our_num_layers = len(our_model.target_encoder.vit.encoder.layers)
     orig_num_layers = len(orig_model.blocks)
-
-    # For rollout: all layers; for mean: last layer only
-    our_layer = our_num_layers - 1
     orig_layer = orig_num_layers - 1
-    our_capture = list(range(our_num_layers)) if mode == "rollout" else [our_layer]
     orig_capture = list(range(orig_num_layers)) if mode == "rollout" else [orig_layer]
+
+    if has_ours:
+        our_gh = our_gw = our_img_size // our_patch_size
+        our_num_layers = len(our_model.target_encoder.vit.encoder.layers)
+        our_layer = our_num_layers - 1
+        our_capture = list(range(our_num_layers)) if mode == "rollout" else [our_layer]
+    else:
+        our_gh = our_gw = our_layer = 0
+        our_capture = []
 
     n = min(n, len(dataset))
     batch_size = 16  # ViT-H is large
 
     # Accumulators
-    our_sums = np.zeros((our_gh, our_gw), dtype=np.float64)
+    our_sums = np.zeros((our_gh, our_gw), dtype=np.float64) if has_ours else None
     orig_sums = np.zeros((orig_gh, orig_gw), dtype=np.float64)
     total = 0
     all_panels = []
@@ -377,62 +381,71 @@ def process(our_model, orig_model, dataset, device,
     for batch_start in range(0, n, batch_size):
         batch_end = min(batch_start + batch_size, n)
 
-        imgs_ours = []
         imgs_orig = []
-        display_imgs = []
+        imgs_ours = []
         for idx in range(batch_start, batch_end):
             img, _ = dataset[idx]
-            imgs_ours.append(tfm_ours(img))
             imgs_orig.append(tfm_orig(img))
+            if has_ours:
+                imgs_ours.append(tfm_ours(img))
 
-        batch_ours = torch.stack(imgs_ours).to(device)
         batch_orig = torch.stack(imgs_orig).to(device)
-
-        attn_ours = get_attn_our_model(our_model, batch_ours, our_capture)
         attn_orig = get_attn_original(orig_model, batch_orig, orig_capture)
-
-        bs = batch_ours.shape[0]
-        hmaps_ours = compute_heatmap(attn_ours, mode, our_gh, our_gw,
-                                     has_cls=True, layer_idx=our_layer)
         hmaps_orig = compute_heatmap(attn_orig, mode, orig_gh, orig_gw,
                                      has_cls=False, layer_idx=orig_layer)
 
+        hmaps_ours = None
+        if has_ours:
+            batch_ours = torch.stack(imgs_ours).to(device)
+            attn_ours = get_attn_our_model(our_model, batch_ours, our_capture)
+            hmaps_ours = compute_heatmap(attn_ours, mode, our_gh, our_gw,
+                                         has_cls=True, layer_idx=our_layer)
+
+        bs = batch_orig.shape[0]
         for i in range(bs):
-            img_np = _denorm(batch_ours[i])
+            # Use orig-resolution image for display (higher res)
+            img_np = _denorm(batch_orig[i])
 
-            hm_ours = hmaps_ours[i].cpu().numpy()
             hm_orig = hmaps_orig[i].cpu().numpy()
-
-            hm_ours_norm = (hm_ours - hm_ours.min()) / (hm_ours.max() - hm_ours.min() + 1e-8)
             hm_orig_norm = (hm_orig - hm_orig.min()) / (hm_orig.max() - hm_orig.min() + 1e-8)
-
-            our_sums += hm_ours_norm
             orig_sums += hm_orig_norm
             total += 1
 
-            all_panels.append((
-                img_np,
-                _heatmap_image(hm_ours_norm),
-                _heatmap_image(hm_orig_norm),
-            ))
+            if has_ours:
+                hm_ours = hmaps_ours[i].cpu().numpy()
+                hm_ours_norm = (hm_ours - hm_ours.min()) / (hm_ours.max() - hm_ours.min() + 1e-8)
+                our_sums += hm_ours_norm
+                all_panels.append((
+                    img_np,
+                    _heatmap_image(hm_ours_norm),
+                    _heatmap_image(hm_orig_norm),
+                ))
+            else:
+                all_panels.append((
+                    img_np,
+                    _heatmap_image(hm_orig_norm),
+                ))
 
         print(f"\r  Processed {min(batch_end, n)}/{n}", end="", flush=True)
 
     print()
 
-    # Save comparison grid
+    # Save grid
     if all_panels:
+        labels = ["image", "ours", "I-JEPA"] if has_ours else ["image", "I-JEPA"]
         save_comparison_grid(
             all_panels[:min(len(all_panels), grid_cols * 20)],
             out_dir / f"comparison_{mode}.png",
             grid_cols=grid_cols,
+            labels=labels,
         )
 
     # Save per-model average heatmaps
     if total > 0:
-        save_avg_heatmap(our_sums, total,
-                         out_dir / f"ours_avg_{mode}.png",
-                         title=f"Ours avg {mode} (layer {our_layer})")
+        if has_ours:
+            save_avg_heatmap(our_sums, total,
+                             out_dir / f"ours_avg_{mode}.png",
+                             title=f"Ours avg {mode} (layer {our_layer})")
         save_avg_heatmap(orig_sums, total,
                          out_dir / f"original_avg_{mode}.png",
                          title=f"I-JEPA ViT-H avg {mode} (layer {orig_layer})")
@@ -446,14 +459,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="Compare attention maps: our EMA encoder vs original I-JEPA ViT-H/14."
     )
-    parser.add_argument("--ckpt-ours", required=True,
-                        help="Our model checkpoint")
+    parser.add_argument("--ckpt-ours", default=None,
+                        help="Our model checkpoint (omit to run original only)")
     parser.add_argument("--ckpt-orig", required=True,
                         help="Original I-JEPA ViT-H/14 checkpoint (.pth.tar)")
-    parser.add_argument("--experiment", required=True,
-                        help="Hydra experiment config name for our model")
+    parser.add_argument("--experiment", default=None,
+                        help="Hydra experiment config name for our model "
+                             "(required when --ckpt-ours is set)")
     parser.add_argument("--data-root",
                         default=os.environ.get("FAST", "/scratch") + "/datasets/")
+    parser.add_argument("--dataset", choices=["stl10", "imagenet"], default="stl10",
+                        help="Dataset to visualize on")
     parser.add_argument("--out-dir", default="attn_comparison")
     parser.add_argument("--n", type=int, default=100)
     parser.add_argument("--grid-cols", type=int, default=10)
@@ -461,19 +477,24 @@ def main():
                         default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
+    if args.ckpt_ours and not args.experiment:
+        raise SystemExit("--experiment is required when --ckpt-ours is set")
+
     out_root = Path(args.out_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
     # Load models
-    print(f"Loading our model: {args.ckpt_ours}")
-    our_model, our_img_size, our_patch_size = _load_our_model(
-        args.ckpt_ours, args.experiment, device
-    )
-    our_grid = our_img_size // our_patch_size
-    print(f"  image_size={our_img_size}  patch_size={our_patch_size}  "
-          f"grid={our_grid}x{our_grid}  "
-          f"layers={len(our_model.target_encoder.vit.encoder.layers)}")
+    our_model = our_img_size = our_patch_size = None
+    if args.ckpt_ours:
+        print(f"Loading our model: {args.ckpt_ours}")
+        our_model, our_img_size, our_patch_size = _load_our_model(
+            args.ckpt_ours, args.experiment, device
+        )
+        our_grid = our_img_size // our_patch_size
+        print(f"  image_size={our_img_size}  patch_size={our_patch_size}  "
+              f"grid={our_grid}x{our_grid}  "
+              f"layers={len(our_model.target_encoder.vit.encoder.layers)}")
 
     print(f"Loading original I-JEPA: {args.ckpt_orig}")
     orig_model, orig_img_size, orig_patch_size = _load_original_ijepa(
@@ -484,12 +505,15 @@ def main():
           f"grid={orig_grid}x{orig_grid}  "
           f"layers={len(orig_model.blocks)}")
 
-    # Load STL-10
-    print(f"\nLoading STL-10 from {args.data_root}")
+    # Load dataset
+    print(f"\nLoading {args.dataset} from {args.data_root}")
     try:
-        ds = tv_datasets.STL10(args.data_root, split="test", download=False)
+        if args.dataset == "stl10":
+            ds = tv_datasets.STL10(args.data_root, split="test", download=False)
+        elif args.dataset == "imagenet":
+            ds = tv_datasets.ImageNet(args.data_root, split="val")
     except Exception as e:
-        raise SystemExit(f"Failed to load STL-10: {e}")
+        raise SystemExit(f"Failed to load {args.dataset}: {e}")
 
     # Run all modes
     for mode in ["mean", "rollout"]:
