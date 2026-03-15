@@ -511,7 +511,8 @@ def main():
         if args.dataset == "stl10":
             ds = tv_datasets.STL10(args.data_root, split="test", download=False)
         elif args.dataset == "imagenet":
-            ds = tv_datasets.ImageNet(args.data_root, split="val")
+            val_dir = os.path.join(args.data_root, "val")
+            ds = tv_datasets.ImageFolder(val_dir)
     except Exception as e:
         raise SystemExit(f"Failed to load {args.dataset}: {e}")
 
