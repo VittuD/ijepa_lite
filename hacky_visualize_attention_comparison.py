@@ -292,6 +292,16 @@ def _heatmap_image(heatmap_np, cmap="viridis"):
     return cm(heatmap_np)[..., :3]
 
 
+def _norm_minmax(hm):
+    return (hm - hm.min()) / (hm.max() - hm.min() + 1e-8)
+
+
+def _norm_pctl(hm, pctl=95):
+    lo = hm.min()
+    hi = np.percentile(hm, pctl)
+    return np.clip((hm - lo) / (hi - lo + 1e-8), 0, 1)
+
+
 def save_comparison_grid(panels_list, out_path, grid_cols=10, labels=None):
     """
     panels_list: list of tuples, each tuple = panels for one sample.
@@ -407,23 +417,26 @@ def process(our_model, orig_model, dataset, device,
             img_np = _denorm(batch_orig[i])
 
             hm_orig = hmaps_orig[i].cpu().numpy()
-            hm_orig_norm = (hm_orig - hm_orig.min()) / (hm_orig.max() - hm_orig.min() + 1e-8)
+            hm_orig_norm = _norm_minmax(hm_orig)
+            hm_orig_clip = _norm_pctl(hm_orig, 95)
             orig_sums += hm_orig_norm
             total += 1
 
             if has_ours:
                 hm_ours = hmaps_ours[i].cpu().numpy()
-                hm_ours_norm = (hm_ours - hm_ours.min()) / (hm_ours.max() - hm_ours.min() + 1e-8)
+                hm_ours_norm = _norm_minmax(hm_ours)
                 our_sums += hm_ours_norm
                 all_panels.append((
                     img_np,
                     _heatmap_image(hm_ours_norm),
                     _heatmap_image(hm_orig_norm),
+                    _heatmap_image(hm_orig_clip),
                 ))
             else:
                 all_panels.append((
                     img_np,
                     _heatmap_image(hm_orig_norm),
+                    _heatmap_image(hm_orig_clip),
                 ))
 
         print(f"\r  Processed {min(batch_end, n)}/{n}", end="", flush=True)
@@ -432,7 +445,8 @@ def process(our_model, orig_model, dataset, device,
 
     # Save grid
     if all_panels:
-        labels = ["image", "ours", "I-JEPA"] if has_ours else ["image", "I-JEPA"]
+        labels = (["image", "ours", "I-JEPA", "I-JEPA p95"]
+                  if has_ours else ["image", "I-JEPA", "I-JEPA p95"])
         save_comparison_grid(
             all_panels[:min(len(all_panels), grid_cols * 20)],
             out_dir / f"comparison_{mode}.png",
