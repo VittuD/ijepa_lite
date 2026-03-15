@@ -133,14 +133,40 @@ def _load_our_model(ckpt_path: str, experiment: str, device: torch.device):
     return model, image_size, patch_size
 
 
+def _import_ijepa_vit():
+    """Import vit_huge from the original I-JEPA repo without requiring package install."""
+    import importlib.util
+
+    ijepa_root = Path(__file__).resolve().parent / "ijepa"
+
+    # We need to load the dependency modules first (src.utils.tensors, src.masks.utils)
+    # because vision_transformer.py imports them at module level.
+    # Load them as fake `src.*` packages so the imports resolve.
+    def _load_module(mod_name, file_path):
+        spec = importlib.util.spec_from_file_location(mod_name, file_path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    # Create the package stubs so nested imports work
+    import types
+    for pkg in ["src", "src.utils", "src.masks", "src.models"]:
+        if pkg not in sys.modules:
+            sys.modules[pkg] = types.ModuleType(pkg)
+
+    _load_module("src.utils.tensors",
+                 str(ijepa_root / "src" / "utils" / "tensors.py"))
+    _load_module("src.masks.utils",
+                 str(ijepa_root / "src" / "masks" / "utils.py"))
+    vit_mod = _load_module("src.models.vision_transformer",
+                           str(ijepa_root / "src" / "models" / "vision_transformer.py"))
+    return vit_mod.vit_huge
+
+
 def _load_original_ijepa(ckpt_path: str, device: torch.device):
     """Load original I-JEPA ViT-H/14 target encoder."""
-    # Add original I-JEPA root to path (imports use `src.models.…`, `src.utils.…`)
-    ijepa_root = str(Path(__file__).resolve().parent / "ijepa")
-    if ijepa_root not in sys.path:
-        sys.path.insert(0, ijepa_root)
-
-    from src.models.vision_transformer import vit_huge
+    vit_huge = _import_ijepa_vit()
 
     model = vit_huge(patch_size=14)
     model.to(device)
