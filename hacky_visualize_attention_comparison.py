@@ -135,12 +135,12 @@ def _load_our_model(ckpt_path: str, experiment: str, device: torch.device):
 
 def _load_original_ijepa(ckpt_path: str, device: torch.device):
     """Load original I-JEPA ViT-H/14 target encoder."""
-    # Add original I-JEPA source to path
-    ijepa_src = str(Path(__file__).resolve().parent / "ijepa" / "src")
-    if ijepa_src not in sys.path:
-        sys.path.insert(0, ijepa_src)
+    # Add original I-JEPA root to path (imports use `src.models.…`, `src.utils.…`)
+    ijepa_root = str(Path(__file__).resolve().parent / "ijepa")
+    if ijepa_root not in sys.path:
+        sys.path.insert(0, ijepa_root)
 
-    from models.vision_transformer import vit_huge
+    from src.models.vision_transformer import vit_huge
 
     model = vit_huge(patch_size=14)
     model.to(device)
