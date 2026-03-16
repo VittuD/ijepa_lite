@@ -466,8 +466,11 @@ class MINWayMasker(LatentMasker):
                         p_ctx_b, self.nctx_min, dim=-1, sorted=False,
                     )
                 ctx_lists.append(ctx_b)
-            # Pad context to uniform size
-            nctx = max(self.nctx_min, max(c.numel() for c in ctx_lists))
+            # Pad context to uniform size, capped like targets
+            nctx = max(self.nctx_min, min(
+                K_max_cap,
+                max(c.numel() for c in ctx_lists),
+            ))
             ctx_padded = []
             for ctx_b in ctx_lists:
                 n = ctx_b.numel()
