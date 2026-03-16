@@ -1,0 +1,17 @@
+# @package masking.latent
+name: mi_nway
+
+num_tgt_blocks: 4
+ntgt_min_per_block: 4
+nctx_min: 1
+
+terms:
+  nway_neg_H_marg:
+    weight: [0.01, 1.0]
+  nway_cross_surprise:
+    weight: [0.01, 0.5]
+  nway_floor_penalty:
+    weight: [5.0, 5.0]
+    h_floor: 0.1
+
+warmup_epochs: 0

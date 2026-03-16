@@ -1,0 +1,26 @@
+# @package loss
+#
+# N-way MI masker loss configuration.
+#
+# How it maps to code
+# -------------------
+# `kind: mi_nway` tells build.py to wire up MINWayMasker's owns_loss path.
+#
+# ijepa.py uses VanillaTokenLoss(kind=base_kind, normalize=normalize) to
+# produce a scalar reconstruction_loss, which is passed into
+# MINWayMasker.aux_loss().  The masker then computes the full objective:
+#
+#   total = reconstruction_loss
+#         - w₁ · H_marg(M+2 categories)
+#         - w₂ · cross_target_surprise
+#         + w₃ · floor_penalty
+#
+# No ctx-vs-tgt distance terms (adversarial — see nway_loss_design.md).
+
+kind: mi_nway
+
+# Per-patch distortion function used by ijepa.py before soft-weighting.
+base_kind: smooth_l1
+
+# Whether to L2-normalise pred and target before computing the distortion.
+normalize: false

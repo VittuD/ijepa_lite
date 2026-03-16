@@ -244,3 +244,230 @@ class MIRateMasker(LatentMasker):
         mask_output.aux.update(logs)
 
         return reconstruction_loss + total
+
+
+# ======================================================================
+# N-way MI masker (cross-target surprise, no ctx-vs-tgt terms)
+# ======================================================================
+
+
+@register("mi_nway")
+class MINWayMasker(LatentMasker):
+    """
+    N-way MI masker with (M+2)-way categorical assignments.
+
+    Assigns each patch to (ctx, tgt₁, ..., tgt_M, ign). Loss terms only
+    push target blocks apart (inter-target surprise). Context relevance
+    emerges naturally without adversarial ctx-vs-tgt distance terms.
+    """
+
+    owns_loss: bool = True
+    needs_full_tokens: bool = True
+
+    def __init__(
+        self,
+        dim: int,
+        predictor_dim: int,
+        depth: int,
+        num_heads: int,
+        mlp_ratio: float,
+        dropout: float,
+        num_patches: int,
+        terms: dict,
+        num_tgt_blocks: int = 4,
+        ntgt_min_per_block: int = 4,
+        nctx_min: int = 1,
+        warmup_epochs: int = 0,
+        pos_embed_kind: str = "learned",
+        # Unused — kept for build.py kwarg filtering
+        base_kind: str = "smooth_l1",
+        normalize: bool = False,
+    ) -> None:
+        super().__init__()
+
+        self.num_patches = int(num_patches)
+        self.M = int(num_tgt_blocks)
+        self.ntgt_min_per_block = max(1, int(ntgt_min_per_block))
+        self.nctx_min = max(1, int(nctx_min))
+        self.warmup_epochs = int(warmup_epochs)
+
+        self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
+
+        d = predictor_dim
+
+        from ijepa_lite.models.pos_embed import build_pos_embed_2d
+
+        grid_size = int(math.isqrt(num_patches))
+
+        # ----------------------------------------------------------------
+        # Transformer backbone (same as MIRateMasker)
+        # ----------------------------------------------------------------
+        self.proj_in = nn.Linear(dim, d)
+
+        self.pos_embed = build_pos_embed_2d(pos_embed_kind, grid_size, d)
+        self.selection_token = nn.Parameter(torch.zeros(1, 1, d))
+
+        layer = nn.TransformerEncoderLayer(
+            d_model=d,
+            nhead=num_heads,
+            dim_feedforward=int(d * mlp_ratio),
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.blocks = nn.TransformerEncoder(
+            layer, num_layers=depth, enable_nested_tensor=False
+        )
+        self.norm = nn.LayerNorm(d)
+
+        # (M+2)-way score head: d → [l_ctx, l_tgt1, ..., l_tgtM, l_ign]
+        self.proj_score = nn.Linear(d, self.M + 2)
+
+        # Composite loss
+        self.composite_loss = CompositeMaskerLoss(
+            terms, num_patches, num_tgt_blocks=self.M
+        )
+
+        # ----------------------------------------------------------------
+        # Initialisation
+        # ----------------------------------------------------------------
+        nn.init.trunc_normal_(self.selection_token, std=0.02)
+        nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
+        nn.init.zeros_(self.proj_score.bias)
+
+    # ------------------------------------------------------------------
+    # Warmup progress
+    # ------------------------------------------------------------------
+
+    def set_progress(self, fraction: float) -> None:
+        self._progress.fill_(max(0.0, min(1.0, float(fraction))))
+
+    # ------------------------------------------------------------------
+    # Weight sampling
+    # ------------------------------------------------------------------
+
+    def _sample_weights(self, device: torch.device) -> dict[str, float]:
+        p = max(self._progress.item(), 1e-3)
+        weights: dict[str, float] = {}
+
+        for name, (lo, hi) in self.composite_loss.weight_ranges.items():
+            if lo == hi:
+                weights[name] = lo
+            else:
+                u = torch.rand(1, device=device).item() ** (1.0 / p)
+                val = math.exp(math.log(lo) + u * (math.log(hi) - math.log(lo)))
+                weights[name] = val
+
+        return weights
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        ema_full: Optional[torch.Tensor] = None,
+        rates: Optional[torch.Tensor] = None,
+    ) -> MaskOutput:
+        B = tokens.shape[0]
+        M = self.M
+
+        # ----------------------------------------------------------------
+        # Transformer input: compressed tokens
+        # ----------------------------------------------------------------
+        ctx = self.proj_in(tokens)
+
+        # ----------------------------------------------------------------
+        # Selection queries + transformer
+        # ----------------------------------------------------------------
+        queries = self.selection_token.expand(B, self.num_patches, -1) \
+                  + self.pos_embed.expand(B, -1, -1)
+        seq = torch.cat([ctx, queries], dim=1)
+        out = self.norm(self.blocks(seq))
+        query_out = out[:, -self.num_patches:]
+
+        # ----------------------------------------------------------------
+        # (M+2)-way soft assignments
+        # ----------------------------------------------------------------
+        logits = self.proj_score(query_out)   # (B, N, M+2)
+        soft = F.softmax(logits, dim=-1)      # (B, N, M+2)
+
+        p_ctx  = soft[..., 0]                 # (B, N)
+        p_tgts = soft[..., 1:M+1]            # (B, N, M)
+        p_ign  = soft[..., -1]                # (B, N)
+
+        # ----------------------------------------------------------------
+        # Hard indices: topk per block → (B, M, K)
+        # ----------------------------------------------------------------
+        # K uniform across blocks (max of per-block soft mass, floored)
+        per_block_mass = p_tgts.sum(dim=1).mean(dim=0)  # (M,)
+        K = max(self.ntgt_min_per_block,
+                int(round(per_block_mass.max().item())))
+
+        tgt_idx_list = []
+        for k in range(M):
+            _, idx_k = torch.topk(p_tgts[..., k], K, dim=-1, sorted=False)
+            tgt_idx_list.append(idx_k)
+        tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
+
+        # Context: topk on p_ctx after zeroing all target positions
+        nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
+        tgt_flat = tgt_idx.reshape(B, -1)  # (B, M*K)
+        p_ctx_masked = p_ctx.clone().scatter_(1, tgt_flat, 0.0)
+        _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
+
+        # Sample weights for this step
+        weights = self._sample_weights(tokens.device)
+
+        # target_soft = sum across blocks for backward compat metrics
+        return MaskOutput(
+            context_idx=ctx_idx,       # (B, Nctx)
+            target_idx=tgt_idx,        # (B, M, K)
+            context_soft=p_ctx,        # (B, N)
+            target_soft=p_tgts.sum(-1),  # (B, N) — total target mass
+            aux={
+                "weights":  weights,
+                "p_ign":    p_ign,
+                "soft":     soft,
+                "logits":   logits.detach(),
+                "ema_full": ema_full,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Auxiliary loss
+    # ------------------------------------------------------------------
+
+    def aux_loss(
+        self,
+        mask_output: MaskOutput,
+        reconstruction_loss: torch.Tensor,
+        patch_loss: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        p_ctx    = mask_output.context_soft
+        p_tgt    = mask_output.target_soft
+        p_ign    = mask_output.aux["p_ign"]
+        weights  = mask_output.aux["weights"]
+        ema_full = mask_output.aux.get("ema_full")
+        soft     = mask_output.aux.get("soft")
+
+        if ema_full is None:
+            device = p_ctx.device
+            ema_full = torch.zeros(
+                p_ctx.shape[0], p_ctx.shape[1], 1, device=device,
+            )
+
+        total, logs = self.composite_loss(
+            weights=weights,
+            p_ctx=p_ctx,
+            p_tgt=p_tgt,
+            p_ign=p_ign,
+            ema_full=ema_full,
+            soft=soft,
+        )
+
+        mask_output.aux.update(logs)
+
+        return reconstruction_loss + total

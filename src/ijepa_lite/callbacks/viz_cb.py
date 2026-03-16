@@ -144,8 +144,10 @@ class VizCallback(Callback):
 
         from ijepa_lite.viz.goldilocks_viz import (
             save_avg_3way_heatmap,
+            save_avg_nway_heatmap,
             save_avg_score_heatmap,
             save_class_3way_heatmap,
+            save_class_nway_heatmap,
             save_class_score_heatmap,
             visualize_split,
         )
@@ -169,7 +171,7 @@ class VizCallback(Callback):
         encoder.eval()
         masker.eval()
 
-        sums, cls_sums, cls_n, is_3way = visualize_split(
+        sums, cls_sums, cls_n, viz_type = visualize_split(
             dataset_name=dataset_name,
             split="test",
             dataset=self._dataset,
@@ -184,7 +186,23 @@ class VizCallback(Callback):
             k_tgt=k_tgt,
         )
 
-        if is_3way:
+        if viz_type == "nway":
+            # Infer M from role_sums keys
+            M = sum(1 for k in sums if k.startswith("tgt_"))
+            save_avg_nway_heatmap(
+                sums, n_images,
+                out_dir / f"{dataset_name}_avg_nway.png",
+                num_tgt_blocks=M,
+            )
+            if cls_sums:
+                save_class_nway_heatmap(
+                    sums, n_images,
+                    cls_sums, cls_n,
+                    class_names,
+                    out_dir / f"{dataset_name}_per_class_nway.png",
+                    num_tgt_blocks=M,
+                )
+        elif viz_type == "3way" or viz_type is True:
             save_avg_3way_heatmap(
                 sums, n_images,
                 out_dir / f"{dataset_name}_avg_3way.png",

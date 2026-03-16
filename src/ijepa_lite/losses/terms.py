@@ -181,6 +181,98 @@ class TargetRateTerm(MaskerTerm):
 
 
 # ------------------------------------------------------------------
+# N-way cross-target surprise
+# ------------------------------------------------------------------
+
+class NWayCrossSurpriseTerm(MaskerTerm):
+    """Inter-target surprise: Σ_{k≠l} E_{tgt_k}[‖zᵢ − μ_{tgt_l}‖²].
+
+    Only pushes target blocks apart — no ctx-vs-tgt terms (adversarial).
+    """
+    name = "nway_cross_surprise"
+
+    def __init__(self, num_tgt_blocks: int = 4):
+        super().__init__()
+        self.M = int(num_tgt_blocks)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")  # (B, N, M+2)
+        if soft is None:
+            return p_ctx.new_zeros(()), {}
+
+        M = self.M
+        image_mean = ema_full.mean(dim=1)  # (B, D)
+
+        # Per-block centroids (collapse-safe, blended with image mean)
+        centroids = []
+        for k in range(M):
+            p_k = soft[..., 1 + k]  # (B, N)
+            p_k_sum = p_k.sum(dim=1, keepdim=True)  # (B, 1)
+            weighted = (p_k.unsqueeze(-1) * ema_full).sum(dim=1)  # (B, D)
+            virtual_w = (1.0 - p_k_sum).clamp(min=0.0)  # (B, 1)
+            centroid = (weighted + virtual_w * image_mean) \
+                       / (p_k_sum + virtual_w).clamp(min=1e-6)  # (B, D)
+            centroids.append(centroid)
+
+        # S_total = Σ_{k≠l} Σᵢ p_tgt_k(i) · ‖zᵢ − μ_l‖² / Σᵢ p_tgt_k(i)
+        S_total = p_ctx.new_zeros(())
+        for k in range(M):
+            p_k = soft[..., 1 + k]  # (B, N)
+            p_k_sum = p_k.sum(dim=-1).clamp(min=1.0)  # (B,)
+            for l in range(M):
+                if k == l:
+                    continue
+                dist_sq = (ema_full - centroids[l].unsqueeze(1)).pow(2).mean(-1)  # (B, N)
+                S_kl = ((p_k * dist_sq).sum(-1) / p_k_sum).mean()
+                S_total = S_total + S_kl
+
+        return -S_total, {"cross_surprise_mean": float(S_total.detach().item())}
+
+
+# ------------------------------------------------------------------
+# N-way negative marginal entropy
+# ------------------------------------------------------------------
+
+class NWayNegHMargTerm(MaskerTerm):
+    """−H(Y) over (M+2)-dim marginal distribution."""
+    name = "nway_neg_H_marg"
+
+    def __init__(self, num_tgt_blocks: int = 4):
+        super().__init__()
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")  # (B, N, M+2)
+        if soft is None:
+            return p_ctx.new_zeros(()), {}
+
+        p_bar = soft.mean(dim=1)  # (B, M+2)
+        H_marg = -(p_bar * (p_bar + 1e-8).log()).sum(-1).mean()
+        return -H_marg, {"nway_entropy_marginal": float(H_marg.detach().item())}
+
+
+# ------------------------------------------------------------------
+# N-way floor penalty
+# ------------------------------------------------------------------
+
+class NWayFloorPenaltyTerm(MaskerTerm):
+    """ReLU(h_floor − H(Y|n))² over (M+2)-dim per-patch entropy."""
+    name = "nway_floor_penalty"
+
+    def __init__(self, h_floor: float = 0.1, num_tgt_blocks: int = 4):
+        super().__init__()
+        self.h_floor = float(h_floor)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")  # (B, N, M+2)
+        if soft is None:
+            return p_ctx.new_zeros(()), {}
+
+        H_cond = -(soft * (soft + 1e-8).log()).sum(-1).mean()
+        penalty = F.relu(self.h_floor - H_cond).pow(2)
+        return penalty, {"nway_floor_penalty": float(penalty.detach().item())}
+
+
+# ------------------------------------------------------------------
 # Registry
 # ------------------------------------------------------------------
 
@@ -193,4 +285,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "ignore_tax": IgnoreTaxTerm,
     "context_rate": ContextRateTerm,
     "target_rate": TargetRateTerm,
+    "nway_cross_surprise": NWayCrossSurpriseTerm,
+    "nway_neg_H_marg": NWayNegHMargTerm,
+    "nway_floor_penalty": NWayFloorPenaltyTerm,
 }

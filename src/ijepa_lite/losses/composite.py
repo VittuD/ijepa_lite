@@ -26,7 +26,7 @@ class CompositeMaskerLoss(nn.Module):
     num_patches : N — total patch positions (forwarded to terms that need it).
     """
 
-    def __init__(self, terms_cfg: dict, num_patches: int) -> None:
+    def __init__(self, terms_cfg: dict, num_patches: int, num_tgt_blocks: int = 1) -> None:
         super().__init__()
 
         self.weight_ranges: dict[str, tuple[float, float]] = {}
@@ -45,11 +45,13 @@ class CompositeMaskerLoss(nn.Module):
 
             cls = TERM_REGISTRY[name]
 
-            # Inject num_patches if the term accepts it
+            # Inject num_patches / num_tgt_blocks if the term accepts them
             import inspect
             sig = inspect.signature(cls.__init__)
             if "num_patches" in sig.parameters:
                 extra["num_patches"] = num_patches
+            if "num_tgt_blocks" in sig.parameters:
+                extra["num_tgt_blocks"] = num_tgt_blocks
 
             self.terms[name] = cls(**extra)
 
@@ -60,6 +62,7 @@ class CompositeMaskerLoss(nn.Module):
         p_tgt: torch.Tensor,
         p_ign: torch.Tensor,
         ema_full: torch.Tensor,
+        soft: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """
         Returns
@@ -76,6 +79,7 @@ class CompositeMaskerLoss(nn.Module):
                 continue
             val, term_logs = term(
                 p_ctx=p_ctx, p_tgt=p_tgt, p_ign=p_ign, ema_full=ema_full,
+                soft=soft,
             )
             total = total + w * val
             logs.update(term_logs)

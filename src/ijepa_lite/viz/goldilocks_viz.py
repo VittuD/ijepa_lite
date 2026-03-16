@@ -136,6 +136,43 @@ def apply_soft_3way_overlay(
     return out.astype(np.uint8)
 
 
+def apply_soft_nway_overlay(
+    orig_np: np.ndarray,
+    soft_map: np.ndarray,
+    patch_size: int,
+    num_tgt_blocks: int,
+    alpha_max: float = ALPHA_SCORE,
+) -> np.ndarray:
+    """Soft N-way overlay: winner's color at intensity proportional to its prob.
+
+    Parameters
+    ----------
+    soft_map  : (gh, gw, M+2) array of per-patch probabilities.
+    """
+    grey_img = np.dot(orig_np.astype(float), [0.299, 0.587, 0.114])
+    grey3 = np.stack([grey_img, grey_img, grey_img], axis=-1)
+    out = grey3.copy()
+
+    M = num_tgt_blocks
+    colors = [np.array(CTX_RGB, dtype=float)]
+    for k in range(M):
+        colors.append(np.array(_BLOCK_COLORS[k % len(_BLOCK_COLORS)], dtype=float))
+    colors.append(np.array(GREY, dtype=float))
+
+    gh, gw = soft_map.shape[:2]
+    for i in range(gh):
+        for j in range(gw):
+            probs = soft_map[i, j]
+            winner = int(np.argmax(probs))
+            col = colors[winner]
+            intensity = float(probs[winner]) * alpha_max
+            y0, y1 = i * patch_size, (i + 1) * patch_size
+            x0, x1 = j * patch_size, (j + 1) * patch_size
+            patch = grey3[y0:y1, x0:x1]
+            out[y0:y1, x0:x1] = ((1 - intensity) * patch + intensity * col).clip(0, 255)
+    return out.astype(np.uint8)
+
+
 def make_cell(orig_np: np.ndarray, score_np: np.ndarray, assign_np: np.ndarray) -> Image.Image:
     h, w = orig_np.shape[:2]
     strip = Image.new("RGB", (3 * w, h))
@@ -720,6 +757,177 @@ def save_class_coverage_heatmap(
 
 
 # ---------------------------------------------------------------------------
+# N-way aggregate heatmaps
+# ---------------------------------------------------------------------------
+
+def save_avg_nway_heatmap(
+    role_sums: dict[str, np.ndarray],
+    n_images: int,
+    out_path: Path,
+    num_tgt_blocks: int = 4,
+    patch_px: int = 40,
+) -> None:
+    """(M+3)-panel heatmap: p_ctx, p_tgt_0..M-1, p_ign, winner."""
+    M = num_tgt_blocks
+    gh, gw = role_sums["ctx"].shape
+    means = {k: v / max(n_images, 1) for k, v in role_sums.items()}
+
+    cell_h = gh * patch_px
+    cell_w = gw * patch_px
+    label_h = 24
+    gap = 8
+    n_panels = M + 3  # ctx + M tgts + ign + winner
+    total_w = n_panels * cell_w + (n_panels - 1) * gap
+    total_h = cell_h + label_h
+
+    img = Image.new("RGB", (total_w, total_h), (20, 20, 20))
+    draw = ImageDraw.Draw(img)
+
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    panels = [("p_ctx", means["ctx"])]
+    for k in range(M):
+        panels.append((f"p_tgt_{k}", means[f"tgt_{k}"]))
+    panels.append(("p_ign", means["ign"]))
+
+    for pi, (title, mean_map) in enumerate(panels):
+        x_off = pi * (cell_w + gap)
+        draw.text((x_off + 4, 4), title, fill=(200, 200, 200), font=font)
+        for i in range(gh):
+            for j in range(gw):
+                col = score_color(float(mean_map[i, j]))
+                x0 = x_off + j * patch_px
+                y0 = label_h + i * patch_px
+                draw.rectangle([x0, y0, x0 + patch_px - 1, y0 + patch_px - 1],
+                               fill=col, outline=(40, 40, 40))
+
+    # Winner panel
+    ctx_col = np.array(CTX_RGB, dtype=float)
+    ign_col = np.array(GREY, dtype=float)
+    colors = [ctx_col]
+    for k in range(M):
+        colors.append(np.array(_BLOCK_COLORS[k % len(_BLOCK_COLORS)], dtype=float))
+    colors.append(ign_col)
+    bg = np.array((20, 20, 20), dtype=float)
+
+    x_off = (M + 2) * (cell_w + gap)
+    draw.text((x_off + 4, 4), "winner", fill=(200, 200, 200), font=font)
+    all_keys = ["ctx"] + [f"tgt_{k}" for k in range(M)] + ["ign"]
+    for i in range(gh):
+        for j in range(gw):
+            probs = [means[key][i, j] for key in all_keys]
+            winner = int(np.argmax(probs))
+            intensity = probs[winner]
+            col = tuple(int(c) for c in np.clip(
+                (1 - intensity) * bg + intensity * colors[winner], 0, 255))
+            x0 = x_off + j * patch_px
+            y0 = label_h + i * patch_px
+            draw.rectangle([x0, y0, x0 + patch_px - 1, y0 + patch_px - 1],
+                           fill=col, outline=(40, 40, 40))
+
+    img.save(out_path)
+    print(f"  Saved N-way heatmap -> {out_path}  (n={n_images})")
+
+
+def save_class_nway_heatmap(
+    overall_sums: dict[str, np.ndarray],
+    overall_n: int,
+    class_sums: dict[int, dict[str, np.ndarray]],
+    class_n: dict[int, int],
+    class_names: list,
+    out_path: Path,
+    num_tgt_blocks: int = 4,
+    patch_px: int = 32,
+    label_w: int = 140,
+    row_gap: int = 6,
+) -> None:
+    """Per-class blended N-way heatmap (winner color at winning prob intensity)."""
+    M = num_tgt_blocks
+    all_keys = ["ctx"] + [f"tgt_{k}" for k in range(M)] + ["ign"]
+    gh, gw = overall_sums["ctx"].shape
+    panel_w = gw * patch_px
+    row_h = gh * patch_px
+    row_stride = row_h + row_gap
+    header_h = 22
+
+    ctx_col = np.array(CTX_RGB, dtype=float)
+    ign_col = np.array(GREY, dtype=float)
+    colors = [ctx_col]
+    for k in range(M):
+        colors.append(np.array(_BLOCK_COLORS[k % len(_BLOCK_COLORS)], dtype=float))
+    colors.append(ign_col)
+    bg = np.array((20, 20, 20), dtype=float)
+
+    sorted_cls = sorted(class_sums.keys())
+
+    def _means(sums_dict, n_img):
+        n_img = max(n_img, 1)
+        return {key: sums_dict[key] / n_img for key in all_keys}
+
+    rows = [("overall", _means(overall_sums, overall_n))] + [
+        (class_names[c] if class_names and c < len(class_names) else str(c),
+         _means(class_sums[c], class_n[c]))
+        for c in sorted_cls
+    ]
+
+    # Inter-class std on total target mass
+    interclass_std = float("nan")
+    if len(sorted_cls) >= 2:
+        tgt_keys = [f"tgt_{k}" for k in range(M)]
+        class_tgt_means = np.stack([
+            sum(class_sums[c][tk] / max(class_n[c], 1) for tk in tgt_keys)
+            for c in sorted_cls
+        ])
+        interclass_std = float(class_tgt_means.std(axis=0).mean())
+    print(f"  Inter-class p_tgt std = {interclass_std:.4f}  "
+          f"(> 0.05 -> content-adaptive scoring)")
+
+    total_w = label_w + panel_w
+    total_h = header_h + len(rows) * row_stride - row_gap
+    img = Image.new("RGB", (total_w, total_h), (20, 20, 20))
+    draw = ImageDraw.Draw(img)
+
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    draw.text((label_w + 4, 4),
+              f"blended N-way  (inter-class p_tgt std={interclass_std:.4f})",
+              fill=(200, 200, 200), font=font)
+
+    for row_idx, (name, m) in enumerate(rows):
+        y0 = header_h + row_idx * row_stride
+        if row_idx > 0:
+            draw.rectangle([0, y0 - row_gap, total_w, y0 - 1], fill=(50, 50, 50))
+
+        n_img = overall_n if row_idx == 0 else class_n[sorted_cls[row_idx - 1]]
+        draw.text((4, y0 + row_h // 2 - 5),
+                  f"{name}\n(n={n_img})", fill=(200, 200, 200), font=font)
+
+        for i in range(gh):
+            for j in range(gw):
+                probs = [m[key][i, j] for key in all_keys]
+                winner = int(np.argmax(probs))
+                intensity = probs[winner]
+                col = tuple(int(c) for c in np.clip(
+                    (1 - intensity) * bg + intensity * colors[winner], 0, 255))
+                x0 = label_w + j * patch_px
+                y1 = y0 + i * patch_px
+                draw.rectangle([x0, y1, x0 + patch_px - 1, y1 + patch_px - 1],
+                               fill=col, outline=(40, 40, 40))
+
+    img.save(out_path)
+    print(f"  Saved per-class N-way heatmap -> {out_path}  "
+          f"({len(sorted_cls)} classes, overall n={overall_n})")
+
+
+# ---------------------------------------------------------------------------
 # Main visualization driver
 # ---------------------------------------------------------------------------
 
@@ -742,18 +950,21 @@ def visualize_split(
     """
     Run masker on ``n`` images from ``dataset`` and produce visualization grids.
 
-    Automatically detects 3-way maskers (``p_ign`` in ``mask_out.aux``) and
-    switches the middle panel from a p_tgt cold→hot heatmap to a soft 3-way
-    overlay (ctx=blue, tgt=red, ign=grey blended by soft probabilities).
+    Automatically detects masker type:
+    - N-way: ``soft`` tensor in aux with shape[-1] > 3
+    - 3-way: ``p_ign`` in aux (but no N-way soft)
+    - 2-way: everything else
 
     Returns
     -------
     For 2-way (Goldilocks):
-        (score_sums, class_score_sums, class_img_n, False)
+        (score_sums, class_score_sums, class_img_n, "2way")
     For 3-way (MI):
-        (role_sums, class_role_sums, class_img_n, True)
+        (role_sums, class_role_sums, class_img_n, "3way")
+    For N-way (MI N-way):
+        (role_sums, class_role_sums, class_img_n, "nway")
 
-    where role_sums = {"ctx": ..., "tgt": ..., "ign": ...}.
+    where role_sums keys depend on type.
     """
     from torchvision import transforms
 
@@ -780,13 +991,14 @@ def visualize_split(
     class_img_n: dict = {}
 
     # Accumulators — initialised lazily after first batch reveals masker type
-    is_3way: Optional[bool] = None
+    masker_type: Optional[str] = None  # "2way", "3way", "nway"
+    nway_M: int = 0
     # 2-way accumulators
     score_sums = np.zeros((gh, gw), dtype=np.float64)
     class_score_sums: dict = {}
-    # 3-way accumulators
+    # 3-way / N-way accumulators
     _zero = lambda: np.zeros((gh, gw), dtype=np.float64)
-    role_sums: dict[str, np.ndarray] = {"ctx": _zero(), "tgt": _zero(), "ign": _zero()}
+    role_sums: dict[str, np.ndarray] = {}
     class_role_sums: dict[int, dict[str, np.ndarray]] = {}
 
     for start in range(0, n, batch_size):
@@ -823,39 +1035,76 @@ def visualize_split(
         p_tgt = mask_out.target_soft
         p_ctx = mask_out.context_soft
         p_ign = mask_out.aux.get("p_ign")
+        soft_nway = mask_out.aux.get("soft")  # (B, N, M+2) for N-way
 
         # Detect masker type on first batch
-        if is_3way is None:
-            is_3way = p_ign is not None and p_ctx is not None
+        if masker_type is None:
+            is_nway = (soft_nway is not None
+                       and torch.is_tensor(soft_nway)
+                       and soft_nway.shape[-1] > 3)
+            if is_nway:
+                masker_type = "nway"
+                nway_M = soft_nway.shape[-1] - 2
+                role_keys = ["ctx"] + [f"tgt_{k}" for k in range(nway_M)] + ["ign"]
+                role_sums = {k: _zero() for k in role_keys}
+            elif p_ign is not None and p_ctx is not None:
+                masker_type = "3way"
+                role_sums = {"ctx": _zero(), "tgt": _zero(), "ign": _zero()}
+            else:
+                masker_type = "2way"
 
         if p_tgt is not None:
             all_p_tgt.append(p_tgt.cpu())
 
         ctx_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        tgt_flat = tgt_idx.reshape(B, -1) if tgt_idx.dim() == 3 else tgt_idx
         tgt_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
         ctx_mask.scatter_(1, ctx_idx, True)
-        tgt_mask.scatter_(1, tgt_idx, True)
+        tgt_mask.scatter_(1, tgt_flat, True)
 
         for bi in range(B):
-            bin_flat = torch.full((N,), 2, dtype=torch.long)
-            bin_flat[ctx_mask[bi].cpu()] = 0
-            bin_flat[tgt_mask[bi].cpu()] = 1
-            bin_map = bin_flat.reshape(gh, gw).numpy()
-
             lbl = labels_batch[bi]
             if lbl not in class_img_n:
                 class_img_n[lbl] = 0
             class_img_n[lbl] += 1
 
             orig_np = displays[bi]
-            assign_np = apply_assignment_overlay(orig_np, bin_map, patch_size)
 
-            if is_3way:
+            if masker_type == "nway":
+                # N-way: middle panel = soft N-way overlay
+                soft_bi = soft_nway[bi].detach().cpu().reshape(gh, gw, -1).numpy()
+                mid_np = apply_soft_nway_overlay(
+                    orig_np, soft_bi, patch_size, nway_M)
+
+                # Hard assignment panel: per-block colored overlay
+                assign_np = apply_multiblock_overlay(
+                    orig_np,
+                    ctx_idx[bi].cpu().numpy(),
+                    tgt_idx[bi].cpu().numpy(),  # (M, K)
+                    patch_size, image_size,
+                )
+
+                # Accumulate per-role sums
+                role_keys = ["ctx"] + [f"tgt_{k}" for k in range(nway_M)] + ["ign"]
+                for ci_k, key in enumerate(role_keys):
+                    ch = soft_bi[..., ci_k].astype(np.float64)
+                    role_sums[key] += ch
+                    if lbl not in class_role_sums:
+                        class_role_sums[lbl] = {k: _zero() for k in role_keys}
+                    class_role_sums[lbl][key] += ch
+
+            elif masker_type == "3way":
                 # 3-way: middle panel = soft 3-way overlay
+                bin_flat = torch.full((N,), 2, dtype=torch.long)
+                bin_flat[ctx_mask[bi].cpu()] = 0
+                bin_flat[tgt_mask[bi].cpu()] = 1
+                bin_map = bin_flat.reshape(gh, gw).numpy()
+
                 pc = p_ctx[bi].cpu().reshape(gh, gw).numpy()
                 pt = p_tgt[bi].cpu().reshape(gh, gw).numpy()
                 pi = p_ign[bi].detach().cpu().reshape(gh, gw).numpy()
                 mid_np = apply_soft_3way_overlay(orig_np, pc, pt, pi, patch_size)
+                assign_np = apply_assignment_overlay(orig_np, bin_map, patch_size)
 
                 role_sums["ctx"] += pc.astype(np.float64)
                 role_sums["tgt"] += pt.astype(np.float64)
@@ -869,11 +1118,17 @@ def visualize_split(
                 class_role_sums[lbl]["ign"] += pi.astype(np.float64)
             else:
                 # 2-way: middle panel = cold→hot p_tgt heatmap
+                bin_flat = torch.full((N,), 2, dtype=torch.long)
+                bin_flat[ctx_mask[bi].cpu()] = 0
+                bin_flat[tgt_mask[bi].cpu()] = 1
+                bin_map = bin_flat.reshape(gh, gw).numpy()
+
                 if p_tgt is not None:
                     score_map = p_tgt[bi].cpu().reshape(gh, gw).numpy()
                 else:
                     score_map = (bin_map == 1).astype(np.float32)
                 mid_np = apply_score_heatmap(orig_np, score_map, patch_size)
+                assign_np = apply_assignment_overlay(orig_np, bin_map, patch_size)
 
                 score_sums += score_map.astype(np.float64)
                 if lbl not in class_score_sums:
@@ -912,6 +1167,8 @@ def visualize_split(
         print(f"  Saved -> {fname}   [{len(cells)} images, nctx={nctx} ntgt={ntgt} "
               f"K/N={ntgt}/{N}={ntgt/N:.2f}]")
 
-    if is_3way:
-        return role_sums, class_role_sums, class_img_n, True
-    return score_sums, class_score_sums, class_img_n, False
+    if masker_type == "nway":
+        return role_sums, class_role_sums, class_img_n, "nway"
+    if masker_type == "3way":
+        return role_sums, class_role_sums, class_img_n, "3way"
+    return score_sums, class_score_sums, class_img_n, "2way"

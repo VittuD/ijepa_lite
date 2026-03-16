@@ -170,6 +170,22 @@ def mask_diagnostics(
     if "R_tgt" in aux:
         stats["mask/R_tgt"] = float(aux["R_tgt"])
 
+    # N-way masker metrics
+    if "cross_surprise_mean" in aux:
+        stats["mask/cross_surprise_mean"] = float(aux["cross_surprise_mean"])
+    if "nway_entropy_marginal" in aux:
+        stats["mask/nway_entropy_marginal"] = float(aux["nway_entropy_marginal"])
+    if "nway_floor_penalty" in aux:
+        stats["mask/nway_floor_penalty"] = float(aux["nway_floor_penalty"])
+
+    # Per-block target counts from N-way soft assignments
+    nway_soft = aux.get("soft")
+    if nway_soft is not None and torch.is_tensor(nway_soft) and nway_soft.shape[-1] > 3:
+        M_nway = nway_soft.shape[-1] - 2
+        for k in range(M_nway):
+            p_k = nway_soft[..., 1 + k]  # (B, N)
+            stats[f"mask/nway_tgt_{k}_mass"] = float(p_k.sum(dim=-1).mean().item())
+
     # Goldilocks masker — sampled budgets and content-adaptivity diagnostics
     for key in ("k_tgt", "k_ctx",
                 "tgt_pos_std", "tgt_pos_std_norm",
