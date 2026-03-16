@@ -29,6 +29,22 @@ GREY     = (128, 128, 128)
 BATCH_SIZE = 32
 
 
+def _null_interclass_std(p: float, n_min: int) -> float:
+    """Expected inter-class std under uniform random assignment.
+
+    Each patch has probability *p* of being assigned to a role. With *n_min*
+    images per class, the per-position sample mean has std √(p(1-p)/n_min).
+    Averaging across positions doesn't change the expectation (positions are
+    identically distributed), so this is the null baseline for inter-class std.
+
+    Values well above this indicate content-adaptive scoring.
+    """
+    if n_min < 1:
+        return 0.0
+    import math
+    return math.sqrt(p * (1.0 - p) / n_min)
+
+
 # ---------------------------------------------------------------------------
 # Colormap: cold (blue=0) → yellow (0.5) → hot (red=1)
 # ---------------------------------------------------------------------------
@@ -258,8 +274,12 @@ def save_class_score_heatmap(
             [class_sums[c] / max(class_n[c], 1) for c in sorted_cls]
         )
         interclass_std = float(class_means.std(axis=0).mean())
+    # Null baseline: expected std under uniform scoring with min per-class n
+    n_min = min(class_n[c] for c in sorted_cls) if sorted_cls else 1
+    p_expected = float(overall_sums.sum()) / max(overall_n, 1) / max(gh * gw, 1)
+    null_std = _null_interclass_std(p_expected, n_min)
     print(f"  Inter-class score std = {interclass_std:.4f}  "
-          f"(> 0.05 -> content-adaptive scoring)")
+          f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
 
     total_w = label_w + panel_w
     total_h = header_h + len(rows) * row_stride - row_gap
@@ -418,8 +438,11 @@ def save_class_3way_heatmap(
             [class_sums[c]["tgt"] / max(class_n[c], 1) for c in sorted_cls]
         )
         interclass_std = float(class_means.std(axis=0).mean())
+    # Null baseline: p_tgt ≈ 1/3 for 3-way uniform
+    n_min = min(class_n[c] for c in sorted_cls) if sorted_cls else 1
+    null_std = _null_interclass_std(1.0 / 3.0, n_min)
     print(f"  Inter-class p_tgt std = {interclass_std:.4f}  "
-          f"(> 0.05 -> content-adaptive scoring)")
+          f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
 
     total_w = label_w + panel_w
     total_h = header_h + len(rows) * row_stride - row_gap
@@ -874,7 +897,7 @@ def save_class_nway_heatmap(
         for c in sorted_cls
     ]
 
-    # Inter-class std on total target mass
+    # Inter-class std on total target mass (sum of M block probs)
     interclass_std = float("nan")
     if len(sorted_cls) >= 2:
         tgt_keys = [f"tgt_{k}" for k in range(M)]
@@ -883,8 +906,12 @@ def save_class_nway_heatmap(
             for c in sorted_cls
         ])
         interclass_std = float(class_tgt_means.std(axis=0).mean())
+    # Null baseline: total tgt mass = M/(M+2) under uniform (M+2)-way
+    n_min = min(class_n[c] for c in sorted_cls) if sorted_cls else 1
+    p_tgt_total = M / (M + 2)
+    null_std = _null_interclass_std(p_tgt_total, n_min)
     print(f"  Inter-class p_tgt std = {interclass_std:.4f}  "
-          f"(> 0.05 -> content-adaptive scoring)")
+          f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
 
     total_w = label_w + panel_w
     total_h = header_h + len(rows) * row_stride - row_gap
@@ -1143,13 +1170,18 @@ def visualize_split(
 
     # Numeric content-adaptivity report
     if all_p_tgt:
-        p_cat = torch.cat(all_p_tgt, dim=0)
+        p_cat = torch.cat(all_p_tgt, dim=0)  # (n_total, N)
+        n_total = p_cat.shape[0]
         marginal_score_std = p_cat.mean(dim=0).std().item()
         p_tgt_score_std = p_cat.std(dim=0).mean().item()
+        # Null baseline for p_tgt_score_std: per-position std of Bernoulli(p) samples
+        # For soft assignments p is the mean target prob; with n_total images
+        p_mean = float(p_cat.mean().item())
+        null_score_std = _null_interclass_std(p_mean, n_total)
         print(f"  marginal_score_std = {marginal_score_std:.4f}  "
               f"(-> 0 = uniform marginal = no positional bias)")
         print(f"  p_tgt_score_std    = {p_tgt_score_std:.4f}  "
-              f"(high = scores vary across images = content-adaptive)")
+              f"(null={null_score_std:.4f}; well above -> content-adaptive)")
 
     # Assemble image grid
     if cells:
