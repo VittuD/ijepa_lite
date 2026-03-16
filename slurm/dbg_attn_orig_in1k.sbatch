@@ -22,7 +22,7 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 nvidia-smi -L || true
 
-export CKPT_ORIG="$WORK/vitturini/ijepa_vith14_ep300.pth.tar"
+export CKPT_ORIG="$WORK/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.pth.tar"
 export DATA_ROOT="$IMAGENET2012_HOME"
 export N=100
 export OUT_DIR="$WORK/vitturini/attn_orig_in1k_output/${SLURM_JOB_ID}"
