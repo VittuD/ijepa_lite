@@ -4,6 +4,7 @@ name: mi_nway
 num_tgt_blocks: 4
 ntgt_min_per_block: 4
 nctx_min: 1
+hard_assignment: topk    # "topk" (fixed K per block) or "argmax" (each patch → its most probable role)
 
 terms:
   nway_neg_H_marg:

@@ -277,6 +277,7 @@ class MINWayMasker(LatentMasker):
         num_tgt_blocks: int = 4,
         ntgt_min_per_block: int = 4,
         nctx_min: int = 1,
+        hard_assignment: str = "topk",
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
         # Unused — kept for build.py kwarg filtering
@@ -289,6 +290,7 @@ class MINWayMasker(LatentMasker):
         self.M = int(num_tgt_blocks)
         self.ntgt_min_per_block = max(1, int(ntgt_min_per_block))
         self.nctx_min = max(1, int(nctx_min))
+        self.hard_assignment = str(hard_assignment)
         self.warmup_epochs = int(warmup_epochs)
 
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
@@ -399,24 +401,95 @@ class MINWayMasker(LatentMasker):
         p_ign  = soft[..., -1]                # (B, N)
 
         # ----------------------------------------------------------------
-        # Hard indices: topk per block → (B, M, K)
+        # Hard indices → (B, M, K)
         # ----------------------------------------------------------------
-        # K uniform across blocks (max of per-block soft mass, floored)
-        per_block_mass = p_tgts.sum(dim=1).mean(dim=0)  # (M,)
-        K = max(self.ntgt_min_per_block,
-                int(round(per_block_mass.max().item())))
+        if self.hard_assignment == "argmax":
+            # Each patch goes to its argmax role; no topk budget constraint.
+            # Blocks may have variable sizes → pad to max for rectangular tensor.
+            winners = soft.argmax(dim=-1)  # (B, N)  values in [0, M+1]
 
-        tgt_idx_list = []
-        for k in range(M):
-            _, idx_k = torch.topk(p_tgts[..., k], K, dim=-1, sorted=False)
-            tgt_idx_list.append(idx_k)
-        tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
+            # Collect per-block indices
+            tgt_idx_list = []
+            for k in range(M):
+                mask_k = (winners == (1 + k))  # (B, N)
+                # Per-sample indices where this block wins
+                batch_indices = []
+                for b in range(B):
+                    idxs_b = mask_k[b].nonzero(as_tuple=False).squeeze(-1)
+                    if idxs_b.numel() < self.ntgt_min_per_block:
+                        # Fall back: top ntgt_min_per_block by soft probability
+                        _, idxs_b = torch.topk(
+                            p_tgts[b, :, k], self.ntgt_min_per_block,
+                            dim=-1, sorted=False,
+                        )
+                    batch_indices.append(idxs_b)
+                tgt_idx_list.append(batch_indices)
 
-        # Context: topk on p_ctx after zeroing all target positions
-        nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
-        tgt_flat = tgt_idx.reshape(B, -1)  # (B, M*K)
-        p_ctx_masked = p_ctx.clone().scatter_(1, tgt_flat, 0.0)
-        _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
+            # Pad to uniform K across blocks and batch
+            K = max(
+                self.ntgt_min_per_block,
+                max(
+                    idxs.numel()
+                    for block_indices in tgt_idx_list
+                    for idxs in block_indices
+                ),
+            )
+            padded = []
+            for k in range(M):
+                block_padded = []
+                for b in range(B):
+                    idxs = tgt_idx_list[k][b]
+                    if idxs.numel() < K:
+                        # Repeat last index to pad
+                        pad = idxs[-1:].expand(K - idxs.numel())
+                        idxs = torch.cat([idxs, pad])
+                    elif idxs.numel() > K:
+                        idxs = idxs[:K]
+                    block_padded.append(idxs)
+                padded.append(torch.stack(block_padded))  # (B, K)
+            tgt_idx = torch.stack(padded, dim=1)  # (B, M, K)
+
+            # Context: patches whose argmax is ctx (channel 0)
+            ctx_lists = []
+            for b in range(B):
+                ctx_b = (winners[b] == 0).nonzero(as_tuple=False).squeeze(-1)
+                if ctx_b.numel() < self.nctx_min:
+                    # Fall back: top nctx_min by p_ctx (excluding targets)
+                    tgt_flat_b = tgt_idx[b].reshape(-1)
+                    p_ctx_b = p_ctx[b].clone()
+                    p_ctx_b.scatter_(0, tgt_flat_b, 0.0)
+                    _, ctx_b = torch.topk(
+                        p_ctx_b, self.nctx_min, dim=-1, sorted=False,
+                    )
+                ctx_lists.append(ctx_b)
+            # Pad context to uniform size
+            nctx = max(self.nctx_min, max(c.numel() for c in ctx_lists))
+            ctx_padded = []
+            for ctx_b in ctx_lists:
+                if ctx_b.numel() < nctx:
+                    pad = ctx_b[-1:].expand(nctx - ctx_b.numel())
+                    ctx_b = torch.cat([ctx_b, pad])
+                elif ctx_b.numel() > nctx:
+                    ctx_b = ctx_b[:nctx]
+                ctx_padded.append(ctx_b)
+            ctx_idx = torch.stack(ctx_padded)  # (B, nctx)
+        else:
+            # topk (default): fixed K per block from soft mass
+            per_block_mass = p_tgts.sum(dim=1).mean(dim=0)  # (M,)
+            K = max(self.ntgt_min_per_block,
+                    int(round(per_block_mass.max().item())))
+
+            tgt_idx_list = []
+            for k in range(M):
+                _, idx_k = torch.topk(p_tgts[..., k], K, dim=-1, sorted=False)
+                tgt_idx_list.append(idx_k)
+            tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
+
+            # Context: topk on p_ctx after zeroing all target positions
+            nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
+            tgt_flat = tgt_idx.reshape(B, -1)  # (B, M*K)
+            p_ctx_masked = p_ctx.clone().scatter_(1, tgt_flat, 0.0)
+            _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
 
         # Sample weights for this step
         weights = self._sample_weights(tokens.device)
