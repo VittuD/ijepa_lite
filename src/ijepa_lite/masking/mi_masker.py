@@ -439,11 +439,11 @@ class MINWayMasker(LatentMasker):
                 block_padded = []
                 for b in range(B):
                     idxs = tgt_idx_list[k][b]
-                    if idxs.numel() < K:
-                        # Repeat last index to pad
-                        pad = idxs[-1:].expand(K - idxs.numel())
-                        idxs = torch.cat([idxs, pad])
-                    elif idxs.numel() > K:
+                    n = idxs.numel()
+                    if n < K:
+                        # Cycle through genuine indices to pad evenly
+                        idxs = idxs.repeat((K + n - 1) // n)[:K]
+                    elif n > K:
                         idxs = idxs[:K]
                     block_padded.append(idxs)
                 padded.append(torch.stack(block_padded))  # (B, K)
@@ -466,10 +466,10 @@ class MINWayMasker(LatentMasker):
             nctx = max(self.nctx_min, max(c.numel() for c in ctx_lists))
             ctx_padded = []
             for ctx_b in ctx_lists:
-                if ctx_b.numel() < nctx:
-                    pad = ctx_b[-1:].expand(nctx - ctx_b.numel())
-                    ctx_b = torch.cat([ctx_b, pad])
-                elif ctx_b.numel() > nctx:
+                n = ctx_b.numel()
+                if n < nctx:
+                    ctx_b = ctx_b.repeat((nctx + n - 1) // n)[:nctx]
+                elif n > nctx:
                     ctx_b = ctx_b[:nctx]
                 ctx_padded.append(ctx_b)
             ctx_idx = torch.stack(ctx_padded)  # (B, nctx)
