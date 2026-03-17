@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-mi-nway-xs-argmax
+#SBATCH --job-name=ijepa-mi-nway-xs-argmax-4blk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=sbatch_logs/mi_marginal/%x_%j.out
 #SBATCH --error=sbatch_logs/mi_marginal/%x_%j.err
 
@@ -39,7 +39,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-export EXP_NAME="mi_nway_cross_surprise_argmax"
+export EXP_NAME="mi_nway_cross_surprise_argmax_4blk"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -51,6 +51,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
       masking.latent.terms.nway_floor_penalty.weight='[5.0,5.0]' \
       masking.latent.terms.nway_floor_penalty.h_floor=0.16 \
+      masking.latent.num_tgt_blocks=4 \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
       train.viz_enabled=true \
