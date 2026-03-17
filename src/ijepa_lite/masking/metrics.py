@@ -175,8 +175,6 @@ def mask_diagnostics(
         stats["mask/cross_surprise_mean"] = float(aux["cross_surprise_mean"])
     if "nway_entropy_marginal" in aux:
         stats["mask/nway_entropy_marginal"] = float(aux["nway_entropy_marginal"])
-    if "nway_floor_penalty" in aux:
-        stats["mask/nway_floor_penalty"] = float(aux["nway_floor_penalty"])
 
     # Per-block target counts from N-way soft assignments
     nway_soft = aux.get("soft")

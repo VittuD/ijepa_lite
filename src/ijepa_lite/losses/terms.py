@@ -121,12 +121,14 @@ class NegCentroidDistTerm(MaskerTerm):
 class FloorPenaltyTerm(MaskerTerm):
     name = "floor_penalty"
 
-    def __init__(self, h_floor: float = 0.1):
+    def __init__(self, h_floor: float = 0.1, num_tgt_blocks: int = 1):
         super().__init__()
         self.h_floor = float(h_floor)
 
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
-        soft = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)
+        soft = kw.get("soft")  # (B, N, M+2) when N-way, None for 3-way
+        if soft is None:
+            soft = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)  # (B, N, 3)
         H_cond = -(soft * (soft + 1e-8).log()).sum(-1).mean()
         penalty = F.relu(self.h_floor - H_cond).pow(2)
         return penalty, {"floor_penalty": float(penalty.detach().item())}
@@ -250,27 +252,6 @@ class NWayNegHMargTerm(MaskerTerm):
         return -H_marg, {"nway_entropy_marginal": float(H_marg.detach().item())}
 
 
-# ------------------------------------------------------------------
-# N-way floor penalty
-# ------------------------------------------------------------------
-
-class NWayFloorPenaltyTerm(MaskerTerm):
-    """ReLU(h_floor − H(Y|n))² over (M+2)-dim per-patch entropy."""
-    name = "nway_floor_penalty"
-
-    def __init__(self, h_floor: float = 0.1, num_tgt_blocks: int = 4):
-        super().__init__()
-        self.h_floor = float(h_floor)
-
-    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
-        soft = kw.get("soft")  # (B, N, M+2)
-        if soft is None:
-            return p_ctx.new_zeros(()), {}
-
-        H_cond = -(soft * (soft + 1e-8).log()).sum(-1).mean()
-        penalty = F.relu(self.h_floor - H_cond).pow(2)
-        return penalty, {"nway_floor_penalty": float(penalty.detach().item())}
-
 
 # ------------------------------------------------------------------
 # Registry
@@ -287,5 +268,5 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "target_rate": TargetRateTerm,
     "nway_cross_surprise": NWayCrossSurpriseTerm,
     "nway_neg_H_marg": NWayNegHMargTerm,
-    "nway_floor_penalty": NWayFloorPenaltyTerm,
+    "nway_floor_penalty": FloorPenaltyTerm,
 }
