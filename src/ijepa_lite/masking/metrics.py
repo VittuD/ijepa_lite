@@ -159,6 +159,11 @@ def mask_diagnostics(
     if "floor_penalty" in aux:
         stats["mask/floor_penalty"] = float(aux["floor_penalty"])
 
+    if "role_alive_penalty" in aux:
+        stats["mask/role_alive_penalty"] = float(aux["role_alive_penalty"])
+    if "role_dead_frac" in aux:
+        stats["mask/role_dead_frac"] = float(aux["role_dead_frac"])
+
     # Compositional masker — per-term sampled weights
     if "weights" in aux and isinstance(aux["weights"], dict):
         for wk, wv in aux["weights"].items():

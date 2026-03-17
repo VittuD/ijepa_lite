@@ -252,6 +252,35 @@ class NWayNegHMargTerm(MaskerTerm):
         return -H_marg, {"nway_entropy_marginal": float(H_marg.detach().item())}
 
 
+# ------------------------------------------------------------------
+# Role-alive penalty — ReLU(p_min − p_c(n))² per role per patch
+#
+# Prevents role death: ensures every role maintains at least p_min
+# mass on every patch, so gradients flow to all roles and the masker
+# can reassign patches as the encoder evolves.
+# ------------------------------------------------------------------
+
+class RoleAliveTerm(MaskerTerm):
+    name = "role_alive"
+
+    def __init__(self, p_min: float = 0.02, num_tgt_blocks: int = 1):
+        super().__init__()
+        self.p_min = float(p_min)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")  # (B, N, M+2) when N-way, None for 3-way
+        if soft is None:
+            soft = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)  # (B, N, 3)
+        # Per-role, per-patch: penalise any probability below p_min
+        deficit = F.relu(self.p_min - soft)           # (B, N, C)
+        penalty = deficit.pow(2).mean()                # scalar
+        # Log the fraction of (patch, role) pairs that are below p_min
+        dead_frac = float((soft.detach() < self.p_min).float().mean().item())
+        return penalty, {
+            "role_alive_penalty": float(penalty.detach().item()),
+            "role_dead_frac": dead_frac,
+        }
+
 
 # ------------------------------------------------------------------
 # Registry
@@ -269,4 +298,5 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "nway_cross_surprise": NWayCrossSurpriseTerm,
     "nway_neg_H_marg": NWayNegHMargTerm,
     "nway_floor_penalty": FloorPenaltyTerm,
+    "role_alive": RoleAliveTerm,
 }
