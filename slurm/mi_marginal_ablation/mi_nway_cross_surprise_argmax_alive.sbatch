@@ -50,8 +50,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.nway_neg_H_marg.weight='[1.0,1.0]' \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
       ~masking.latent.terms.nway_floor_penalty \
-      masking.latent.terms.role_alive.weight='[5.0,5.0]' \
-      masking.latent.terms.role_alive.p_min=0.02 \
+      +masking.latent.terms.role_alive.weight='[5.0,5.0]' \
+      +masking.latent.terms.role_alive.p_min=0.05 \
       masking.latent.num_tgt_blocks=4 \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
