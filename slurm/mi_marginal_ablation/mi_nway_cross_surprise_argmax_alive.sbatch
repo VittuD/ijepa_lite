@@ -10,13 +10,12 @@
 #SBATCH --time=06:00:00
 #SBATCH --output=sbatch_logs/mi_marginal/%x_%j.out
 #SBATCH --error=sbatch_logs/mi_marginal/%x_%j.err
+#SBATCH --array=1-4
 
 # ---------------------------------------------------------------------------
 # N-way cross-target surprise with argmax hard assignment + role_alive penalty.
 #
-# Same as mi_nway_cross_surprise_argmax but replaces the entropy-based
-# floor penalty with role_alive: per-role per-patch minimum mass guarantee
-# to prevent role death and maintain gradient flow.
+# Array job: SLURM_ARRAY_TASK_ID = num_tgt_blocks (1, 2, 3, 4).
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -39,7 +38,8 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-export EXP_NAME="mi_nway_cross_surprise_argmax_alive_4blk"
+M=${SLURM_ARRAY_TASK_ID}
+export EXP_NAME="mi_nway_cross_surprise_argmax_alive_${M}blk"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -52,7 +52,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       ~masking.latent.terms.nway_floor_penalty \
       +masking.latent.terms.role_alive.weight='[5.0,5.0]' \
       +masking.latent.terms.role_alive.p_min=0.05 \
-      masking.latent.num_tgt_blocks=4 \
+      masking.latent.num_tgt_blocks=$M \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
       train.viz_enabled=true \
