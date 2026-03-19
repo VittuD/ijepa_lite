@@ -278,6 +278,7 @@ class MINWayMasker(LatentMasker):
         ntgt_min_per_block: int = 4,
         nctx_min: int = 1,
         hard_assignment: str = "topk",
+        arch: str = "transformer",
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
         # Unused — kept for build.py kwarg filtering
@@ -291,52 +292,59 @@ class MINWayMasker(LatentMasker):
         self.ntgt_min_per_block = max(1, int(ntgt_min_per_block))
         self.nctx_min = max(1, int(nctx_min))
         self.hard_assignment = str(hard_assignment)
+        self.arch = str(arch)
         self.warmup_epochs = int(warmup_epochs)
 
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
 
         d = predictor_dim
 
-        from ijepa_lite.models.pos_embed import build_pos_embed_2d
-
-        grid_size = int(math.isqrt(num_patches))
-
         # ----------------------------------------------------------------
-        # Transformer backbone (same as MIRateMasker)
+        # Scoring backbone — arch selects complexity
         # ----------------------------------------------------------------
-        self.proj_in = nn.Linear(dim, d)
+        if self.arch == "transformer":
+            from ijepa_lite.models.pos_embed import build_pos_embed_2d
+            grid_size = int(math.isqrt(num_patches))
 
-        self.pos_embed = build_pos_embed_2d(pos_embed_kind, grid_size, d)
-        self.selection_token = nn.Parameter(torch.zeros(1, 1, d))
+            self.proj_in = nn.Linear(dim, d)
+            self.pos_embed = build_pos_embed_2d(pos_embed_kind, grid_size, d)
+            self.selection_token = nn.Parameter(torch.zeros(1, 1, d))
 
-        layer = nn.TransformerEncoderLayer(
-            d_model=d,
-            nhead=num_heads,
-            dim_feedforward=int(d * mlp_ratio),
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.blocks = nn.TransformerEncoder(
-            layer, num_layers=depth, enable_nested_tensor=False
-        )
-        self.norm = nn.LayerNorm(d)
+            layer = nn.TransformerEncoderLayer(
+                d_model=d,
+                nhead=num_heads,
+                dim_feedforward=int(d * mlp_ratio),
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.blocks = nn.TransformerEncoder(
+                layer, num_layers=depth, enable_nested_tensor=False
+            )
+            self.norm = nn.LayerNorm(d)
+            self.proj_score = nn.Linear(d, self.M + 2)
 
-        # (M+2)-way score head: d → [l_ctx, l_tgt1, ..., l_tgtM, l_ign]
-        self.proj_score = nn.Linear(d, self.M + 2)
+            nn.init.trunc_normal_(self.selection_token, std=0.02)
+
+        elif self.arch == "mlp":
+            self.proj_in = nn.Linear(dim, d)
+            self.proj_score = nn.Linear(d, self.M + 2)
+
+        elif self.arch == "linear":
+            self.proj_score = nn.Linear(dim, self.M + 2)
+
+        else:
+            raise ValueError(f"Unknown arch: {self.arch!r}. Choose from: transformer, mlp, linear")
+
+        # (M+2)-way score head init (shared across all archs)
+        nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
+        nn.init.zeros_(self.proj_score.bias)
 
         # Composite loss
         self.composite_loss = CompositeMaskerLoss(
             terms, num_patches, num_tgt_blocks=self.M
         )
-
-        # ----------------------------------------------------------------
-        # Initialisation
-        # ----------------------------------------------------------------
-        nn.init.trunc_normal_(self.selection_token, std=0.02)
-        nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
-        nn.init.zeros_(self.proj_score.bias)
 
     # ------------------------------------------------------------------
     # Warmup progress
@@ -377,23 +385,23 @@ class MINWayMasker(LatentMasker):
         M = self.M
 
         # ----------------------------------------------------------------
-        # Transformer input: compressed tokens
+        # Scoring backbone
         # ----------------------------------------------------------------
-        ctx = self.proj_in(tokens)
-
-        # ----------------------------------------------------------------
-        # Selection queries + transformer
-        # ----------------------------------------------------------------
-        queries = self.selection_token.expand(B, self.num_patches, -1) \
-                  + self.pos_embed.expand(B, -1, -1)
-        seq = torch.cat([ctx, queries], dim=1)
-        out = self.norm(self.blocks(seq))
-        query_out = out[:, -self.num_patches:]
+        if self.arch == "transformer":
+            ctx = self.proj_in(tokens)
+            queries = self.selection_token.expand(B, self.num_patches, -1) \
+                      + self.pos_embed.expand(B, -1, -1)
+            seq = torch.cat([ctx, queries], dim=1)
+            out = self.norm(self.blocks(seq))
+            logits = self.proj_score(out[:, -self.num_patches:])
+        elif self.arch == "mlp":
+            logits = self.proj_score(F.gelu(self.proj_in(tokens)))
+        else:  # linear
+            logits = self.proj_score(tokens)
 
         # ----------------------------------------------------------------
         # (M+2)-way soft assignments
         # ----------------------------------------------------------------
-        logits = self.proj_score(query_out)   # (B, N, M+2)
         soft = F.softmax(logits, dim=-1)      # (B, N, M+2)
 
         p_ctx  = soft[..., 0]                 # (B, N)
