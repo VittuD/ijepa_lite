@@ -90,6 +90,7 @@ def train(
     sampler = getattr(loader, "sampler", None)
     log_every = int(cfg.train.log_every)
     clip_norm = float(getattr(cfg.train, "grad_clip_norm", 0.0))
+    masker_step_every = int(getattr(cfg.train, "masker_step_every", 1))
 
     # ------------------------------------------------------------------
     # WD schedule (no-op when wd_start == wd_end or wd_start is None)
@@ -162,6 +163,13 @@ def train(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 if do_log:
                     gnorm = float(grad_norm(model.parameters()))
+
+            # Zero masker gradients on non-masker steps so optimizer.step()
+            # leaves masker weights unchanged (no momentum update either).
+            if masker_step_every > 1 and next_step % masker_step_every != 0:
+                if len(optimizer.param_groups) > 1:
+                    for p in optimizer.param_groups[-1]["params"]:
+                        p.grad = None
 
             scaler.step(optimizer)
             scaler.update()
