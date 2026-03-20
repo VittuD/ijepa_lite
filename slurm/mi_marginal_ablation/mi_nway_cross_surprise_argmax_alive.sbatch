@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-mi-nway-xs-argmax-alive
+#SBATCH --job-name=ijepa-mi-nway-xs-argmax-alive-arrayblk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
