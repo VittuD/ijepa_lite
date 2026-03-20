@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-mi-nway-arch-dbg
+#SBATCH --job-name=ijepa-mi-nway-gumbel-dbg
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_dbg
@@ -12,13 +12,10 @@
 #SBATCH --error=sbatch_logs/mi_nway/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Debug smoke-test for masker architecture ablation.
-# Usage: ARCH=linear|mlp|transformer sbatch dbg_mi_nway_arch.sbatch
+# Debug smoke-test for Gumbel sampling hard assignment.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
-
-ARCH="${ARCH:?Set ARCH=linear|mlp|transformer before submitting}"
 
 module purge
 module load profile/deeplrn
@@ -40,31 +37,19 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/mi_nway
 
-if [ "$ARCH" = "transformer" ]; then
-  LABEL="transformer_d1"
-else
-  LABEL="$ARCH"
-fi
-
-export EXP_NAME="mi_nway_arch_dbg_${LABEL}"
-
-EXTRA_ARGS=()
-if [ "$ARCH" = "transformer" ]; then
-  EXTRA_ARGS+=(+masking.latent.depth=1)
-fi
+export EXP_NAME="mi_nway_gumbel_dbg"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=1 \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_mi_nway \
       exp_name="$EXP_NAME" \
-      masking.latent.hard_assignment=argmax \
-      masking.latent.arch=$ARCH \
+      masking.latent.hard_assignment=gumbel \
+      masking.latent.gumbel_tau=1.0 \
       masking.latent.terms.nway_neg_H_marg.weight='[1.0,1.0]' \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
-      ~masking.latent.terms.nway_floor_penalty \
-      +masking.latent.terms.role_alive.weight='[5.0,5.0]' \
-      +masking.latent.terms.role_alive.p_min=0.05 \
+      masking.latent.terms.nway_floor_penalty.weight='[5.0,5.0]' \
+      masking.latent.terms.nway_floor_penalty.h_floor=0.16 \
       masking.latent.num_tgt_blocks=4 \
       data.root=$FAST/datasets/ \
       data.batch_size=512 \
@@ -72,5 +57,4 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       train.save_every_epochs=5 \
       train.viz_enabled=true \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
-      logger.mode=offline \
-      "${EXTRA_ARGS[@]}"
+      logger.mode=offline

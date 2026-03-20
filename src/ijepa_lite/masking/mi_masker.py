@@ -279,6 +279,7 @@ class MINWayMasker(LatentMasker):
         nctx_min: int = 1,
         hard_assignment: str = "topk",
         arch: str = "transformer",
+        gumbel_tau: float = 1.0,
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
         # Unused — kept for build.py kwarg filtering
@@ -293,6 +294,7 @@ class MINWayMasker(LatentMasker):
         self.nctx_min = max(1, int(nctx_min))
         self.hard_assignment = str(hard_assignment)
         self.arch = str(arch)
+        self.gumbel_tau = float(gumbel_tau)
         self.warmup_epochs = int(warmup_epochs)
 
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
@@ -411,10 +413,15 @@ class MINWayMasker(LatentMasker):
         # ----------------------------------------------------------------
         # Hard indices → (B, M, K)
         # ----------------------------------------------------------------
-        if self.hard_assignment == "argmax":
-            # Each patch goes to its argmax role; no topk budget constraint.
+        if self.hard_assignment in ("argmax", "gumbel"):
+            # Each patch goes to its winning role; no topk budget constraint.
             # Blocks may have variable sizes → pad to max for rectangular tensor.
-            winners = soft.argmax(dim=-1)  # (B, N)  values in [0, M+1]
+            if self.hard_assignment == "gumbel":
+                # Gumbel-max trick: sample from the categorical instead of argmax
+                g = -torch.empty_like(logits).exponential_().log()  # Gumbel(0,1)
+                winners = (logits / self.gumbel_tau + g).argmax(dim=-1)
+            else:
+                winners = soft.argmax(dim=-1)  # (B, N)  values in [0, M+1]
 
             # Collect per-block indices
             tgt_idx_list = []

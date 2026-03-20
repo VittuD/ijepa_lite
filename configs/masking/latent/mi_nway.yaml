@@ -4,8 +4,9 @@ name: mi_nway
 num_tgt_blocks: 4
 ntgt_min_per_block: 4
 nctx_min: 1
-hard_assignment: topk    # "topk" (fixed K per block) or "argmax" (each patch → its most probable role)
+hard_assignment: topk    # "topk", "argmax", or "gumbel" (sample from learned distribution)
 arch: transformer        # "transformer", "mlp", or "linear"
+gumbel_tau: 1.0          # temperature for gumbel sampling (only used when hard_assignment=gumbel)
 
 terms:
   nway_neg_H_marg:
