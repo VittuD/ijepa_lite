@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-mi-nway-xs-gumbel-4blk
+#SBATCH --job-name=ijepa-mi-nway-xs-gumbel-075tau-4blk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=06:00:00
-#SBATCH --output=sbatch_logs/mi_marginal/%x_%j.out
-#SBATCH --error=sbatch_logs/mi_marginal/%x_%j.err
+#SBATCH --output=sbatch_logs/mi_gumbel/%x_%j.out
+#SBATCH --error=sbatch_logs/mi_gumbel/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # N-way cross-target surprise with Gumbel sampling.
@@ -40,7 +40,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-export EXP_NAME="mi_nway_cross_surprise_gumbel_4blk"
+export EXP_NAME="mi_nway_cross_surprise_gumbel_075tau_4blk"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -48,7 +48,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       experiment=stl10_vits_ps8_mi_nway \
       exp_name="$EXP_NAME" \
       masking.latent.hard_assignment=gumbel \
-      masking.latent.gumbel_tau=1.0 \
+      masking.latent.gumbel_tau=0.75 \
       masking.latent.terms.nway_neg_H_marg.weight='[1.0,1.0]' \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
       masking.latent.terms.nway_floor_penalty.weight='[5.0,5.0]' \

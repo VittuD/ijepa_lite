@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --time=00:15:00
 #SBATCH --output=sbatch_logs/mi_nway/%x_%j.out
 #SBATCH --error=sbatch_logs/mi_nway/%x_%j.err
