@@ -178,6 +178,12 @@ def mask_diagnostics(
     # N-way masker metrics
     if "cross_surprise_mean" in aux:
         stats["mask/cross_surprise_mean"] = float(aux["cross_surprise_mean"])
+    if "full_cross_surprise_mean" in aux:
+        stats["mask/full_cross_surprise_mean"] = float(aux["full_cross_surprise_mean"])
+    if "cross_surprise_tgt" in aux:
+        stats["mask/cross_surprise_tgt"] = float(aux["cross_surprise_tgt"])
+    if "cross_surprise_ctx" in aux:
+        stats["mask/cross_surprise_ctx"] = float(aux["cross_surprise_ctx"])
     if "nway_entropy_marginal" in aux:
         stats["mask/nway_entropy_marginal"] = float(aux["nway_entropy_marginal"])
 

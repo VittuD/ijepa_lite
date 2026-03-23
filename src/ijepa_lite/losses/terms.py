@@ -232,6 +232,79 @@ class NWayCrossSurpriseTerm(MaskerTerm):
 
 
 # ------------------------------------------------------------------
+# N-way full cross-surprise (targets + context)
+# ------------------------------------------------------------------
+
+class NWayFullCrossSurpriseTerm(MaskerTerm):
+    """Cross-surprise over all M+1 groups (ctx + M targets, ignoring ign).
+
+    S = S_tgt_tgt + ctx_weight · S_ctx_tgt
+
+    where S_tgt_tgt is the inter-target surprise (same as NWayCrossSurpriseTerm)
+    and S_ctx_tgt includes ctx↔tgt_k cross-pairs in both directions.
+    ctx_weight controls how much the ctx-vs-target terms contribute.
+    """
+    name = "nway_full_cross_surprise"
+
+    def __init__(self, num_tgt_blocks: int = 4, ctx_weight: float = 1.0):
+        super().__init__()
+        self.M = int(num_tgt_blocks)
+        self.ctx_weight = float(ctx_weight)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")  # (B, N, M+2)
+        if soft is None:
+            return p_ctx.new_zeros(()), {}
+
+        M = self.M
+        image_mean = ema_full.mean(dim=1)  # (B, D)
+
+        # Build centroids for ctx (index 0) + M target blocks
+        groups = [soft[..., 0]] + [soft[..., 1 + k] for k in range(M)]  # M+1 groups
+        centroids = []
+        for p_g in groups:
+            p_g_sum = p_g.sum(dim=1, keepdim=True)  # (B, 1)
+            weighted = (p_g.unsqueeze(-1) * ema_full).sum(dim=1)  # (B, D)
+            virtual_w = (1.0 - p_g_sum).clamp(min=0.0)
+            centroid = (weighted + virtual_w * image_mean) \
+                       / (p_g_sum + virtual_w).clamp(min=1e-6)
+            centroids.append(centroid)
+
+        # Inter-target surprise: pairs (k, l) where both k, l >= 1
+        S_tgt = p_ctx.new_zeros(())
+        for k in range(1, M + 1):
+            p_k = groups[k]
+            p_k_sum = p_k.sum(dim=-1).clamp(min=1.0)
+            for l in range(1, M + 1):
+                if k == l:
+                    continue
+                dist_sq = (ema_full - centroids[l].unsqueeze(1)).pow(2).mean(-1)
+                S_tgt = S_tgt + ((p_k * dist_sq).sum(-1) / p_k_sum).mean()
+
+        # Ctx↔target surprise: pairs involving ctx (index 0)
+        S_ctx = p_ctx.new_zeros(())
+        p_0 = groups[0]
+        p_0_sum = p_0.sum(dim=-1).clamp(min=1.0)
+        for k in range(1, M + 1):
+            p_k = groups[k]
+            p_k_sum = p_k.sum(dim=-1).clamp(min=1.0)
+            # ctx → tgt_k
+            dist_sq = (ema_full - centroids[k].unsqueeze(1)).pow(2).mean(-1)
+            S_ctx = S_ctx + ((p_0 * dist_sq).sum(-1) / p_0_sum).mean()
+            # tgt_k → ctx
+            dist_sq = (ema_full - centroids[0].unsqueeze(1)).pow(2).mean(-1)
+            S_ctx = S_ctx + ((p_k * dist_sq).sum(-1) / p_k_sum).mean()
+
+        S_total = S_tgt + self.ctx_weight * S_ctx
+
+        return -S_total, {
+            "full_cross_surprise_mean": float(S_total.detach().item()),
+            "cross_surprise_tgt": float(S_tgt.detach().item()),
+            "cross_surprise_ctx": float(S_ctx.detach().item()),
+        }
+
+
+# ------------------------------------------------------------------
 # N-way negative marginal entropy
 # ------------------------------------------------------------------
 
@@ -296,6 +369,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "context_rate": ContextRateTerm,
     "target_rate": TargetRateTerm,
     "nway_cross_surprise": NWayCrossSurpriseTerm,
+    "nway_full_cross_surprise": NWayFullCrossSurpriseTerm,
     "nway_neg_H_marg": NWayNegHMargTerm,
     "nway_floor_penalty": FloorPenaltyTerm,
     "role_alive": RoleAliveTerm,
