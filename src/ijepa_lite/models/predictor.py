@@ -70,7 +70,8 @@ class Predictor(nn.Module):
         ctx_tokens: torch.Tensor,  # (B, Nctx, D)
         ctx_idx: torch.Tensor,  # (B, Nctx)
         tgt_idx: torch.Tensor,  # (B, K)
-    ) -> torch.Tensor:
+        return_ctx_pred: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         b, nctx, _ = ctx_tokens.shape
         ntgt = tgt_idx.shape[1]
 
@@ -86,5 +87,8 @@ class Predictor(nn.Module):
         out = self.blocks(seq)
         out = self.norm(out)
 
-        pred = out[:, -ntgt:]  # (B, K, predictor_dim)
-        return self.proj_out(pred)  # (B, K, D) back to encoder dim for loss
+        pred_tgt = self.proj_out(out[:, -ntgt:])  # (B, K, D)
+        if return_ctx_pred:
+            pred_ctx = self.proj_out(out[:, :nctx])  # (B, Nctx, D)
+            return pred_tgt, pred_ctx
+        return pred_tgt

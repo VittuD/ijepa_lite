@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ijepa_lite.losses.context_loss import context_loss
 from ijepa_lite.masking.base import CollateMasker, LatentMasker, MaskOutput
 from ijepa_lite.masking.compressor import TokenCompressor
 from ijepa_lite.masking.metrics import mask_diagnostics
@@ -62,6 +63,12 @@ class IJEPAModel(nn.Module):
         latent_masker: Optional[LatentMasker] = None,
         token_compressor: Optional[TokenCompressor] = None,
         predict_blocks_jointly: bool = True,
+        # Context loss (V-JEPA 2.1-style visible token supervision).
+        ctx_loss_weight: float = 0.0,
+        ctx_loss_gamma: float = 0.7,
+        ctx_loss_warmup_start: int = 0,
+        ctx_loss_warmup_end: int = 0,
+        grid_size: int = 0,
     ) -> None:
         super().__init__()
 
@@ -80,6 +87,14 @@ class IJEPAModel(nn.Module):
         self._mask_generator = mask_generator   # fallback only
 
         self.predict_blocks_jointly = predict_blocks_jointly
+
+        # Context loss config
+        self.ctx_loss_weight = float(ctx_loss_weight)
+        self.ctx_loss_enabled = self.ctx_loss_weight > 0.0
+        self.ctx_loss_gamma = float(ctx_loss_gamma)
+        self.ctx_warmup_start = int(ctx_loss_warmup_start)
+        self.ctx_warmup_end = int(ctx_loss_warmup_end)
+        self.grid_size = int(grid_size)
 
         # Registered as submodules so their params are checkpointed and optimised.
         self.latent_masker = latent_masker
@@ -106,6 +121,7 @@ class IJEPAModel(nn.Module):
         masks: Optional[Dict[str, torch.Tensor]] = None,
         compute_agreement: bool = False,
         compute_mask_metrics: bool = False,
+        epoch: int = 0,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
@@ -181,12 +197,16 @@ class IJEPAModel(nn.Module):
         # Step 4: Predictor + loss (single-block or multi-block)
         # ------------------------------------------------------------------
         if tgt_idx.dim() == 2:
-            reconstruction_loss, pred, tgt_tokens, patch_loss = self._forward_single_block(
-                ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d
+            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx = (
+                self._forward_single_block(
+                    ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d
+                )
             )
         elif tgt_idx.dim() == 3:
-            reconstruction_loss, pred, tgt_tokens, patch_loss = self._forward_multi_block(
-                ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d
+            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx = (
+                self._forward_multi_block(
+                    ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d
+                )
             )
         else:
             raise ValueError(
@@ -215,6 +235,24 @@ class IJEPAModel(nn.Module):
             total_loss = reconstruction_loss
 
         # ------------------------------------------------------------------
+        # Step 5b: Context loss (V-JEPA 2.1-style visible token supervision)
+        # ------------------------------------------------------------------
+        ctx_loss_val = None
+        if pred_ctx is not None:
+            tgt_idx_flat = tgt_idx.reshape(b, -1) if tgt_idx.dim() == 3 else tgt_idx
+            tgt_at_ctx_pos = tgt_tokens_all.gather(
+                1, ctx_idx.unsqueeze(-1).expand(-1, -1, d)
+            )
+            alpha = self._ctx_alpha(epoch)
+            ctx_l = context_loss(
+                pred_ctx, tgt_at_ctx_pos, ctx_idx, tgt_idx_flat,
+                self.grid_size, self.loss_fn,
+                gamma=self.ctx_loss_gamma, alpha=alpha,
+            )
+            ctx_loss_val = float(ctx_l.detach().item())
+            total_loss = total_loss + self.ctx_loss_weight * ctx_l
+
+        # ------------------------------------------------------------------
         # Step 6: Mask diagnostics
         # mask_diagnostics() always returns the cheap always-on metrics.
         # Full diagnostics (coverage, IoU, entropy, etc.) are gated on
@@ -241,11 +279,27 @@ class IJEPAModel(nn.Module):
             "target": tgt_tokens.detach(),
             "patch_loss": patch_loss.detach(),   # (B, K) — for diagnostics / curriculum
             "mask_stats": mask_stats,
+            "ctx_loss": ctx_loss_val,
         }
         if compute_agreement:
             out["ctx_tokens_all"] = ctx_tokens_all
             out["tgt_tokens_all"] = tgt_at_ctx
         return out
+
+    # ------------------------------------------------------------------
+    # Private: context loss warmup
+    # ------------------------------------------------------------------
+
+    def _ctx_alpha(self, epoch: int) -> float:
+        if self.ctx_warmup_end <= self.ctx_warmup_start:
+            return 1.0
+        if epoch < self.ctx_warmup_start:
+            return 0.0
+        if epoch >= self.ctx_warmup_end:
+            return 1.0
+        return (epoch - self.ctx_warmup_start) / (
+            self.ctx_warmup_end - self.ctx_warmup_start
+        )
 
     # ------------------------------------------------------------------
     # Private: mask resolution
@@ -327,10 +381,18 @@ class IJEPAModel(nn.Module):
             1, tgt_idx.unsqueeze(-1).expand(-1, -1, d)
         )  # (B, Ntgt, D)
 
-        pred = self.predictor(ctx_tokens, ctx_idx=ctx_idx, tgt_idx=tgt_idx)  # (B, Ntgt, D)
+        result = self.predictor(
+            ctx_tokens, ctx_idx=ctx_idx, tgt_idx=tgt_idx,
+            return_ctx_pred=self.ctx_loss_enabled,
+        )
+        if self.ctx_loss_enabled:
+            pred, pred_ctx = result
+        else:
+            pred, pred_ctx = result, None
+
         patch_loss = self.loss_fn(pred, tgt_tokens, reduction="none")  # (B, Ntgt)
         loss = patch_loss.mean()
-        return loss, pred, tgt_tokens, patch_loss
+        return loss, pred, tgt_tokens, patch_loss, pred_ctx
 
     def _forward_multi_block(
         self,
@@ -366,7 +428,8 @@ class IJEPAModel(nn.Module):
             tgt_tokens = torch.stack(tgts_list, dim=1)   # (B, M, K, D)
             patch_loss_cat = torch.cat(ploss_list, dim=1) # (B, M*K)
             loss = patch_loss_cat.mean()
-            return loss, pred, tgt_tokens, patch_loss_cat
+            # ctx_loss not supported with separate prediction
+            return loss, pred, tgt_tokens, patch_loss_cat, None
 
         # -- Joint prediction (default): all blocks concatenated ---------------
         tgt_idx_cat = tgt_idx.reshape(b, m * k)  # (B, M*K)
@@ -376,11 +439,17 @@ class IJEPAModel(nn.Module):
         )  # (B, M*K, D)
         tgt_tokens = tgt_tokens_cat.reshape(b, m, k, d)  # (B, M, K, D)
 
-        pred_cat = self.predictor(
-            ctx_tokens, ctx_idx=ctx_idx, tgt_idx=tgt_idx_cat
-        )  # (B, M*K, D)
+        result = self.predictor(
+            ctx_tokens, ctx_idx=ctx_idx, tgt_idx=tgt_idx_cat,
+            return_ctx_pred=self.ctx_loss_enabled,
+        )
+        if self.ctx_loss_enabled:
+            pred_cat, pred_ctx = result
+        else:
+            pred_cat, pred_ctx = result, None
+
         pred = pred_cat.reshape(b, m, k, d)  # (B, M, K, D)
 
         patch_loss_cat = self.loss_fn(pred_cat, tgt_tokens_cat, reduction="none")  # (B, M*K)
         loss = patch_loss_cat.mean()
-        return loss, pred, tgt_tokens, patch_loss_cat
+        return loss, pred, tgt_tokens, patch_loss_cat, pred_ctx

@@ -338,6 +338,17 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
     compressor = _build_compressor(cfg)
     latent_masker = _build_latent_masker(cfg, compressor)
 
+    # Context loss config (V-JEPA 2.1-style visible token supervision).
+    ctx_cfg = getattr(cfg, "ctx_loss", None)
+    ctx_kw = {}
+    if ctx_cfg is not None:
+        ctx_kw = dict(
+            ctx_loss_weight=float(getattr(ctx_cfg, "weight", 0.0)),
+            ctx_loss_gamma=float(getattr(ctx_cfg, "gamma", 0.7)),
+            ctx_loss_warmup_start=int(getattr(ctx_cfg, "warmup_start", 0)),
+            ctx_loss_warmup_end=int(getattr(ctx_cfg, "warmup_end", 0)),
+        )
+
     return IJEPAModel(
         context_encoder=context,
         target_encoder=target,
@@ -348,6 +359,8 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         latent_masker=latent_masker,
         token_compressor=compressor,
         predict_blocks_jointly=bool(getattr(cfg.model, "predict_blocks_jointly", True)),
+        grid_size=int(cfg.model.image_size) // int(cfg.model.patch_size),
+        **ctx_kw,
     )
 
 

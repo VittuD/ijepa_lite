@@ -149,7 +149,7 @@ def train(
             do_log = next_step % log_every == 0
 
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                out = model(images, masks=masks, compute_agreement=do_log, compute_mask_metrics=do_log)
+                out = model(images, masks=masks, compute_agreement=do_log, compute_mask_metrics=do_log, epoch=epoch)
                 loss = out["loss"]
 
             scaler.scale(loss).backward()
@@ -248,6 +248,8 @@ def train(
                         "train/epoch": float(epoch),
                         **extra,
                     }
+                    if out.get("ctx_loss") is not None:
+                        metrics["train/ctx_loss"] = out["ctx_loss"]
                     if masker_lr != lr:
                         metrics["train/masker_lr"] = masker_lr
 
