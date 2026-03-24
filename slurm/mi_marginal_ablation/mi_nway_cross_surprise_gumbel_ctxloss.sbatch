@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=06:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=sbatch_logs/mi_gumbel/%x_%j.out
 #SBATCH --error=sbatch_logs/mi_gumbel/%x_%j.err
 

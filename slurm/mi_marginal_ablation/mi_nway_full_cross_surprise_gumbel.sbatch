@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-mi-nway-fxs-gumbel-05tau-4blk
+#SBATCH --job-name=ijepa-mi-nway-fxs-gumbel-05tau-3blk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -39,7 +39,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-export EXP_NAME="mi_nway_full_cross_surprise_gumbel_05tau_4blk"
+export EXP_NAME="mi_nway_full_cross_surprise_gumbel_05tau_3blk"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -54,7 +54,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.terms.nway_full_cross_surprise.ctx_weight=1.0 \
       masking.latent.terms.nway_floor_penalty.weight='[5.0,5.0]' \
       masking.latent.terms.nway_floor_penalty.h_floor=0.16 \
-      masking.latent.num_tgt_blocks=4 \
+      masking.latent.num_tgt_blocks=3 \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
       train.viz_enabled=true \
