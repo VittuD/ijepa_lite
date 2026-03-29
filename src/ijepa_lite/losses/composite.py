@@ -63,6 +63,7 @@ class CompositeMaskerLoss(nn.Module):
         p_ign: torch.Tensor,
         ema_full: torch.Tensor,
         soft: torch.Tensor | None = None,
+        **kw,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """
         Returns
@@ -79,7 +80,7 @@ class CompositeMaskerLoss(nn.Module):
                 continue
             val, term_logs = term(
                 p_ctx=p_ctx, p_tgt=p_tgt, p_ign=p_ign, ema_full=ema_full,
-                soft=soft,
+                soft=soft, **kw,
             )
             total = total + w * val
             logs.update(term_logs)

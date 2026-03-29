@@ -282,6 +282,11 @@ class MINWayMasker(LatentMasker):
         gumbel_tau: float = 1.0,
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
+        # k schedule (context mass fraction for KL marginal term)
+        k_min: float = 0.0,
+        k_max: float = 0.0,
+        k_warmup_epochs: int = 10,
+        total_epochs: int = 1000,
         # Unused — kept for build.py kwarg filtering
         base_kind: str = "smooth_l1",
         normalize: bool = False,
@@ -297,7 +302,15 @@ class MINWayMasker(LatentMasker):
         self.gumbel_tau = float(gumbel_tau)
         self.warmup_epochs = int(warmup_epochs)
 
+        # k schedule state
+        self.k_min = float(k_min)
+        self.k_max = float(k_max)
+        self.k_warmup_epochs = int(k_warmup_epochs)
+        self.total_epochs = int(total_epochs)
+        self._k_enabled = self.k_min > 0 or self.k_max > 0
+
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
+        self.register_buffer("_current_k", torch.tensor(self.k_max), persistent=False)
 
         d = predictor_dim
 
@@ -343,6 +356,14 @@ class MINWayMasker(LatentMasker):
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)
 
+        # k-conditioning: learned logit bias from scalar k
+        if self._k_enabled:
+            self.k_logit_bias = nn.Sequential(
+                nn.Linear(1, 32), nn.GELU(), nn.Linear(32, self.M + 2),
+            )
+        else:
+            self.k_logit_bias = None
+
         # Composite loss
         self.composite_loss = CompositeMaskerLoss(
             terms, num_patches, num_tgt_blocks=self.M
@@ -354,6 +375,21 @@ class MINWayMasker(LatentMasker):
 
     def set_progress(self, fraction: float) -> None:
         self._progress.fill_(max(0.0, min(1.0, float(fraction))))
+
+    def set_epoch(self, epoch: int) -> None:
+        """Update k from warmup+cosine schedule."""
+        if not self._k_enabled:
+            return
+        w = self.k_warmup_epochs
+        T = self.total_epochs
+        if w > 0 and epoch < w:
+            k = self.k_min + (self.k_max - self.k_min) * (epoch + 1) / w
+        else:
+            progress = (epoch - w) / max(1, T - w)
+            progress = min(progress, 1.0)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            k = self.k_min + (self.k_max - self.k_min) * cosine
+        self._current_k.fill_(k)
 
     # ------------------------------------------------------------------
     # Weight sampling
@@ -400,6 +436,16 @@ class MINWayMasker(LatentMasker):
             logits = self.proj_score(F.gelu(self.proj_in(tokens)))
         else:  # linear
             logits = self.proj_score(tokens)
+
+        # ----------------------------------------------------------------
+        # k-conditioning: shift logits toward target allocation q(k)
+        # ----------------------------------------------------------------
+        if self.k_logit_bias is not None:
+            k_val = self._current_k.item()
+            k_tensor = torch.tensor(
+                [[k_val]], device=logits.device, dtype=logits.dtype,
+            )
+            logits = logits + self.k_logit_bias(k_tensor).unsqueeze(1)
 
         # ----------------------------------------------------------------
         # (M+2)-way soft assignments
@@ -517,18 +563,22 @@ class MINWayMasker(LatentMasker):
         weights = self._sample_weights(tokens.device)
 
         # target_soft = sum across blocks for backward compat metrics
+        aux = {
+            "weights":  weights,
+            "p_ign":    p_ign,
+            "soft":     soft,
+            "logits":   logits.detach(),
+            "ema_full": ema_full,
+        }
+        if self._k_enabled:
+            aux["k"] = self._current_k.item()
+
         return MaskOutput(
             context_idx=ctx_idx,       # (B, Nctx)
             target_idx=tgt_idx,        # (B, M, K)
             context_soft=p_ctx,        # (B, N)
             target_soft=p_tgts.sum(-1),  # (B, N) — total target mass
-            aux={
-                "weights":  weights,
-                "p_ign":    p_ign,
-                "soft":     soft,
-                "logits":   logits.detach(),
-                "ema_full": ema_full,
-            },
+            aux=aux,
         )
 
     # ------------------------------------------------------------------
@@ -554,6 +604,11 @@ class MINWayMasker(LatentMasker):
                 p_ctx.shape[0], p_ctx.shape[1], 1, device=device,
             )
 
+        extra_kw = {}
+        k = mask_output.aux.get("k")
+        if k is not None:
+            extra_kw["k"] = k
+
         total, logs = self.composite_loss(
             weights=weights,
             p_ctx=p_ctx,
@@ -561,6 +616,7 @@ class MINWayMasker(LatentMasker):
             p_ign=p_ign,
             ema_full=ema_full,
             soft=soft,
+            **extra_kw,
         )
 
         mask_output.aux.update(logs)

@@ -358,6 +358,50 @@ class RoleAliveTerm(MaskerTerm):
 # ------------------------------------------------------------------
 # Registry
 # ------------------------------------------------------------------
+# KL-to-target marginal — KL(p_bar || q(k))
+#
+# Generalises nway_neg_H_marg.  The target distribution q(k) allocates
+# mass k to context, (1-k)/(M+1) to each other role.  At k = 1/(M+2)
+# the loss reduces to -H(p_bar) + const (pure entropy maximisation).
+# k is provided by the masker via **kw and follows a warmup+cosine
+# schedule across epochs.
+# ------------------------------------------------------------------
+
+class NWayKLMargTerm(MaskerTerm):
+    """KL(p_bar || q(k)) over (M+2)-dim marginal distribution."""
+    name = "nway_kl_marg"
+
+    def __init__(self, num_tgt_blocks: int = 4):
+        super().__init__()
+        self.M = int(num_tgt_blocks)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")           # (B, N, M+2)
+        k = kw.get("k")                 # float or None
+        if soft is None or k is None:
+            return p_ctx.new_zeros(()), {}
+
+        p_bar = soft.mean(dim=1)        # (B, M+2)
+
+        # Target: ctx gets k, rest get (1-k)/(M+1)
+        q = torch.full_like(p_bar, (1.0 - k) / (self.M + 1))
+        q[:, 0] = k
+
+        # KL(p_bar || q)
+        kl = (p_bar * (p_bar.clamp(min=1e-8).log() - q.clamp(min=1e-8).log())).sum(-1)
+        kl_mean = kl.mean()
+
+        # Also log entropy for comparison
+        H_marg = -(p_bar * (p_bar + 1e-8).log()).sum(-1).mean()
+
+        return kl_mean, {
+            "kl_marg": float(kl_mean.detach().item()),
+            "nway_entropy_marginal": float(H_marg.detach().item()),
+            "k_schedule": float(k),
+        }
+
+
+# ------------------------------------------------------------------
 
 TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "H_cond": HCondTerm,
@@ -371,6 +415,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "nway_cross_surprise": NWayCrossSurpriseTerm,
     "nway_full_cross_surprise": NWayFullCrossSurpriseTerm,
     "nway_neg_H_marg": NWayNegHMargTerm,
+    "nway_kl_marg": NWayKLMargTerm,
     "nway_floor_penalty": FloorPenaltyTerm,
     "role_alive": RoleAliveTerm,
 }

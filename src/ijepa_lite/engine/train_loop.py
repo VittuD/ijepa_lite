@@ -119,6 +119,8 @@ def train(
             warmup = getattr(_masker, "warmup_epochs", 0)
             if warmup > 0:
                 _masker.set_progress(epoch / warmup)
+        if _masker is not None and hasattr(_masker, "set_epoch"):
+            _masker.set_epoch(epoch)
 
         callbacks.on_epoch_start(cfg=cfg, state=state)
 

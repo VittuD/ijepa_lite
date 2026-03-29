@@ -18,3 +18,9 @@ terms:
     h_floor: 0.16
 
 warmup_epochs: 0
+
+# k schedule (context mass fraction for KL marginal term)
+# Both at 0.0 = disabled (no k conditioning, use nway_neg_H_marg instead)
+k_min: 0.0
+k_max: 0.0
+k_warmup_epochs: 10

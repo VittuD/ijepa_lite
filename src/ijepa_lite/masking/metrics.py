@@ -186,6 +186,10 @@ def mask_diagnostics(
         stats["mask/cross_surprise_ctx"] = float(aux["cross_surprise_ctx"])
     if "nway_entropy_marginal" in aux:
         stats["mask/nway_entropy_marginal"] = float(aux["nway_entropy_marginal"])
+    if "kl_marg" in aux:
+        stats["mask/kl_marg"] = float(aux["kl_marg"])
+    if "k_schedule" in aux:
+        stats["mask/k_schedule"] = float(aux["k_schedule"])
 
     # Per-block target counts from N-way soft assignments
     nway_soft = aux.get("soft")

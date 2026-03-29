@@ -156,6 +156,7 @@ def _build_latent_masker(
     auto_kwargs = {
         "dim": int(cfg.model.embed_dim),
         "num_patches": num_patches,
+        "total_epochs": int(cfg.train.epochs),
         "target_ratio": float(getattr(cfg.masking, "target_ratio", 0.25)),
         "context_ratio": float(getattr(cfg.masking, "context_ratio", 0.75)),
         # Predictor-compatible defaults (ignored by maskers that don't use them)
