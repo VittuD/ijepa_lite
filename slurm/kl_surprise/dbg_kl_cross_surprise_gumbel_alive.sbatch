@@ -57,6 +57,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.terms.role_alive.weight='[5.0,5.0]' \
       +masking.latent.terms.role_alive.p_min=0.05 \
       masking.latent.num_tgt_blocks=3 \
+      masking.latent.k_start=0.2 \
       masking.latent.k_min=0.2 \
       masking.latent.k_max=0.5 \
       masking.latent.k_warmup_epochs=2 \

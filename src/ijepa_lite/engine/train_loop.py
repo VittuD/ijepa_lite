@@ -119,9 +119,6 @@ def train(
             warmup = getattr(_masker, "warmup_epochs", 0)
             if warmup > 0:
                 _masker.set_progress(epoch / warmup)
-        if _masker is not None and hasattr(_masker, "set_epoch"):
-            _masker.set_epoch(epoch)
-
         callbacks.on_epoch_start(cfg=cfg, state=state)
 
         if sampler is not None and hasattr(sampler, "set_epoch"):
@@ -196,6 +193,8 @@ def train(
             core.update_target()
             if _masker is not None and hasattr(_masker, "set_ema_decay"):
                 _masker.set_ema_decay(core.ema_momentum)
+            if _masker is not None and hasattr(_masker, "set_step"):
+                _masker.set_step(state["global_step"], total_steps)
 
             loss_meter.update(float(loss.item()), n=images.size(0))
 

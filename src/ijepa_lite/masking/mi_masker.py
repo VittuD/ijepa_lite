@@ -283,6 +283,7 @@ class MINWayMasker(LatentMasker):
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
         # k schedule (context mass fraction for KL marginal term)
+        k_start: float = 0.0,
         k_min: float = 0.0,
         k_max: float = 0.0,
         k_warmup_epochs: int = 10,
@@ -302,15 +303,16 @@ class MINWayMasker(LatentMasker):
         self.gumbel_tau = float(gumbel_tau)
         self.warmup_epochs = int(warmup_epochs)
 
-        # k schedule state
+        # k schedule state: k_start → k_max (warmup) → k_min (cosine)
+        self.k_start = float(k_start)
         self.k_min = float(k_min)
         self.k_max = float(k_max)
         self.k_warmup_epochs = int(k_warmup_epochs)
         self.total_epochs = int(total_epochs)
-        self._k_enabled = self.k_min > 0 or self.k_max > 0
+        self._k_enabled = self.k_start > 0 or self.k_min > 0 or self.k_max > 0
 
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
-        self.register_buffer("_current_k", torch.tensor(self.k_max), persistent=False)
+        self.register_buffer("_current_k", torch.tensor(self.k_start if self._k_enabled else 0.0), persistent=False)
 
         d = predictor_dim
 
@@ -376,16 +378,18 @@ class MINWayMasker(LatentMasker):
     def set_progress(self, fraction: float) -> None:
         self._progress.fill_(max(0.0, min(1.0, float(fraction))))
 
-    def set_epoch(self, epoch: int) -> None:
-        """Update k from warmup+cosine schedule."""
+    def set_step(self, step: int, total_steps: int) -> None:
+        """Update k from warmup+cosine schedule: k_start → k_max → k_min."""
         if not self._k_enabled:
             return
-        w = self.k_warmup_epochs
-        T = self.total_epochs
-        if w > 0 and epoch < w:
-            k = self.k_min + (self.k_max - self.k_min) * (epoch + 1) / w
+        warmup_steps = self.k_warmup_epochs * max(1, total_steps // max(1, self.total_epochs))
+        if warmup_steps > 0 and step < warmup_steps:
+            # Linear warmup: k_start → k_max
+            frac = float(step) / float(warmup_steps)
+            k = self.k_start + (self.k_max - self.k_start) * frac
         else:
-            progress = (epoch - w) / max(1, T - w)
+            # Cosine annealing: k_max → k_min
+            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
             progress = min(progress, 1.0)
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             k = self.k_min + (self.k_max - self.k_min) * cosine
