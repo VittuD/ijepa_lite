@@ -491,7 +491,7 @@ class MINWayMasker(LatentMasker):
                 tgt_idx_list.append(batch_indices)
 
             # Pad to uniform K across blocks and batch, capped to prevent OOM
-            K_max_cap = self.num_patches // (M + 2)  # expected size under uniform
+            K_max_cap = self.num_patches // 2  # empirical upper bound for reasonable block sizes
             K = max(
                 self.ntgt_min_per_block,
                 min(

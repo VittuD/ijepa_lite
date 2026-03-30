@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-kl-xs-gumbel-alive-3blk
+#SBATCH --job-name=ijepa-kl-xs-gumbel-bigalive-3blk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -39,7 +39,7 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/kl_surprise
 
-export EXP_NAME="kl_cross_surprise_gumbel_05tau_3blk_alive"
+export EXP_NAME="kl_cross_surprise_gumbel_05tau_3blk_bigalive"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -52,12 +52,12 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.terms.nway_kl_marg.weight='[1.0,1.0]' \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
       ~masking.latent.terms.nway_floor_penalty \
-      +masking.latent.terms.role_alive.weight='[5.0,5.0]' \
+      +masking.latent.terms.role_alive.weight='[50.0,50.0]' \
       +masking.latent.terms.role_alive.p_min=0.05 \
       masking.latent.num_tgt_blocks=3 \
       masking.latent.k_start=0.2 \
-      masking.latent.k_min=0.2 \
       masking.latent.k_max=0.5 \
+      masking.latent.k_min=0.2 \
       masking.latent.k_warmup_epochs=50 \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
