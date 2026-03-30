@@ -54,7 +54,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.terms.nway_kl_marg.weight='[1.0,1.0]' \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
       ~masking.latent.terms.nway_floor_penalty \
-      +masking.latent.terms.role_alive.weight='[5.0,5.0]' \
+      +masking.latent.terms.role_alive.weight='[50.0,50.0]' \
       +masking.latent.terms.role_alive.p_min=0.05 \
       masking.latent.num_tgt_blocks=3 \
       masking.latent.k_start=0.2 \
@@ -63,7 +63,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.k_warmup_epochs=2 \
       data.root=$FAST/datasets/ \
       data.batch_size=512 \
-      train.epochs=5 \
+      train.epochs=10 \
       train.save_every_epochs=5 \
       train.viz_enabled=true \
       train.viz.out_dir="viz_output_${EXP_NAME}" \

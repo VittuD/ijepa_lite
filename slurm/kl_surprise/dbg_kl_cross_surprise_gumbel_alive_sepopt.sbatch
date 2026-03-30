@@ -61,7 +61,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.k_min=0.2 \
       masking.latent.k_max=0.5 \
       masking.latent.k_warmup_epochs=2 \
-      optim.masker_separate_optimizer=true \
+      +optim.masker_separate_optimizer=true \
       data.root=$FAST/datasets/ \
       data.batch_size=512 \
       train.epochs=5 \
