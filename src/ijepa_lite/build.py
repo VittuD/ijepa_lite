@@ -422,8 +422,9 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     betas = tuple(float(x) for x in cfg.optim.betas)
     eps = float(cfg.optim.eps)
     masker_lr_scale = float(getattr(cfg.optim, "masker_lr_scale", 1.0))
+    separate_masker_opt = bool(getattr(cfg.optim, "masker_separate_optimizer", False))
 
-    # Split params: masker submodules get a separate LR group
+    # Split params: masker submodules optionally get a separate optimizer
     core = model.module if hasattr(model, "module") else model
     masker_modules = set()
     if getattr(core, "latent_masker", None) is not None:
@@ -441,12 +442,17 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
         else:
             base_params.append(p)
 
-    param_groups = [{"params": base_params, "lr": lr}]
-    if masker_params:
-        param_groups.append({
-            "params": masker_params,
-            "lr": lr * masker_lr_scale,
-        })
+    if separate_masker_opt and masker_params:
+        # Separate optimizer: base_opt gets encoder/predictor only
+        param_groups = [{"params": base_params, "lr": lr}]
+    else:
+        # Shared optimizer: masker params go into a second param group (current behavior)
+        param_groups = [{"params": base_params, "lr": lr}]
+        if masker_params:
+            param_groups.append({
+                "params": masker_params,
+                "lr": lr * masker_lr_scale,
+            })
 
     opt = torch.optim.AdamW(
         param_groups,
@@ -457,6 +463,7 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     )
 
     sched = None
+    _lr_lambda = None
     if getattr(cfg, "sched", None) is not None:
         name = str(getattr(cfg.sched, "name", "warmup_cosine")).lower()
         if name == "warmup_cosine":
@@ -477,7 +484,21 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
         else:
             raise ValueError(f"Unknown sched.name={name}")
 
-    return opt, sched, wd_start, wd_end
+    # Build separate masker optimizer when opted in
+    masker_opt = None
+    masker_sched = None
+    if separate_masker_opt and masker_params:
+        masker_opt = torch.optim.AdamW(
+            masker_params,
+            lr=lr * masker_lr_scale,
+            betas=betas,
+            eps=eps,
+            weight_decay=wd_start,
+        )
+        if _lr_lambda is not None:
+            masker_sched = torch.optim.lr_scheduler.LambdaLR(masker_opt, lr_lambda=_lr_lambda)
+
+    return opt, masker_opt, sched, masker_sched, wd_start, wd_end
 
 
 # ------------------------------------------------------------------
@@ -632,13 +653,14 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
         model = maybe_wrap_ddp(cfg, model, device)
 
         loader = build_pretrain_loader(cfg)
-        optim, sched, wd_start, wd_end = build_pretrain_optim_sched(cfg, model)
+        optim, masker_optim, sched, masker_sched, wd_start, wd_end = build_pretrain_optim_sched(cfg, model)
 
         resumed_state: dict | None = None
         if cfg.resume:
             resumed_state = (
                 load_checkpoint_if_available(
-                    str(cfg.resume), model=model, optimizer=optim, scheduler=sched
+                    str(cfg.resume), model=model, optimizer=optim, scheduler=sched,
+                    masker_optimizer=masker_optim, masker_scheduler=masker_sched,
                 )
                 or None
             )
@@ -647,7 +669,9 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
             "model": model,
             "loader": loader,
             "optimizer": optim,
+            "masker_optimizer": masker_optim,
             "scheduler": sched,
+            "masker_scheduler": masker_sched,
             "callbacks": callbacks,
             "device": device,
             "resumed_state": resumed_state,

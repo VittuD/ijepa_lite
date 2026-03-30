@@ -67,6 +67,8 @@ class CheckpointCallback(Callback):
         optimizer = bundle["optimizer"]
         scheduler = bundle.get("scheduler", None)
         scaler = bundle.get("scaler", None)
+        masker_optimizer = bundle.get("masker_optimizer", None)
+        masker_scheduler = bundle.get("masker_scheduler", None)
 
         ckpt_dir = str(getattr(cfg.train, "ckpt_dir", self.ckpt_dir))
         ckpt_name = str(getattr(cfg.train, "ckpt_name", self.ckpt_name))
@@ -92,6 +94,8 @@ class CheckpointCallback(Callback):
             scaler=scaler,
             state=state_to_save,
             ema_start=ema_start,
+            masker_optimizer=masker_optimizer,
+            masker_scheduler=masker_scheduler,
         )
 
         # Versioned copy: keep epoch-numbered snapshots alongside last.pt.

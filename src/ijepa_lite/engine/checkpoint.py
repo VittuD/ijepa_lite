@@ -16,6 +16,8 @@ def save_checkpoint(
     scaler: Optional[torch.amp.GradScaler],
     state: dict,
     ema_start: Optional[float] = None,
+    masker_optimizer: Optional[torch.optim.Optimizer] = None,
+    masker_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
 ) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     core = unwrap_model(model)
@@ -26,6 +28,8 @@ def save_checkpoint(
         "scaler": scaler.state_dict() if scaler is not None else None,
         "state": state,
         "ema_start": ema_start,
+        "masker_optimizer": masker_optimizer.state_dict() if masker_optimizer is not None else None,
+        "masker_scheduler": masker_scheduler.state_dict() if masker_scheduler is not None else None,
     }
     torch.save(payload, path)
 
@@ -36,6 +40,8 @@ def load_checkpoint_if_available(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
     scaler: Optional[torch.amp.GradScaler] = None,
+    masker_optimizer: Optional[torch.optim.Optimizer] = None,
+    masker_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
 ) -> dict:
     """
     Returns the saved state dict (contains global_step, epoch, etc.)
@@ -59,6 +65,10 @@ def load_checkpoint_if_available(
         scheduler.load_state_dict(payload["scheduler"])
     if scaler is not None and payload.get("scaler") is not None:
         scaler.load_state_dict(payload["scaler"])
+    if masker_optimizer is not None and payload.get("masker_optimizer") is not None:
+        masker_optimizer.load_state_dict(payload["masker_optimizer"])
+    if masker_scheduler is not None and payload.get("masker_scheduler") is not None:
+        masker_scheduler.load_state_dict(payload["masker_scheduler"])
 
     restored = dict(payload.get("state", {}) or {})
     restored["ema_start"] = payload.get("ema_start", None)

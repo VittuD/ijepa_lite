@@ -48,6 +48,8 @@ def train(
     resumed_state: dict | None = None,
     wd_start: float | None = None,
     wd_end: float | None = None,
+    masker_optimizer=None,
+    masker_scheduler=None,
 ):
     amp = bool(cfg.train.amp) and (device.type == "cuda")
     scaler = GradScaler("cuda", enabled=amp)
@@ -79,6 +81,8 @@ def train(
         "optimizer": optimizer,
         "scheduler": scheduler,
         "scaler": scaler,
+        "masker_optimizer": masker_optimizer,
+        "masker_scheduler": masker_scheduler,
     }
 
     core = unwrap_model(model)
@@ -143,6 +147,8 @@ def train(
                 }
 
             optimizer.zero_grad(set_to_none=True)
+            if masker_optimizer is not None:
+                masker_optimizer.zero_grad(set_to_none=True)
 
             next_step = state["global_step"] + 1
             do_log = next_step % log_every == 0
@@ -158,19 +164,27 @@ def train(
             if clip_norm > 0 or do_log:
                 if amp:
                     scaler.unscale_(optimizer)
+                    if masker_optimizer is not None:
+                        scaler.unscale_(masker_optimizer)
                 if clip_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 if do_log:
                     gnorm = float(grad_norm(model.parameters()))
 
-            # Zero masker gradients on non-masker steps so optimizer.step()
-            # leaves masker weights unchanged (no momentum update either).
-            if masker_step_every > 1 and next_step % masker_step_every != 0:
-                if len(optimizer.param_groups) > 1:
-                    for p in optimizer.param_groups[-1]["params"]:
-                        p.grad = None
+            is_masker_step = masker_step_every == 1 or next_step % masker_step_every == 0
 
-            scaler.step(optimizer)
+            if masker_optimizer is not None:
+                # Separate optimizer path: skip masker step on non-masker steps
+                scaler.step(optimizer)
+                if is_masker_step:
+                    scaler.step(masker_optimizer)
+            else:
+                # Shared optimizer path: zero masker grads on non-masker steps
+                if masker_step_every > 1 and not is_masker_step:
+                    if len(optimizer.param_groups) > 1:
+                        for p in optimizer.param_groups[-1]["params"]:
+                            p.grad = None
+                scaler.step(optimizer)
             scaler.update()
 
             # ----------------------------------------------------------
@@ -183,6 +197,10 @@ def train(
                 for pg in optimizer.param_groups:
                     if pg.get("weight_decay", 0.0) > 0.0:
                         pg["weight_decay"] = new_wd
+                if masker_optimizer is not None:
+                    for pg in masker_optimizer.param_groups:
+                        if pg.get("weight_decay", 0.0) > 0.0:
+                            pg["weight_decay"] = new_wd
 
             # ----------------------------------------------------------
             # EMA linear schedule + target encoder update
@@ -206,7 +224,12 @@ def train(
 
                 global_loss = (sum_t / cnt_t.clamp(min=1.0)).item()
                 lr = float(optimizer.param_groups[0]["lr"])
-                masker_lr = float(optimizer.param_groups[-1]["lr"]) if len(optimizer.param_groups) > 1 else lr
+                if masker_optimizer is not None:
+                    masker_lr = float(masker_optimizer.param_groups[0]["lr"])
+                elif len(optimizer.param_groups) > 1:
+                    masker_lr = float(optimizer.param_groups[-1]["lr"])
+                else:
+                    masker_lr = lr
 
                 extra = token_metrics(out["pred"], out["target"])
 
@@ -262,6 +285,8 @@ def train(
 
         if scheduler is not None:
             scheduler.step()
+        if masker_scheduler is not None:
+            masker_scheduler.step()
 
         sum_t = torch.tensor(loss_meter.sum, device=device)
         cnt_t = torch.tensor(loss_meter.count, device=device, dtype=torch.long)
