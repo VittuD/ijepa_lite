@@ -50,6 +50,8 @@ def train(
     wd_end: float | None = None,
     masker_optimizer=None,
     masker_scheduler=None,
+    masker_wd_start: float | None = None,
+    masker_wd_end: float | None = None,
 ):
     amp = bool(cfg.train.amp) and (device.type == "cuda")
     scaler = GradScaler("cuda", enabled=amp)
@@ -102,6 +104,10 @@ def train(
     _wd_start = wd_start if wd_start is not None else 0.0
     _wd_end = wd_end if wd_end is not None else _wd_start
     _do_wd_sched = wd_start is not None and (_wd_start != _wd_end)
+
+    _masker_wd_start = masker_wd_start if masker_wd_start is not None else _wd_start
+    _masker_wd_end = masker_wd_end if masker_wd_end is not None else _masker_wd_start
+    _do_masker_wd_sched = masker_optimizer is not None and (_masker_wd_start != _masker_wd_end)
 
     total_steps = int(cfg.train.epochs) * len(loader)
 
@@ -197,10 +203,13 @@ def train(
                 for pg in optimizer.param_groups:
                     if pg.get("weight_decay", 0.0) > 0.0:
                         pg["weight_decay"] = new_wd
-                if masker_optimizer is not None:
-                    for pg in masker_optimizer.param_groups:
-                        if pg.get("weight_decay", 0.0) > 0.0:
-                            pg["weight_decay"] = new_wd
+            if _do_masker_wd_sched:
+                new_masker_wd = _cosine_wd(
+                    _masker_wd_start, _masker_wd_end, state["global_step"], total_steps
+                )
+                for pg in masker_optimizer.param_groups:
+                    if pg.get("weight_decay", 0.0) > 0.0:
+                        pg["weight_decay"] = new_masker_wd
 
             # ----------------------------------------------------------
             # EMA linear schedule + target encoder update

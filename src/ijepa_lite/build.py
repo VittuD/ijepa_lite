@@ -423,6 +423,10 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     eps = float(cfg.optim.eps)
     masker_lr_scale = float(getattr(cfg.optim, "masker_lr_scale", 1.0))
     separate_masker_opt = bool(getattr(cfg.optim, "masker_separate_optimizer", False))
+    masker_betas = tuple(float(x) for x in getattr(cfg.optim, "masker_betas", betas))
+    masker_eps = float(getattr(cfg.optim, "masker_eps", eps))
+    masker_wd_start = float(getattr(cfg.optim, "masker_weight_decay", wd_start))
+    masker_wd_end = float(getattr(cfg.optim, "masker_final_weight_decay", masker_wd_start))
 
     # Split params: masker submodules optionally get a separate optimizer
     core = model.module if hasattr(model, "module") else model
@@ -491,14 +495,14 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
         masker_opt = torch.optim.AdamW(
             masker_params,
             lr=lr * masker_lr_scale,
-            betas=betas,
-            eps=eps,
-            weight_decay=wd_start,
+            betas=masker_betas,
+            eps=masker_eps,
+            weight_decay=masker_wd_start,
         )
         if _lr_lambda is not None:
             masker_sched = torch.optim.lr_scheduler.LambdaLR(masker_opt, lr_lambda=_lr_lambda)
 
-    return opt, masker_opt, sched, masker_sched, wd_start, wd_end
+    return opt, masker_opt, sched, masker_sched, wd_start, wd_end, masker_wd_start, masker_wd_end
 
 
 # ------------------------------------------------------------------
@@ -653,7 +657,7 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
         model = maybe_wrap_ddp(cfg, model, device)
 
         loader = build_pretrain_loader(cfg)
-        optim, masker_optim, sched, masker_sched, wd_start, wd_end = build_pretrain_optim_sched(cfg, model)
+        optim, masker_optim, sched, masker_sched, wd_start, wd_end, masker_wd_start, masker_wd_end = build_pretrain_optim_sched(cfg, model)
 
         resumed_state: dict | None = None
         if cfg.resume:
@@ -677,6 +681,8 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
             "resumed_state": resumed_state,
             "wd_start": wd_start,
             "wd_end": wd_end,
+            "masker_wd_start": masker_wd_start,
+            "masker_wd_end": masker_wd_end,
         }
 
     if task == "linear_probe":
