@@ -403,6 +403,83 @@ class NWayKLMargTerm(MaskerTerm):
 
 # ------------------------------------------------------------------
 
+# ------------------------------------------------------------------
+# Progressive KL marginal — KL(q̄ ‖ p̄) / KL(p̄ ‖ q̄) / sum
+#
+# p̄ is a scheduled uniform distribution over the currently active
+# roles {ctx, tgt₁…tgt_n_active, ign}.  Inactive tgt roles receive
+# inactive_eps mass so forward KL stays finite.
+#
+# n_active_tgt is passed per-step via **kw (set by MINWayMasker).
+# direction: "forward" = KL(q̄‖p̄), "reverse" = KL(p̄‖q̄), "sum" = both.
+# ------------------------------------------------------------------
+
+class NWayProgressiveKLTerm(MaskerTerm):
+    """Scheduled-target KL for progressive role unlocking."""
+    name = "nway_progressive_kl"
+
+    def __init__(
+        self,
+        num_tgt_blocks: int = 4,
+        direction: str = "forward",
+        inactive_eps: float = 1e-4,
+    ):
+        super().__init__()
+        self.M = int(num_tgt_blocks)
+        assert direction in ("forward", "reverse", "sum"), \
+            f"direction must be 'forward', 'reverse', or 'sum', got {direction!r}"
+        self.direction = str(direction)
+        self.inactive_eps = float(inactive_eps)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")            # (B, N, M+2)
+        n_active = kw.get("n_active_tgt")  # int
+        if soft is None or n_active is None:
+            return p_ctx.new_zeros(()), {}
+
+        n_active = int(n_active)
+        M = self.M
+        p_bar = soft.mean(dim=1)  # (B, M+2)
+
+        # Build target distribution p̄ over all M+2 roles.
+        # Active roles = {ctx=0, tgt₁…tgt_n_active, ign=M+1} share equal mass.
+        # Inactive tgt roles = {tgt_{n_active+1}…tgt_M} receive inactive_eps.
+        n_inactive = M - n_active
+        n_active_roles = n_active + 2   # ctx + n_active tgts + ign
+        active_mass = (1.0 - self.inactive_eps * n_inactive) / n_active_roles
+
+        p_target = p_bar.new_full(p_bar.shape, self.inactive_eps)
+        p_target[:, 0] = active_mass                          # ctx
+        p_target[:, -1] = active_mass                         # ign
+        for k in range(n_active):
+            p_target[:, 1 + k] = active_mass                 # tgt₁…tgt_n_active
+
+        EPS = 1e-8
+        log_q = p_bar.clamp(min=EPS).log()
+        log_p = p_target.clamp(min=EPS).log()
+
+        # KL(q̄ ‖ p̄) — zero-forcing: penalises mass in inactive roles
+        forward_kl = (p_bar * (log_q - log_p)).sum(-1).mean()
+        # KL(p̄ ‖ q̄) — zero-avoiding: no penalty for mass in inactive roles
+        reverse_kl = (p_target * (log_p - log_q)).sum(-1).mean()
+
+        if self.direction == "forward":
+            loss = forward_kl
+        elif self.direction == "reverse":
+            loss = reverse_kl
+        else:  # sum
+            loss = forward_kl + reverse_kl
+
+        return loss, {
+            "prog_kl/forward": float(forward_kl.detach().item()),
+            "prog_kl/reverse": float(reverse_kl.detach().item()),
+            "prog_kl/loss": float(loss.detach().item()),
+            "prog_kl/n_active_tgt": float(n_active),
+        }
+
+
+# ------------------------------------------------------------------
+
 TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "H_cond": HCondTerm,
     "neg_H_marg": NegHMargTerm,
@@ -418,4 +495,5 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "nway_kl_marg": NWayKLMargTerm,
     "nway_floor_penalty": FloorPenaltyTerm,
     "role_alive": RoleAliveTerm,
+    "nway_progressive_kl": NWayProgressiveKLTerm,
 }

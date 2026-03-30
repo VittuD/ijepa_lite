@@ -125,7 +125,12 @@ class MIRateMasker(LatentMasker):
 
     def reset_parameters(self) -> None:
         """Re-initialise all weights. Called by train loop on masker reset trigger."""
-        self.apply(lambda m: m.reset_parameters() if hasattr(m, "reset_parameters") else None)
+        for m in self.modules():
+            if m is self:
+                continue
+            reset_fn = getattr(m, "reset_parameters", None)
+            if callable(reset_fn):
+                reset_fn()
         nn.init.trunc_normal_(self.selection_token, std=0.02)
         if isinstance(self.pos_embed, nn.Parameter):
             nn.init.trunc_normal_(self.pos_embed, std=0.02)
@@ -297,6 +302,12 @@ class MINWayMasker(LatentMasker):
         k_max: float = 0.0,
         k_warmup_epochs: int = 10,
         total_epochs: int = 1000,
+        # Progressive role unlocking
+        n_start_tgt: int = 2,
+        phase_mode: str = "none",       # "none" | "deterministic" | "adaptive"
+        phase_fractions: list | None = None,  # deterministic: fractions at which to add a role
+        adaptive_eps: float = 0.01,     # adaptive: KL below this = converged
+        adaptive_patience_epochs: int = 3,    # adaptive: epochs below eps before advance
         # Unused — kept for build.py kwarg filtering
         base_kind: str = "smooth_l1",
         normalize: bool = False,
@@ -322,6 +333,37 @@ class MINWayMasker(LatentMasker):
 
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
         self.register_buffer("_current_k", torch.tensor(self.k_start if self._k_enabled else 0.0), persistent=False)
+
+        # ------------------------------------------------------------------
+        # Progressive role unlocking
+        # ------------------------------------------------------------------
+        assert phase_mode in ("none", "deterministic", "adaptive"), \
+            f"phase_mode must be 'none', 'deterministic', or 'adaptive', got {phase_mode!r}"
+        self._phase_mode = str(phase_mode)
+        self._n_start_tgt = max(2, min(int(n_start_tgt), self.M))  # ≥2 for cross-surprise
+        self._adaptive_eps = float(adaptive_eps)
+        self._adaptive_patience = int(adaptive_patience_epochs)
+        self._adaptive_kl_history: list[float] = []
+
+        # Deterministic phase fractions: where in [0,1] of total steps to unlock next role.
+        if phase_fractions is not None:
+            _fracs = sorted(float(f) for f in phase_fractions)
+        else:
+            # Auto-uniform: n_transitions evenly spaced, all within the training window.
+            n_transitions = self.M - self._n_start_tgt
+            if n_transitions > 0:
+                _fracs = [(i + 1) / (n_transitions + 1) for i in range(n_transitions)]
+            else:
+                _fracs = []
+        self._phase_fractions: list[float] = _fracs
+
+        # Persistent buffer so current phase survives checkpoint/resume.
+        self.register_buffer(
+            "_n_active_buf",
+            torch.tensor(self._n_start_tgt if self._phase_mode != "none" else self.M,
+                         dtype=torch.long),
+            persistent=True,
+        )
 
         d = predictor_dim
 
@@ -386,33 +428,72 @@ class MINWayMasker(LatentMasker):
 
     def reset_parameters(self) -> None:
         """Re-initialise all weights. Called by train loop on masker reset trigger."""
-        self.apply(lambda m: m.reset_parameters() if hasattr(m, "reset_parameters") else None)
+        for m in self.modules():
+            if m is self:
+                continue
+            reset_fn = getattr(m, "reset_parameters", None)
+            if callable(reset_fn):
+                reset_fn()
         if self.arch == "transformer":
             nn.init.trunc_normal_(self.selection_token, std=0.02)
             if isinstance(self.pos_embed, nn.Parameter):
                 nn.init.trunc_normal_(self.pos_embed, std=0.02)
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)
+        # Reset phase state so the curriculum restarts from the beginning
+        self._n_active_buf.fill_(
+            self._n_start_tgt if self._phase_mode != "none" else self.M
+        )
+        self._adaptive_kl_history.clear()
 
     def set_progress(self, fraction: float) -> None:
         self._progress.fill_(max(0.0, min(1.0, float(fraction))))
 
     def set_step(self, step: int, total_steps: int) -> None:
-        """Update k from warmup+cosine schedule: k_start → k_max → k_min."""
-        if not self._k_enabled:
-            return
-        warmup_steps = self.k_warmup_epochs * max(1, total_steps // max(1, self.total_epochs))
-        if warmup_steps > 0 and step < warmup_steps:
-            # Linear warmup: k_start → k_max
-            frac = float(step) / float(warmup_steps)
-            k = self.k_start + (self.k_max - self.k_start) * frac
-        else:
-            # Cosine annealing: k_max → k_min
-            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-            progress = min(progress, 1.0)
-            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-            k = self.k_min + (self.k_max - self.k_min) * cosine
-        self._current_k.fill_(k)
+        """Update k schedule and (for deterministic mode) advance the active-role phase."""
+        if self._k_enabled:
+            warmup_steps = self.k_warmup_epochs * max(1, total_steps // max(1, self.total_epochs))
+            if warmup_steps > 0 and step < warmup_steps:
+                frac = float(step) / float(warmup_steps)
+                k = self.k_start + (self.k_max - self.k_start) * frac
+            else:
+                progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+                progress = min(progress, 1.0)
+                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+                k = self.k_min + (self.k_max - self.k_min) * cosine
+            self._current_k.fill_(k)
+
+        # Deterministic phase advance: unlock next tgt role when step crosses threshold.
+        if self._phase_mode == "deterministic":
+            n_active = int(self._n_active_buf.item())
+            if n_active < self.M:
+                phase_idx = n_active - self._n_start_tgt
+                if phase_idx < len(self._phase_fractions):
+                    threshold = int(self._phase_fractions[phase_idx] * total_steps)
+                    if step >= threshold:
+                        self._n_active_buf.fill_(min(n_active + 1, self.M))
+
+    def on_epoch_kl(self, kl_val: float) -> bool:
+        """
+        Called at epoch end with the per-epoch average progressive KL loss.
+        For adaptive phase mode: advances to the next role when the KL has
+        been below adaptive_eps for adaptive_patience_epochs consecutive epochs.
+        Returns True if a new role was unlocked.
+        """
+        if self._phase_mode != "adaptive":
+            return False
+        n_active = int(self._n_active_buf.item())
+        if n_active >= self.M:
+            return False
+
+        self._adaptive_kl_history.append(float(kl_val))
+        if len(self._adaptive_kl_history) >= self._adaptive_patience:
+            recent = self._adaptive_kl_history[-self._adaptive_patience:]
+            if all(v < self._adaptive_eps for v in recent):
+                self._n_active_buf.fill_(min(n_active + 1, self.M))
+                self._adaptive_kl_history.clear()
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Weight sampling
@@ -469,6 +550,15 @@ class MINWayMasker(LatentMasker):
                 [[k_val]], device=logits.device, dtype=logits.dtype,
             )
             logits = logits + self.k_logit_bias(k_tensor).unsqueeze(1)
+
+        # ----------------------------------------------------------------
+        # Progressive phase masking: suppress inactive tgt role channels
+        # before softmax so they receive zero probability mass.
+        # ----------------------------------------------------------------
+        n_active = int(self._n_active_buf.item())
+        if n_active < self.M:
+            logits = logits.clone()
+            logits[:, :, 1 + n_active: 1 + self.M] = float("-inf")
 
         # ----------------------------------------------------------------
         # (M+2)-way soft assignments
@@ -587,11 +677,12 @@ class MINWayMasker(LatentMasker):
 
         # target_soft = sum across blocks for backward compat metrics
         aux = {
-            "weights":  weights,
-            "p_ign":    p_ign,
-            "soft":     soft,
-            "logits":   logits.detach(),
-            "ema_full": ema_full,
+            "weights":      weights,
+            "p_ign":        p_ign,
+            "soft":         soft,
+            "logits":       logits.detach(),
+            "ema_full":     ema_full,
+            "n_active_tgt": n_active,
         }
         if self._k_enabled:
             aux["k"] = self._current_k.item()
@@ -631,6 +722,9 @@ class MINWayMasker(LatentMasker):
         k = mask_output.aux.get("k")
         if k is not None:
             extra_kw["k"] = k
+        n_active = mask_output.aux.get("n_active_tgt")
+        if n_active is not None:
+            extra_kw["n_active_tgt"] = n_active
 
         total, logs = self.composite_loss(
             weights=weights,

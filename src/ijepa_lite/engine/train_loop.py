@@ -98,6 +98,7 @@ def train(
     clip_norm = float(getattr(cfg.train, "grad_clip_norm", 0.0))
     masker_step_every = int(getattr(cfg.train, "masker_step_every", 1))
     masker_reset_every = int(getattr(cfg.train, "masker_reset_every", -1))
+    _prog_kl_meter = AverageMeter()  # per-epoch progressive KL average (for adaptive mode)
 
     # ------------------------------------------------------------------
     # WD schedule (no-op when wd_start == wd_end or wd_start is None)
@@ -132,16 +133,28 @@ def train(
                 _masker.set_progress(epoch / warmup)
 
         # ----------------------------------------------------------
-        # Masker reset trigger: re-init weights + optimizer state
+        # Masker reset trigger: full wipe — weights, Adam state, LR
         # ----------------------------------------------------------
         if masker_reset_every > 0 and epoch > 0 and epoch % masker_reset_every == 0 and _masker is not None:
+            # 1. Re-init masker weights (and phase state if progressive KL is active)
             if hasattr(_masker, "reset_parameters"):
                 _masker.reset_parameters()
+
+            # 2. Wipe Adam m/v/step buffers and restore initial LR
             if masker_optimizer is not None:
                 masker_optimizer.state.clear()
+                for pg in masker_optimizer.param_groups:
+                    if "initial_lr" in pg:
+                        pg["lr"] = pg["initial_lr"]
             elif len(optimizer.param_groups) > 1:
                 for p in optimizer.param_groups[-1]["params"]:
                     optimizer.state.pop(p, None)
+                pg = optimizer.param_groups[-1]
+                if "initial_lr" in pg:
+                    pg["lr"] = pg["initial_lr"]
+
+            # 3. Restart the LR schedule from epoch 0
+            #    (overwrites the manual lr set above with lambda(0) * initial_lr)
             if masker_scheduler is not None:
                 masker_scheduler.last_epoch = -1
                 masker_scheduler.step()
@@ -242,6 +255,11 @@ def train(
 
             loss_meter.update(float(loss.item()), n=images.size(0))
 
+            # Track progressive KL every step for adaptive phase switching.
+            _pkv = out.get("mask_stats", {}).get("mask/prog_kl/loss")
+            if _pkv is not None:
+                _prog_kl_meter.update(float(_pkv))
+
             if do_log:
                 sum_t = torch.tensor(loss_meter.sum, device=device)
                 cnt_t = torch.tensor(loss_meter.count, device=device, dtype=torch.long)
@@ -313,6 +331,12 @@ def train(
             scheduler.step()
         if masker_scheduler is not None:
             masker_scheduler.step()
+
+        # Adaptive phase switching: notify masker of per-epoch KL average.
+        if _masker is not None and hasattr(_masker, "on_epoch_kl"):
+            avg_kl = _prog_kl_meter.avg if _prog_kl_meter.count > 0 else float("inf")
+            _masker.on_epoch_kl(avg_kl)
+        _prog_kl_meter = AverageMeter()  # reset for next epoch
 
         sum_t = torch.tensor(loss_meter.sum, device=device)
         cnt_t = torch.tensor(loss_meter.count, device=device, dtype=torch.long)

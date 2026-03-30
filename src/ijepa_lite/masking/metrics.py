@@ -191,6 +191,11 @@ def mask_diagnostics(
     if "k_schedule" in aux:
         stats["mask/k_schedule"] = float(aux["k_schedule"])
 
+    # Progressive KL masker
+    for _pk in ("prog_kl/forward", "prog_kl/reverse", "prog_kl/loss", "prog_kl/n_active_tgt"):
+        if _pk in aux:
+            stats[f"mask/{_pk}"] = float(aux[_pk])
+
     # Per-block target counts from N-way soft assignments
     nway_soft = aux.get("soft")
     if nway_soft is not None and torch.is_tensor(nway_soft) and nway_soft.shape[-1] > 3:
