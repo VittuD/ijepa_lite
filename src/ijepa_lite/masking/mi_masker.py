@@ -123,6 +123,15 @@ class MIRateMasker(LatentMasker):
     # Warmup progress
     # ------------------------------------------------------------------
 
+    def reset_parameters(self) -> None:
+        """Re-initialise all weights. Called by train loop on masker reset trigger."""
+        self.apply(lambda m: m.reset_parameters() if hasattr(m, "reset_parameters") else None)
+        nn.init.trunc_normal_(self.selection_token, std=0.02)
+        if isinstance(self.pos_embed, nn.Parameter):
+            nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
+        nn.init.zeros_(self.proj_score.bias)
+
     def set_progress(self, fraction: float) -> None:
         """Update warmup progress. Call once per epoch."""
         self._progress.fill_(max(0.0, min(1.0, float(fraction))))
@@ -374,6 +383,16 @@ class MINWayMasker(LatentMasker):
     # ------------------------------------------------------------------
     # Warmup progress
     # ------------------------------------------------------------------
+
+    def reset_parameters(self) -> None:
+        """Re-initialise all weights. Called by train loop on masker reset trigger."""
+        self.apply(lambda m: m.reset_parameters() if hasattr(m, "reset_parameters") else None)
+        if self.arch == "transformer":
+            nn.init.trunc_normal_(self.selection_token, std=0.02)
+            if isinstance(self.pos_embed, nn.Parameter):
+                nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
+        nn.init.zeros_(self.proj_score.bias)
 
     def set_progress(self, fraction: float) -> None:
         self._progress.fill_(max(0.0, min(1.0, float(fraction))))

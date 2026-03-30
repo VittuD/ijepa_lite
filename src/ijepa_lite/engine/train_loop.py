@@ -97,6 +97,7 @@ def train(
     log_every = int(cfg.train.log_every)
     clip_norm = float(getattr(cfg.train, "grad_clip_norm", 0.0))
     masker_step_every = int(getattr(cfg.train, "masker_step_every", 1))
+    masker_reset_every = int(getattr(cfg.train, "masker_reset_every", -1))
 
     # ------------------------------------------------------------------
     # WD schedule (no-op when wd_start == wd_end or wd_start is None)
@@ -129,6 +130,22 @@ def train(
             warmup = getattr(_masker, "warmup_epochs", 0)
             if warmup > 0:
                 _masker.set_progress(epoch / warmup)
+
+        # ----------------------------------------------------------
+        # Masker reset trigger: re-init weights + optimizer state
+        # ----------------------------------------------------------
+        if masker_reset_every > 0 and epoch > 0 and epoch % masker_reset_every == 0 and _masker is not None:
+            if hasattr(_masker, "reset_parameters"):
+                _masker.reset_parameters()
+            if masker_optimizer is not None:
+                masker_optimizer.state.clear()
+            elif len(optimizer.param_groups) > 1:
+                for p in optimizer.param_groups[-1]["params"]:
+                    optimizer.state.pop(p, None)
+            if masker_scheduler is not None:
+                masker_scheduler.last_epoch = -1
+                masker_scheduler.step()
+
         callbacks.on_epoch_start(cfg=cfg, state=state)
 
         if sampler is not None and hasattr(sampler, "set_epoch"):
