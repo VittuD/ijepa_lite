@@ -458,7 +458,7 @@ class MINWayMasker(LatentMasker):
         #   gap = total_steps / (n_transitions + 1)
         if not getattr(self, "_pklt_ts_initialized", False):
             self._pklt_ts_initialized = True
-            pklt = self.composite_loss.terms.get("nway_progressive_kl")
+            pklt = self.composite_loss.terms._modules.get("nway_progressive_kl")
             if pklt is not None and pklt.transition_steps < 0:
                 n_transitions = self.M - self._n_start_tgt
                 if n_transitions > 0:
