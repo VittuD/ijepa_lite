@@ -10,11 +10,13 @@ from ijepa_lite.utils.dist import is_rank0, unwrap_model
 
 class VizCallback(Callback):
     """
-    Opt-in visualization of Goldilocks masker scoring at checkpoint cadence.
+    Opt-in visualization of Goldilocks masker scoring.
 
-    Activated when ``cfg.train.viz_enabled`` is True.  Runs at the same cadence
-    as ``save_every_epochs`` — whenever a checkpoint is saved, visualizations
-    are produced too.  Rank 0 only.
+    Activated when ``cfg.train.viz_enabled`` is True.  Rank 0 only.
+
+    Cadence: ``cfg.train.viz_every_epochs`` (alias ``viz_every``).  When not
+    provided, falls back to ``save_every`` / ``save_every_epochs`` so the
+    default behaviour is unchanged (viz piggybacks on checkpoint saving).
 
     Only activates if the model has a ``latent_masker`` with a
     ``target_soft``-returning interface (e.g. GoldilocksTeacherMasker).
@@ -22,7 +24,7 @@ class VizCallback(Callback):
 
     def __init__(self) -> None:
         self._enabled: bool = False
-        self._save_every: int = 1
+        self._viz_every: int = 1
         self._dataset = None
         self._cfg_viz: Any = None
         self._image_size: int = 96
@@ -50,9 +52,13 @@ class VizCallback(Callback):
             from ijepa_lite.build import _build_collate_masker
             self._collateMasker = _build_collate_masker(cfg)
 
-        self._save_every = int(
+        save_every = int(
             getattr(cfg.train, "save_every",
                     getattr(cfg.train, "save_every_epochs", 1))
+        )
+        self._viz_every = int(
+            getattr(cfg.train, "viz_every",
+                    getattr(cfg.train, "viz_every_epochs", save_every))
         )
         self._image_size = int(cfg.model.image_size)
         self._patch_size = int(cfg.model.patch_size)
@@ -78,7 +84,11 @@ class VizCallback(Callback):
             self._enabled = False
             return
 
-        print(f"[VizCallback] Enabled: piggybacks on save_every={self._save_every}, "
+        if self._viz_every == save_every:
+            cadence_msg = f"piggybacks on save_every={save_every}"
+        else:
+            cadence_msg = f"viz_every={self._viz_every} (save_every={save_every})"
+        print(f"[VizCallback] Enabled: {cadence_msg}, "
               f"dataset={dataset_name}, n_images={int(getattr(vcfg, 'n_images', 100))}")
 
     def on_epoch_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
@@ -86,9 +96,9 @@ class VizCallback(Callback):
             return
 
         epoch = int(state.get("epoch", 0))
-        if self._save_every <= 0:
+        if self._viz_every <= 0:
             return
-        if (epoch + 1) % self._save_every != 0:
+        if (epoch + 1) % self._viz_every != 0:
             return
 
         self._run_viz(cfg, state, epoch)
