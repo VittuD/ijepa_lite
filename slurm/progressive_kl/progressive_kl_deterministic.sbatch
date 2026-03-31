@@ -1,20 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-marg-xs-gumbel-alive-reset-dbg
+#SBATCH --job-name=ijepa-prog-kl-det-10blk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
-#SBATCH --output=sbatch_logs/kl_surprise/%x_%j.out
-#SBATCH --error=sbatch_logs/kl_surprise/%x_%j.err
+#SBATCH --time=06:30:00
+#SBATCH --output=sbatch_logs/progressive_kl/%x_%j.out
+#SBATCH --error=sbatch_logs/progressive_kl/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Masker reset trigger test: KL-to-target marginal + cross-surprise
-# + Gumbel sampling + role_alive.
-# Masker weights + optimizer state reset every 10 epochs.
+# Debug: progressive KL with deterministic phase advance.
+#
+# Replaces role_alive + neg_H_marg with nway_progressive_kl (forward KL).
+# Starts with 2 active target blocks; unlocks one additional block per phase.
+# With num_tgt_blocks=4 and n_start_tgt=2: 2 transitions auto-placed at
+# ~33% and ~67% of total steps.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -37,9 +40,9 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
 
-mkdir -p sbatch_logs/kl_surprise
+mkdir -p sbatch_logs/progressive_kl
 
-export EXP_NAME="marg_cross_surprise_gumbel_alive_masker_reset_dbg"
+export EXP_NAME="prog_kl_det_10blk_fwd_dbg"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=1 \
@@ -48,17 +51,20 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       exp_name="$EXP_NAME" \
       masking.latent.hard_assignment=gumbel \
       masking.latent.gumbel_tau=0.5 \
-      masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
+      ~masking.latent.terms.nway_neg_H_marg \
       ~masking.latent.terms.nway_floor_penalty \
-      +masking.latent.terms.role_alive.weight='[50.0,50.0]' \
-      +masking.latent.terms.role_alive.p_min=0.05 \
-      masking.latent.num_tgt_blocks=3 \
+      masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
+      +masking.latent.terms.nway_progressive_kl.weight='[1.0,1.0]' \
+      +masking.latent.terms.nway_progressive_kl.direction=forward \
+      masking.latent.num_tgt_blocks=10 \
+      masking.latent.ntgt_min_per_block=1 \
+      +masking.latent.n_start_tgt=2 \
+      +masking.latent.phase_mode=deterministic \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
-      train.epochs=30 \
-      +train.masker_reset_every=10 \
-      train.save_every_epochs=2 \
-      train.eval_every_epochs=10 \
+      train.epochs=1000 \
       train.viz_enabled=true \
+      +train.viz_every_epochs=10 \
+      train.viz.n_images=30 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
