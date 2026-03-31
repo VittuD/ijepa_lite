@@ -511,7 +511,7 @@ class NWayProgressiveKLTerm(MaskerTerm):
                 self._q_from.copy_(current_q_eff.to(device))
                 self._q_to.copy_(new_q)
                 self._transition_start.fill_(global_step)
-                self._n_active_from.fill_(prev_n)     # smooth starts at the old count
+                self._n_active_from.fill_(n_active)    # smooth starts at the just-unlocked count
             self._prev_n_active.fill_(n_active)
 
         p_bar = soft.mean(dim=1)  # (B, M+2)
