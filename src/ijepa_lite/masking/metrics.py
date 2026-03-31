@@ -192,7 +192,7 @@ def mask_diagnostics(
         stats["mask/k_schedule"] = float(aux["k_schedule"])
 
     # Progressive KL masker
-    for _pk in ("prog_kl/forward", "prog_kl/reverse", "prog_kl/loss", "prog_kl/n_active_tgt"):
+    for _pk in ("prog_kl/forward", "prog_kl/reverse", "prog_kl/loss", "prog_kl/n_active_tgt", "prog_kl/transition_alpha"):
         if _pk in aux:
             stats[f"mask/{_pk}"] = float(aux[_pk])
 

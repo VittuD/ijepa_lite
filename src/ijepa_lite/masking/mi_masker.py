@@ -451,6 +451,21 @@ class MINWayMasker(LatentMasker):
 
     def set_step(self, step: int, total_steps: int) -> None:
         """Update k schedule and (for deterministic mode) advance the active-role phase."""
+        self._global_step = int(step)
+
+        # Auto-set transition_steps for the progressive KL term on first call,
+        # using the same inter-phase gap formula as the deterministic fractions:
+        #   gap = total_steps / (n_transitions + 1)
+        if not getattr(self, "_pklt_ts_initialized", False):
+            self._pklt_ts_initialized = True
+            pklt = self.composite_loss.terms.get("nway_progressive_kl")
+            if pklt is not None and pklt.transition_steps < 0:
+                n_transitions = self.M - self._n_start_tgt
+                if n_transitions > 0:
+                    pklt.transition_steps = max(1, total_steps // (n_transitions + 1))
+                else:
+                    pklt.transition_steps = max(1, total_steps)
+
         if self._k_enabled:
             warmup_steps = self.k_warmup_epochs * max(1, total_steps // max(1, self.total_epochs))
             if warmup_steps > 0 and step < warmup_steps:
@@ -683,6 +698,7 @@ class MINWayMasker(LatentMasker):
             "logits":       logits.detach(),
             "ema_full":     ema_full,
             "n_active_tgt": n_active,
+            "global_step":  getattr(self, "_global_step", 0),
         }
         if self._k_enabled:
             aux["k"] = self._current_k.item()
@@ -725,6 +741,9 @@ class MINWayMasker(LatentMasker):
         n_active = mask_output.aux.get("n_active_tgt")
         if n_active is not None:
             extra_kw["n_active_tgt"] = n_active
+        global_step = mask_output.aux.get("global_step")
+        if global_step is not None:
+            extra_kw["global_step"] = global_step
 
         total, logs = self.composite_loss(
             weights=weights,

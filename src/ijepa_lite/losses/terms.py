@@ -411,11 +411,16 @@ class NWayKLMargTerm(MaskerTerm):
 # inactive_eps mass so forward KL stays finite.
 #
 # n_active_tgt is passed per-step via **kw (set by MINWayMasker).
+# global_step is passed per-step via **kw for transition blending.
 # direction: "forward" = KL(q̄‖p̄), "reverse" = KL(p̄‖q̄), "sum" = both.
+#
+# Smooth transitions: when n_active_tgt increases, the target linearly
+# blends from the current q_eff to the new target over transition_steps
+# steps, avoiding the KL discontinuity from hard phase switches.
 # ------------------------------------------------------------------
 
 class NWayProgressiveKLTerm(MaskerTerm):
-    """Scheduled-target KL for progressive role unlocking."""
+    """Scheduled-target KL for progressive role unlocking with smooth transitions."""
     name = "nway_progressive_kl"
 
     def __init__(
@@ -423,6 +428,7 @@ class NWayProgressiveKLTerm(MaskerTerm):
         num_tgt_blocks: int = 4,
         direction: str = "forward",
         inactive_eps: float = 1e-4,
+        transition_steps: int = 0,
     ):
         super().__init__()
         self.M = int(num_tgt_blocks)
@@ -430,29 +436,89 @@ class NWayProgressiveKLTerm(MaskerTerm):
             f"direction must be 'forward', 'reverse', or 'sum', got {direction!r}"
         self.direction = str(direction)
         self.inactive_eps = float(inactive_eps)
+        # 0 (default): hard switch — no blending.
+        # -1: auto — MINWayMasker sets this to the inter-phase gap on first set_step().
+        # >0: explicit smooth transition over that many steps.
+        self.transition_steps = int(transition_steps)
+
+        # Transition state — persistent so mid-transition survives checkpoint/resume.
+        # _transition_start = -1 means "not yet initialized".
+        self.register_buffer("_q_from", torch.zeros(self.M + 2), persistent=True)
+        self.register_buffer("_q_to", torch.zeros(self.M + 2), persistent=True)
+        self.register_buffer(
+            "_transition_start", torch.tensor(-1, dtype=torch.long), persistent=True
+        )
+        self.register_buffer(
+            "_prev_n_active", torch.tensor(-1, dtype=torch.long), persistent=True
+        )
+        # n_active at the start of the current transition (for smooth logging)
+        self.register_buffer(
+            "_n_active_from", torch.tensor(0, dtype=torch.long), persistent=True
+        )
+
+    def _build_target(self, n_active: int) -> torch.Tensor:
+        """Return (M+2,) uniform target distribution for n_active active tgt roles."""
+        M = self.M
+        n_inactive = M - n_active
+        n_active_roles = n_active + 2  # ctx + n_active tgts + ign
+        active_mass = (1.0 - self.inactive_eps * n_inactive) / n_active_roles
+        q = torch.full((M + 2,), self.inactive_eps, dtype=torch.float32)
+        q[0] = active_mass    # ctx
+        q[-1] = active_mass   # ign
+        for k in range(n_active):
+            q[1 + k] = active_mass
+        return q
+
+    def _get_q_eff(self, global_step: int) -> tuple[torch.Tensor, float]:
+        """Return (q_eff, alpha) blended target at global_step."""
+        t_start = int(self._transition_start.item())
+        if t_start < 0 or self.transition_steps <= 0:
+            return self._q_to.clone(), 1.0
+        alpha = float(min(1.0, max(0.0, (global_step - t_start) / self.transition_steps)))
+        q_eff = (1.0 - alpha) * self._q_from + alpha * self._q_to
+        return q_eff, alpha
+
+    def reset_parameters(self) -> None:
+        self._q_from.zero_()
+        self._q_to.zero_()
+        self._transition_start.fill_(-1)
+        self._prev_n_active.fill_(-1)
+        self._n_active_from.fill_(0)
 
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
-        soft = kw.get("soft")            # (B, N, M+2)
+        soft = kw.get("soft")              # (B, N, M+2)
         n_active = kw.get("n_active_tgt")  # int
+        global_step = int(kw.get("global_step", 0))
         if soft is None or n_active is None:
             return p_ctx.new_zeros(()), {}
 
         n_active = int(n_active)
-        M = self.M
+        prev_n = int(self._prev_n_active.item())
+
+        # --- Detect phase change (or first call) ---
+        if prev_n != n_active:
+            device = self._q_from.device
+            new_q = self._build_target(n_active).to(device)
+            if self._transition_start.item() < 0:
+                # First call ever: jump directly (no transition)
+                self._q_from.copy_(new_q)
+                self._q_to.copy_(new_q)
+                self._transition_start.fill_(global_step)
+                self._n_active_from.fill_(n_active)   # from == to → smooth value = n_active
+            else:
+                # Phase advanced: blend from current q_eff to new target
+                current_q_eff, _ = self._get_q_eff(global_step)
+                self._q_from.copy_(current_q_eff.to(device))
+                self._q_to.copy_(new_q)
+                self._transition_start.fill_(global_step)
+                self._n_active_from.fill_(prev_n)     # smooth starts at the old count
+            self._prev_n_active.fill_(n_active)
+
         p_bar = soft.mean(dim=1)  # (B, M+2)
 
-        # Build target distribution p̄ over all M+2 roles.
-        # Active roles = {ctx=0, tgt₁…tgt_n_active, ign=M+1} share equal mass.
-        # Inactive tgt roles = {tgt_{n_active+1}…tgt_M} receive inactive_eps.
-        n_inactive = M - n_active
-        n_active_roles = n_active + 2   # ctx + n_active tgts + ign
-        active_mass = (1.0 - self.inactive_eps * n_inactive) / n_active_roles
-
-        p_target = p_bar.new_full(p_bar.shape, self.inactive_eps)
-        p_target[:, 0] = active_mass                          # ctx
-        p_target[:, -1] = active_mass                         # ign
-        for k in range(n_active):
-            p_target[:, 1 + k] = active_mass                 # tgt₁…tgt_n_active
+        # Blended target distribution
+        q_eff, alpha = self._get_q_eff(global_step)
+        p_target = q_eff.to(p_bar.device).unsqueeze(0).expand_as(p_bar)
 
         EPS = 1e-8
         log_q = p_bar.clamp(min=EPS).log()
@@ -470,11 +536,14 @@ class NWayProgressiveKLTerm(MaskerTerm):
         else:  # sum
             loss = forward_kl + reverse_kl
 
+        n_active_smooth = float(self._n_active_from.item()) + alpha
+
         return loss, {
             "prog_kl/forward": float(forward_kl.detach().item()),
             "prog_kl/reverse": float(reverse_kl.detach().item()),
             "prog_kl/loss": float(loss.detach().item()),
-            "prog_kl/n_active_tgt": float(n_active),
+            "prog_kl/n_active_tgt": n_active_smooth,
+            "prog_kl/transition_alpha": alpha,
         }
 
 
