@@ -304,12 +304,17 @@ def mask_diagnostics(
     )
 
     if B > 1:
-        inter = binary @ binary.T
-        ntgt_vec = binary.sum(dim=1, keepdim=True)
+        # Subsample to cap the (B, B) IoU matrix at a fixed size.
+        # 256 samples → (256, 256) ≈ 256 KB vs (2048, 2048) ≈ 16 MB.
+        n_iou = min(B, 256)
+        idx = torch.randperm(B, device=device)[:n_iou]
+        binary_sub = binary[idx]
+        inter = binary_sub @ binary_sub.T
+        ntgt_vec = binary_sub.sum(dim=1, keepdim=True)
         union = ntgt_vec + ntgt_vec.T - inter
         iou = inter / union.clamp(min=1.0)
         mask_upper = torch.triu(
-            torch.ones(B, B, device=device, dtype=torch.bool), diagonal=1
+            torch.ones(n_iou, n_iou, device=device, dtype=torch.bool), diagonal=1
         )
         stats["mask/batch_iou"] = float(iou[mask_upper].mean().item())
     else:

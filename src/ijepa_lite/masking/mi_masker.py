@@ -597,78 +597,40 @@ class MINWayMasker(LatentMasker):
             else:
                 winners = soft.argmax(dim=-1)  # (B, N)  values in [0, M+1]
 
-            # Collect per-block indices
-            tgt_idx_list = []
-            for k in range(M):
-                mask_k = (winners == (1 + k))  # (B, N)
-                # Per-sample indices where this block wins
-                batch_indices = []
-                for b in range(B):
-                    idxs_b = mask_k[b].nonzero(as_tuple=False).squeeze(-1)
-                    if idxs_b.numel() < self.ntgt_min_per_block:
-                        # Fall back: top ntgt_min_per_block by soft probability
-                        _, idxs_b = torch.topk(
-                            p_tgts[b, :, k], self.ntgt_min_per_block,
-                            dim=-1, sorted=False,
-                        )
-                    batch_indices.append(idxs_b)
-                tgt_idx_list.append(batch_indices)
+            # --- Vectorized target block indices ---
+            # Build (B, N, M) score tensor: 1.0 where patch won block k, else 0.0.
+            # argsort descending puts winners first; remaining slots fill with
+            # non-winning patches in stable index order (replaces cycling pad).
+            K_max_cap = self.num_patches // 2
+            all_masks = (
+                winners.unsqueeze(-1) == torch.arange(1, M + 1, device=winners.device)
+            )  # (B, N, M)
+            scores = all_masks.float()  # (B, N, M)
 
-            # Pad to uniform K across blocks and batch, capped to prevent OOM
-            K_max_cap = self.num_patches // 2  # empirical upper bound for reasonable block sizes
-            K = max(
-                self.ntgt_min_per_block,
-                min(
-                    K_max_cap,
-                    max(
-                        idxs.numel()
-                        for block_indices in tgt_idx_list
-                        for idxs in block_indices
-                    ),
-                ),
-            )
-            padded = []
-            for k in range(M):
-                block_padded = []
-                for b in range(B):
-                    idxs = tgt_idx_list[k][b]
-                    n = idxs.numel()
-                    if n < K:
-                        # Cycle through genuine indices to pad evenly
-                        idxs = idxs.repeat((K + n - 1) // n)[:K]
-                    elif n > K:
-                        idxs = idxs[:K]
-                    block_padded.append(idxs)
-                padded.append(torch.stack(block_padded))  # (B, K)
-            tgt_idx = torch.stack(padded, dim=1)  # (B, M, K)
+            counts = scores.sum(1)  # (B, M) — winner count per block per sample
+            needs_fallback = counts < self.ntgt_min_per_block  # (B, M)
+            if needs_fallback.any():
+                # Replace scores with soft probabilities for under-populated blocks
+                fb_b, fb_k = needs_fallback.nonzero(as_tuple=True)
+                scores[fb_b, :, fb_k] = p_tgts[fb_b, :, fb_k]
 
-            # Context: patches whose argmax is ctx (channel 0)
-            ctx_lists = []
-            for b in range(B):
-                ctx_b = (winners[b] == 0).nonzero(as_tuple=False).squeeze(-1)
-                if ctx_b.numel() < self.nctx_min:
-                    # Fall back: top nctx_min by p_ctx (excluding targets)
-                    tgt_flat_b = tgt_idx[b].reshape(-1)
-                    p_ctx_b = p_ctx[b].clone()
-                    p_ctx_b.scatter_(0, tgt_flat_b, 0.0)
-                    _, ctx_b = torch.topk(
-                        p_ctx_b, self.nctx_min, dim=-1, sorted=False,
-                    )
-                ctx_lists.append(ctx_b)
-            # Pad context to uniform size, capped like targets
-            nctx = max(self.nctx_min, min(
-                K_max_cap,
-                max(c.numel() for c in ctx_lists),
-            ))
-            ctx_padded = []
-            for ctx_b in ctx_lists:
-                n = ctx_b.numel()
-                if n < nctx:
-                    ctx_b = ctx_b.repeat((nctx + n - 1) // n)[:nctx]
-                elif n > nctx:
-                    ctx_b = ctx_b[:nctx]
-                ctx_padded.append(ctx_b)
-            ctx_idx = torch.stack(ctx_padded)  # (B, nctx)
+            K = max(self.ntgt_min_per_block, min(K_max_cap, int(counts.max().item())))
+            # argsort along patch dim → (B, N, M); slice top K → (B, K, M); permute → (B, M, K)
+            tgt_idx = scores.argsort(dim=1, descending=True)[:, :K, :].permute(0, 2, 1)
+
+            # --- Vectorized context indices ---
+            ctx_scores = (winners == 0).float()  # (B, N)
+            ctx_counts = ctx_scores.sum(-1)       # (B,)
+            needs_ctx_fallback = ctx_counts < self.nctx_min
+            if needs_ctx_fallback.any():
+                # For fallback samples: use p_ctx with target positions zeroed out
+                tgt_flat = tgt_idx.reshape(B, -1)                        # (B, M*K)
+                p_ctx_fb = p_ctx[needs_ctx_fallback].clone()              # (n_fb, N)
+                p_ctx_fb.scatter_(1, tgt_flat[needs_ctx_fallback], 0.0)
+                ctx_scores[needs_ctx_fallback] = p_ctx_fb
+
+            nctx = max(self.nctx_min, min(K_max_cap, int(ctx_counts.max().item())))
+            ctx_idx = ctx_scores.argsort(dim=-1, descending=True)[:, :nctx]  # (B, nctx)
         else:
             # topk (default): fixed K per block from soft mass
             per_block_mass = p_tgts.sum(dim=1).mean(dim=0)  # (M,)

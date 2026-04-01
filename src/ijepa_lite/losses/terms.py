@@ -203,41 +203,30 @@ class NWayCrossSurpriseTerm(MaskerTerm):
             return p_ctx.new_zeros(()), {}
 
         M = self.M
+        D = ema_full.shape[-1]
         image_mean = ema_full.mean(dim=1)  # (B, D)
 
-        # Per-block centroids (collapse-safe, blended with image mean)
-        centroids = []
-        for k in range(M):
-            p_k = soft[..., 1 + k]  # (B, N)
-            p_k_sum = p_k.sum(dim=1, keepdim=True)  # (B, 1)
-            weighted = (p_k.unsqueeze(-1) * ema_full).sum(dim=1)  # (B, D)
-            virtual_w = (1.0 - p_k_sum).clamp(min=0.0)  # (B, 1)
-            centroid = (weighted + virtual_w * image_mean) \
-                       / (p_k_sum + virtual_w).clamp(min=1e-6)  # (B, D)
-            centroids.append(centroid)
+        # --- Vectorized centroids: one bmm instead of M weighted sums ---
+        # p_tgts: (B, N, M) → bmm with (B, N, D) → (B, M, D)
+        p_tgts = soft[..., 1:M+1]                                           # (B, N, M)
+        p_tgts_sum = p_tgts.sum(dim=1)                                      # (B, M)
+        weighted = torch.bmm(p_tgts.transpose(1, 2), ema_full)              # (B, M, D)
+        virtual_w = (1.0 - p_tgts_sum).clamp(min=0.0).unsqueeze(-1)        # (B, M, 1)
+        centroids = (weighted + virtual_w * image_mean.unsqueeze(1)) \
+                    / (p_tgts_sum.unsqueeze(-1) + virtual_w).clamp(min=1e-6)  # (B, M, D)
 
-        # S_total = Σ_{k≠l} Σᵢ p_tgt_k(i) · ‖zᵢ − μ_l‖² / Σᵢ p_tgt_k(i)
-        #
-        # Use expanded distance to avoid storing M*(M-1) (B,N,D) tensors in the
-        # autograd graph (O(M²) memory → OOM for large M):
-        #   ‖zᵢ − μ_l‖² = ‖zᵢ‖² − 2·zᵢ·μ_l + ‖μ_l‖²
-        # Backward of the dot term only needs ema_full (one shared reference);
-        # no per-pair (B,N,D) intermediate is materialised.
-        norm_ema_sq = ema_full.pow(2).mean(-1)  # (B, N) — mean matches original .mean(-1)
+        # --- Vectorized pairwise distances: one bmm instead of M*(M-1) dots ---
+        # ‖zᵢ − μ_l‖² = mean_d(zᵢ²) − 2·mean_d(zᵢ·μ_l) + mean_d(μ_l²)
+        norm_ema_sq = ema_full.pow(2).mean(-1)                              # (B, N)
+        all_dots = torch.bmm(ema_full, centroids.transpose(1, 2)) / D      # (B, N, M)
+        all_norm_c = centroids.pow(2).mean(-1).unsqueeze(1)                 # (B, 1, M)
+        dist_sq_all = norm_ema_sq.unsqueeze(-1) - 2.0 * all_dots + all_norm_c  # (B, N, M)
 
-        S_total = p_ctx.new_zeros(())
-        for k in range(M):
-            p_k = soft[..., 1 + k]  # (B, N)
-            p_k_sum = p_k.sum(dim=-1).clamp(min=1.0)  # (B,)
-            for l in range(M):
-                if k == l:
-                    continue
-                c_l = centroids[l]                                      # (B, D)
-                dot = (ema_full * c_l.unsqueeze(1)).mean(-1)            # (B, N)
-                norm_c = c_l.pow(2).mean(-1, keepdim=True)             # (B, 1)
-                dist_sq = norm_ema_sq - 2.0 * dot + norm_c             # (B, N)
-                S_kl = ((p_k * dist_sq).sum(-1) / p_k_sum).mean()
-                S_total = S_total + S_kl
+        # S_total = Σ_{k≠l} E_k[dist_sq_l]
+        #         = Σ_k E_k[Σ_l dist_sq_l − dist_sq_k]   (subtract self-pair)
+        dist_cross = dist_sq_all.sum(-1, keepdim=True) - dist_sq_all        # (B, N, M)
+        p_tgts_sum_c = p_tgts_sum.clamp(min=1.0)                           # (B, M)
+        S_total = ((p_tgts * dist_cross).sum(1) / p_tgts_sum_c).mean(0).sum()
 
         return -S_total, {"cross_surprise_mean": float(S_total.detach().item())}
 
@@ -268,47 +257,40 @@ class NWayFullCrossSurpriseTerm(MaskerTerm):
             return p_ctx.new_zeros(()), {}
 
         M = self.M
+        D = ema_full.shape[-1]
         image_mean = ema_full.mean(dim=1)  # (B, D)
 
-        # Build centroids for ctx (index 0) + M target blocks
-        groups = [soft[..., 0]] + [soft[..., 1 + k] for k in range(M)]  # M+1 groups
-        centroids = []
-        for p_g in groups:
-            p_g_sum = p_g.sum(dim=1, keepdim=True)  # (B, 1)
-            weighted = (p_g.unsqueeze(-1) * ema_full).sum(dim=1)  # (B, D)
-            virtual_w = (1.0 - p_g_sum).clamp(min=0.0)
-            centroid = (weighted + virtual_w * image_mean) \
-                       / (p_g_sum + virtual_w).clamp(min=1e-6)
-            centroids.append(centroid)
+        # --- Vectorized centroids for ctx (idx 0) + M targets (idx 1..M) ---
+        p_groups = soft[..., :M+1]                                           # (B, N, M+1)
+        p_groups_sum = p_groups.sum(dim=1)                                   # (B, M+1)
+        weighted = torch.bmm(p_groups.transpose(1, 2), ema_full)             # (B, M+1, D)
+        virtual_w = (1.0 - p_groups_sum).clamp(min=0.0).unsqueeze(-1)       # (B, M+1, 1)
+        centroids = (weighted + virtual_w * image_mean.unsqueeze(1)) \
+                    / (p_groups_sum.unsqueeze(-1) + virtual_w).clamp(min=1e-6)  # (B, M+1, D)
 
-        # Expanded distance (same memory fix as NWayCrossSurpriseTerm):
-        #   ‖zᵢ − μ_l‖² = ‖zᵢ‖² − 2·zᵢ·μ_l + ‖μ_l‖²
-        norm_ema_sq = ema_full.pow(2).mean(-1)  # (B, N) — mean matches original .mean(-1)
+        # --- Vectorized pairwise distances for all M+1 groups ---
+        norm_ema_sq = ema_full.pow(2).mean(-1)                               # (B, N)
+        all_dots = torch.bmm(ema_full, centroids.transpose(1, 2)) / D       # (B, N, M+1)
+        all_norm_c = centroids.pow(2).mean(-1).unsqueeze(1)                  # (B, 1, M+1)
+        dist_sq_all = norm_ema_sq.unsqueeze(-1) - 2.0 * all_dots + all_norm_c  # (B, N, M+1)
 
-        def _dist_sq(c):
-            dot = (ema_full * c.unsqueeze(1)).mean(-1)      # (B, N)
-            norm_c = c.pow(2).mean(-1, keepdim=True)        # (B, 1)
-            return norm_ema_sq - 2.0 * dot + norm_c         # (B, N)
+        # --- Inter-target surprise: pairs (k,l) both in {1..M} ---
+        p_tgts = p_groups[..., 1:]                                           # (B, N, M)
+        p_tgts_sum = p_groups_sum[:, 1:].clamp(min=1.0)                     # (B, M)
+        dist_sq_tgts = dist_sq_all[..., 1:]                                  # (B, N, M)
+        dist_cross_tgts = dist_sq_tgts.sum(-1, keepdim=True) - dist_sq_tgts  # (B, N, M)
+        S_tgt = ((p_tgts * dist_cross_tgts).sum(1) / p_tgts_sum).mean(0).sum()
 
-        # Inter-target surprise: pairs (k, l) where both k, l >= 1
-        S_tgt = p_ctx.new_zeros(())
-        for k in range(1, M + 1):
-            p_k = groups[k]
-            p_k_sum = p_k.sum(dim=-1).clamp(min=1.0)
-            for l in range(1, M + 1):
-                if k == l:
-                    continue
-                S_tgt = S_tgt + ((p_k * _dist_sq(centroids[l])).sum(-1) / p_k_sum).mean()
-
-        # Ctx↔target surprise: pairs involving ctx (index 0)
-        S_ctx = p_ctx.new_zeros(())
-        p_0 = groups[0]
-        p_0_sum = p_0.sum(dim=-1).clamp(min=1.0)
-        for k in range(1, M + 1):
-            p_k = groups[k]
-            p_k_sum = p_k.sum(dim=-1).clamp(min=1.0)
-            S_ctx = S_ctx + ((p_0 * _dist_sq(centroids[k])).sum(-1) / p_0_sum).mean()
-            S_ctx = S_ctx + ((p_k * _dist_sq(centroids[0])).sum(-1) / p_k_sum).mean()
+        # --- Ctx↔target surprise: pairs involving ctx (index 0) ---
+        p_0 = p_groups[..., 0]                                               # (B, N)
+        p_0_sum = p_groups_sum[:, 0].clamp(min=1.0)                          # (B,)
+        # ctx → each tgt: E_ctx[dist(z, c_k)] for k in 1..M
+        S_ctx_to_tgt = (p_0.unsqueeze(-1) * dist_sq_all[..., 1:]).sum(1) \
+                       / p_0_sum.unsqueeze(-1)                               # (B, M)
+        # each tgt → ctx: E_{tgt_k}[dist(z, c_ctx)] for k in 1..M
+        S_tgt_to_ctx = (p_tgts * dist_sq_all[..., :1]).sum(1) \
+                       / p_tgts_sum                                          # (B, M)
+        S_ctx = (S_ctx_to_tgt + S_tgt_to_ctx).mean(0).sum()
 
         S_total = S_tgt + self.ctx_weight * S_ctx
 
