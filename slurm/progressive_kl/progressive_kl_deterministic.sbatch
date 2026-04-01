@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-prog-kl-det-10blk
+#SBATCH --job-name=ijepa-prog-kl-det-6blk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -42,10 +42,10 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/progressive_kl
 
-export EXP_NAME="prog_kl_det_10blk_fwd_dbg"
+export EXP_NAME="prog_kl_det_6blk_fwd_dbg"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python -m torch.distributed.run --standalone --nproc_per_node=1 \
+  python -m torch.distributed.run --standalone --nproc_per_node=4 \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_mi_nway \
       exp_name="$EXP_NAME" \
@@ -56,7 +56,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
       +masking.latent.terms.nway_progressive_kl.weight='[1.0,1.0]' \
       +masking.latent.terms.nway_progressive_kl.direction=forward \
-      masking.latent.num_tgt_blocks=10 \
+      masking.latent.num_tgt_blocks=6 \
       masking.latent.ntgt_min_per_block=1 \
       +masking.latent.n_start_tgt=2 \
       +masking.latent.phase_mode=deterministic \
