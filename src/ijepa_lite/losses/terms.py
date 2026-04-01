@@ -217,6 +217,14 @@ class NWayCrossSurpriseTerm(MaskerTerm):
             centroids.append(centroid)
 
         # S_total = Σ_{k≠l} Σᵢ p_tgt_k(i) · ‖zᵢ − μ_l‖² / Σᵢ p_tgt_k(i)
+        #
+        # Use expanded distance to avoid storing M*(M-1) (B,N,D) tensors in the
+        # autograd graph (O(M²) memory → OOM for large M):
+        #   ‖zᵢ − μ_l‖² = ‖zᵢ‖² − 2·zᵢ·μ_l + ‖μ_l‖²
+        # Backward of the dot term only needs ema_full (one shared reference);
+        # no per-pair (B,N,D) intermediate is materialised.
+        norm_ema_sq = ema_full.pow(2).mean(-1)  # (B, N) — mean matches original .mean(-1)
+
         S_total = p_ctx.new_zeros(())
         for k in range(M):
             p_k = soft[..., 1 + k]  # (B, N)
@@ -224,7 +232,10 @@ class NWayCrossSurpriseTerm(MaskerTerm):
             for l in range(M):
                 if k == l:
                     continue
-                dist_sq = (ema_full - centroids[l].unsqueeze(1)).pow(2).mean(-1)  # (B, N)
+                c_l = centroids[l]                                      # (B, D)
+                dot = (ema_full * c_l.unsqueeze(1)).mean(-1)            # (B, N)
+                norm_c = c_l.pow(2).mean(-1, keepdim=True)             # (B, 1)
+                dist_sq = norm_ema_sq - 2.0 * dot + norm_c             # (B, N)
                 S_kl = ((p_k * dist_sq).sum(-1) / p_k_sum).mean()
                 S_total = S_total + S_kl
 
@@ -270,6 +281,15 @@ class NWayFullCrossSurpriseTerm(MaskerTerm):
                        / (p_g_sum + virtual_w).clamp(min=1e-6)
             centroids.append(centroid)
 
+        # Expanded distance (same memory fix as NWayCrossSurpriseTerm):
+        #   ‖zᵢ − μ_l‖² = ‖zᵢ‖² − 2·zᵢ·μ_l + ‖μ_l‖²
+        norm_ema_sq = ema_full.pow(2).mean(-1)  # (B, N) — mean matches original .mean(-1)
+
+        def _dist_sq(c):
+            dot = (ema_full * c.unsqueeze(1)).mean(-1)      # (B, N)
+            norm_c = c.pow(2).mean(-1, keepdim=True)        # (B, 1)
+            return norm_ema_sq - 2.0 * dot + norm_c         # (B, N)
+
         # Inter-target surprise: pairs (k, l) where both k, l >= 1
         S_tgt = p_ctx.new_zeros(())
         for k in range(1, M + 1):
@@ -278,8 +298,7 @@ class NWayFullCrossSurpriseTerm(MaskerTerm):
             for l in range(1, M + 1):
                 if k == l:
                     continue
-                dist_sq = (ema_full - centroids[l].unsqueeze(1)).pow(2).mean(-1)
-                S_tgt = S_tgt + ((p_k * dist_sq).sum(-1) / p_k_sum).mean()
+                S_tgt = S_tgt + ((p_k * _dist_sq(centroids[l])).sum(-1) / p_k_sum).mean()
 
         # Ctx↔target surprise: pairs involving ctx (index 0)
         S_ctx = p_ctx.new_zeros(())
@@ -288,12 +307,8 @@ class NWayFullCrossSurpriseTerm(MaskerTerm):
         for k in range(1, M + 1):
             p_k = groups[k]
             p_k_sum = p_k.sum(dim=-1).clamp(min=1.0)
-            # ctx → tgt_k
-            dist_sq = (ema_full - centroids[k].unsqueeze(1)).pow(2).mean(-1)
-            S_ctx = S_ctx + ((p_0 * dist_sq).sum(-1) / p_0_sum).mean()
-            # tgt_k → ctx
-            dist_sq = (ema_full - centroids[0].unsqueeze(1)).pow(2).mean(-1)
-            S_ctx = S_ctx + ((p_k * dist_sq).sum(-1) / p_k_sum).mean()
+            S_ctx = S_ctx + ((p_0 * _dist_sq(centroids[k])).sum(-1) / p_0_sum).mean()
+            S_ctx = S_ctx + ((p_k * _dist_sq(centroids[0])).sum(-1) / p_k_sum).mean()
 
         S_total = S_tgt + self.ctx_weight * S_ctx
 
