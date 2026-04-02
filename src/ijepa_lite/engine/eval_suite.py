@@ -19,8 +19,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader as _TDL, TensorDataset
 
-from ijepa_lite.engine.eval_linear import LinearProbeModel, _acc_top1, _build_scheduler
+from ijepa_lite.engine.eval_linear import LinearProbeModel, _acc_top1, _build_scheduler, _extract_features
 from ijepa_lite.utils.dist import (
     all_reduce_sum,
     is_distributed,
@@ -163,16 +164,21 @@ def _run_linear_probe(
     sched = _build_scheduler(opt, getattr(cfg.task, "sched", None), epochs)
     scaler = GradScaler("cuda", enabled=amp)
 
+    # Pre-extract features — encoder is frozen throughout the probe.
+    encode_fn = lambda x: unwrap_model(model)._features(x)  # noqa: E731
+    feats_tr, labs_tr   = _extract_features(encode_fn, train_loader, device, amp)
+    feats_val, labs_val = _extract_features(encode_fn, val_loader,   device, amp)
+
+    bsz = train_loader.batch_size
+    train_cache = _TDL(TensorDataset(feats_tr, labs_tr),   batch_size=bsz, shuffle=True,  drop_last=True)
+    val_cache   = _TDL(TensorDataset(feats_val, labs_val), batch_size=bsz, shuffle=False)
+
     val_acc1 = 0.0
     best_acc1 = 0.0
-    train_sampler = getattr(train_loader, "sampler", None)
 
     for epoch in range(epochs):
         state["epoch"] = epoch
         callbacks.on_epoch_start(cfg=cfg, state=state)
-
-        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
-            train_sampler.set_epoch(epoch)
 
         unwrap_model(model).encoder.eval()
         unwrap_model(model).head.train()
@@ -181,20 +187,17 @@ def _run_linear_probe(
         correct_sum = torch.zeros((), device=device, dtype=torch.long)
         total_sum = torch.zeros((), device=device, dtype=torch.long)
 
-        for batch in train_loader:
-            x = batch["images"].to(device, non_blocking=True)
-            y = batch["labels"].to(device, non_blocking=True)
-
+        for feat, y in train_cache:
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                logits = model(x)
+                logits = model(None, feat=feat)
                 loss = F.cross_entropy(logits, y)
 
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
 
-            loss_meter.update(float(loss.item()), n=x.size(0))
+            loss_meter.update(float(loss.item()), n=feat.size(0))
             state["global_step"] += 1
 
             with torch.no_grad():
@@ -227,13 +230,11 @@ def _run_linear_probe(
         val_total = torch.zeros((), device=device, dtype=torch.long)
 
         with torch.no_grad():
-            for batch in val_loader:
-                x = batch["images"].to(device, non_blocking=True)
-                y = batch["labels"].to(device, non_blocking=True)
+            for feat, y in val_cache:
                 with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                    logits = model(x)
+                    logits = model(None, feat=feat)
                     loss = F.cross_entropy(logits, y)
-                val_loss_sum += loss.detach() * x.size(0)
+                val_loss_sum += loss.detach() * feat.size(0)
                 val_correct += _acc_top1(logits, y)[0]
                 val_total += y.numel()
 

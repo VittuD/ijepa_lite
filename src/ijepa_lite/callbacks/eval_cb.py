@@ -6,9 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DataLoader as _TDL, TensorDataset
 
 from ijepa_lite.callbacks.base import Callback
+from ijepa_lite.engine.eval_linear import _extract_features
 from ijepa_lite.utils.dist import is_rank0, unwrap_model
 
 
@@ -182,21 +183,22 @@ class InlineEvalCallback(Callback):
 
         encoder.eval()
 
+        # Pre-extract features once — encoder is frozen so features are epoch-invariant.
+        encode_fn = lambda x: encoder(x).mean(dim=1)  # noqa: E731
+        feats_tr, labs_tr   = _extract_features(encode_fn, self._train_loader, self._device, amp)
+        feats_val, labs_val = _extract_features(encode_fn, self._val_loader,   self._device, amp)
+
+        bsz = self._train_loader.batch_size
+        train_cache = _TDL(TensorDataset(feats_tr, labs_tr),   batch_size=bsz, shuffle=True,  drop_last=True)
+        val_cache   = _TDL(TensorDataset(feats_val, labs_val), batch_size=bsz, shuffle=False)
+
         for _ep in range(probe_epochs):
             head.train()
-            for batch in self._train_loader:
-                x = batch["images"].to(self._device, non_blocking=True)
-                y = batch["labels"].to(self._device, non_blocking=True)
-
+            for feat, y in train_cache:
                 opt.zero_grad(set_to_none=True)
-                with torch.no_grad():
-                    with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                        tokens = encoder(x)
-                        feat = tokens.mean(dim=1)
                 with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                     logits = head(feat)
                     loss = F.cross_entropy(logits, y)
-
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
@@ -204,29 +206,23 @@ class InlineEvalCallback(Callback):
             if sched is not None:
                 sched.step()
 
-        # Final train accuracy
-        train_acc = self._evaluate(encoder, head, self._train_loader, amp)
-        val_acc = self._evaluate(encoder, head, self._val_loader, amp)
+        # Final accuracy over cached features
+        train_acc = self._evaluate(head, train_cache, amp)
+        val_acc   = self._evaluate(head, val_cache,   amp)
         return train_acc, val_acc
 
     @torch.no_grad()
     def _evaluate(
         self,
-        encoder: nn.Module,
         head: nn.Module,
-        loader: DataLoader,
+        cache_loader: _TDL,
         amp: bool,
     ) -> float:
-        encoder.eval()
         head.eval()
         correct = 0
         total = 0
-        for batch in loader:
-            x = batch["images"].to(self._device, non_blocking=True)
-            y = batch["labels"].to(self._device, non_blocking=True)
+        for feat, y in cache_loader:
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                tokens = encoder(x)
-                feat = tokens.mean(dim=1)
                 logits = head(feat)
             correct += (logits.argmax(dim=1) == y).sum().item()
             total += y.numel()

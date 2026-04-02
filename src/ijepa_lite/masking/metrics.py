@@ -200,9 +200,9 @@ def mask_diagnostics(
     nway_soft = aux.get("soft")
     if nway_soft is not None and torch.is_tensor(nway_soft) and nway_soft.shape[-1] > 3:
         M_nway = nway_soft.shape[-1] - 2
+        masses = nway_soft[..., 1:M_nway + 1].sum(dim=1).mean(dim=0)  # (M_nway,)
         for k in range(M_nway):
-            p_k = nway_soft[..., 1 + k]  # (B, N)
-            stats[f"mask/nway_tgt_{k}_mass"] = float(p_k.sum(dim=-1).mean().item())
+            stats[f"mask/nway_tgt_{k}_mass"] = float(masses[k].item())
 
     # Goldilocks masker — sampled budgets and content-adaptivity diagnostics
     for key in ("k_tgt", "k_ctx",

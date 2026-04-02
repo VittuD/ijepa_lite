@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader as _TDL, TensorDataset
 
 from ijepa_lite.utils.dist import (
     all_reduce_sum,
@@ -15,6 +16,29 @@ from ijepa_lite.utils.dist import (
     unwrap_model,
 )
 from ijepa_lite.utils.meters import AverageMeter
+
+
+@torch.no_grad()
+def _extract_features(
+    encode_fn,
+    loader,
+    device: torch.device,
+    amp: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Single-pass feature extraction from a frozen encoder.
+
+    Returns (feats [N, D], labels [N]) on ``device``.
+    encode_fn: callable (B, C, H, W) → (B, D) — must not require grad.
+    """
+    all_feats, all_labels = [], []
+    for batch in loader:
+        x = batch["images"].to(device, non_blocking=True)
+        y = batch["labels"].to(device, non_blocking=True)
+        with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            feat = encode_fn(x)
+        all_feats.append(feat.detach())
+        all_labels.append(y)
+    return torch.cat(all_feats, 0), torch.cat(all_labels, 0)
 
 
 def _build_head(embed_dim: int, num_classes: int, cfg_head) -> nn.Module:
@@ -64,10 +88,12 @@ class LinearProbeModel(nn.Module):
             return tokens.mean(dim=1)  # (B, D)
         raise ValueError(f"Unsupported pool={self.pool}")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor | None, feat: torch.Tensor | None = None) -> torch.Tensor:
         # Encoder params have requires_grad=False (set in build.py), so no
         # context manager is needed here — head gradients flow normally.
-        feat = self._features(x)
+        # When `feat` is pre-extracted (feature caching), pass x=None, feat=cached.
+        if feat is None:
+            feat = self._features(x)
         return self.head(feat)
 
 
@@ -168,10 +194,22 @@ def linear_probe_eval(
     scaler = GradScaler("cuda", enabled=amp)
 
     # ------------------------------------------------------------------
+    # Pre-extract features — encoder is frozen, no need to re-run it
+    # each batch of each epoch.  Each DDP rank caches its own data shard;
+    # DDP gradient sync for the head still fires normally via the model wrapper.
+    # ------------------------------------------------------------------
+    encode_fn = lambda x: unwrap_model(model)._features(x)  # noqa: E731
+    feats_tr, labs_tr   = _extract_features(encode_fn, train_loader, device, amp)
+    feats_val, labs_val = _extract_features(encode_fn, val_loader,   device, amp)
+
+    bsz = train_loader.batch_size
+    train_cache = _TDL(TensorDataset(feats_tr, labs_tr),     batch_size=bsz, shuffle=True,  drop_last=True)
+    val_cache   = _TDL(TensorDataset(feats_val, labs_val),   batch_size=bsz, shuffle=False)
+
+    # ------------------------------------------------------------------
     # Loop
     # ------------------------------------------------------------------
     state = {"epoch": 0, "global_step": 0, "best_acc1": 0.0}
-    train_sampler = getattr(train_loader, "sampler", None)
     log_every = int(getattr(cfg.train, "log_every", 50))
 
     callbacks.on_run_start(cfg=cfg, state=state, model=unwrap_model(model))
@@ -180,11 +218,8 @@ def linear_probe_eval(
         state["epoch"] = epoch
         callbacks.on_epoch_start(cfg=cfg, state=state)
 
-        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
-            train_sampler.set_epoch(epoch)
-
         # --------------------------------------------------------------
-        # Train — encoder stays frozen in eval mode
+        # Train — encoder stays frozen; DDP syncs head grads via model wrapper
         # --------------------------------------------------------------
         unwrap_model(model).encoder.eval()
         unwrap_model(model).head.train()
@@ -193,20 +228,17 @@ def linear_probe_eval(
         correct_sum = torch.zeros((), device=device, dtype=torch.long)
         total_sum = torch.zeros((), device=device, dtype=torch.long)
 
-        for batch in train_loader:
-            x = batch["images"].to(device, non_blocking=True)
-            y = batch["labels"].to(device, non_blocking=True)
-
+        for feat, y in train_cache:
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                logits = model(x)
+                logits = model(None, feat=feat)
                 loss = F.cross_entropy(logits, y)
 
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
 
-            loss_meter.update(float(loss.item()), n=x.size(0))
+            loss_meter.update(float(loss.item()), n=feat.size(0))
             state["global_step"] += 1
 
             with torch.no_grad():
@@ -242,15 +274,12 @@ def linear_probe_eval(
         val_total = torch.zeros((), device=device, dtype=torch.long)
 
         with torch.no_grad():
-            for batch in val_loader:
-                x = batch["images"].to(device, non_blocking=True)
-                y = batch["labels"].to(device, non_blocking=True)
-
+            for feat, y in val_cache:
                 with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                    logits = model(x)
+                    logits = model(None, feat=feat)
                     loss = F.cross_entropy(logits, y)
 
-                val_loss_sum += loss.detach() * x.size(0)
+                val_loss_sum += loss.detach() * feat.size(0)
                 val_correct += _acc_top1(logits, y)[0]
                 val_total += y.numel()
 

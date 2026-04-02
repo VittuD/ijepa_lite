@@ -30,10 +30,12 @@ def token_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
 
     p_norm = p.norm(dim=-1).mean()
     t_norm = t.norm(dim=-1).mean()
-    p_std = p.std(dim=0).mean()
-    t_std = t.std(dim=0).mean()
-    p_var = p.var(dim=0, unbiased=False).mean()
-    t_var = t.var(dim=0, unbiased=False).mean()
+    p_var_d = p.var(dim=0, unbiased=False)  # (D,)
+    t_var_d = t.var(dim=0, unbiased=False)
+    p_std = p_var_d.sqrt().mean()
+    t_std = t_var_d.sqrt().mean()
+    p_var = p_var_d.mean()
+    t_var = t_var_d.mean()
 
     return {
         "train/pred_tgt_cos_sim": float(cos.item()),
@@ -116,28 +118,23 @@ def ema_param_metrics(
     Compare EMA (target) parameters to online (context) parameters.
     Intended to be called only at log steps.
     """
-    diff_sq_sum = torch.zeros((), device=next(online_model.parameters()).device)
-    online_sq_sum = torch.zeros((), device=diff_sq_sum.device)
-    mean_abs_sum = torch.zeros((), device=diff_sq_sum.device)
-    count = torch.zeros((), device=diff_sq_sum.device)
+    ema_p    = [p.detach().float() for p in ema_model.parameters()    if p is not None]
+    online_p = [p.detach().float() for p in online_model.parameters() if p is not None]
+    if not ema_p:
+        return {"ema/param_l2": 0.0, "ema/param_rel_l2": 0.0, "ema/param_mean_abs": 0.0}
 
-    for p_ema, p in zip(ema_model.parameters(), online_model.parameters()):
-        if p is None or p_ema is None:
-            continue
-        d = (p_ema.detach() - p.detach()).float()
-        pf = p.detach().float()
-        diff_sq_sum += (d * d).sum()
-        online_sq_sum += (pf * pf).sum()
-        mean_abs_sum += d.abs().sum()
-        count += d.numel()
+    # Flatten all parameter tensors into 1D for bulk ops — ~6 kernels vs ~300 in a loop
+    ema_flat    = torch.cat([p.reshape(-1) for p in ema_p])
+    online_flat = torch.cat([p.reshape(-1) for p in online_p])
+    d = ema_flat - online_flat
 
-    diff_l2 = torch.sqrt(diff_sq_sum)
-    online_l2 = torch.sqrt(online_sq_sum)
-    rel = diff_l2 / (online_l2 + 1e-12)
-    mean_abs = mean_abs_sum / count.clamp(min=1.0)
+    diff_l2   = d.norm()
+    online_l2 = online_flat.norm()
+    rel       = diff_l2 / (online_l2 + 1e-12)
+    mean_abs  = d.abs().mean()
 
     return {
-        "ema/param_l2": float(diff_l2.item()),
-        "ema/param_rel_l2": float(rel.item()),
+        "ema/param_l2":       float(diff_l2.item()),
+        "ema/param_rel_l2":   float(rel.item()),
         "ema/param_mean_abs": float(mean_abs.item()),
     }
