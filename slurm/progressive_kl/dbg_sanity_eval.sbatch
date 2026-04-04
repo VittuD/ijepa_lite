@@ -52,9 +52,6 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     --num-classes 10 \
     --batch-size 256 \
     --num-workers 4 \
-    --probe-epochs 100 \
-    --probe-lr 0.1 \
-    --probe-wd 0.0 \
-    --step-size 30 \
-    --gamma 0.1 \
+    --max-iter 2000 \
+    --C 1.0 \
     --device cuda

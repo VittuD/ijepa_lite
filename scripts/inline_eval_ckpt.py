@@ -1,12 +1,14 @@
 """
 Hacky sanity-check script: run inline eval (linear probe on STL-10)
-directly from one or two checkpoint files, matching exactly what
-InlineEvalCallback does during pretraining.
+directly from one or two checkpoint files.
+
+Uses sklearn StandardScaler + LogisticRegression on mean-pooled, layer-normed
+patch tokens — same regime as the logreg eval in eval_suite.py, avoiding the
+overfitting that occurs when training an MLP with SGD on STL-10's 5k samples.
 
 Usage:
     python scripts/inline_eval_ckpt.py ckpt1.pt [ckpt2.pt] \
         --data-root /scratch/datasets \
-        --probe-epochs 100 \
         --image-size 96 \
         --embed-dim 384 \
         --depth 12 \
@@ -18,16 +20,14 @@ from __future__ import annotations
 import argparse
 import sys
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, TensorDataset
+from torch.amp import autocast
+from torch.utils.data import DataLoader
 from torchvision import datasets as tv_datasets, transforms
 from torchvision.models.vision_transformer import VisionTransformer
-
-# _build_head is imported lazily inside _run_probe so the script can still
-# be imported even if the repo isn't on sys.path yet.
 
 
 # ---------------------------------------------------------------------------
@@ -85,96 +85,60 @@ def _load_target_encoder(ckpt_path: str, image_size: int, patch_size: int,
 
 
 # ---------------------------------------------------------------------------
-# Feature extraction — mirrors InlineEvalCallback exactly
+# Feature extraction
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def _extract_features(encoder: nn.Module, loader: DataLoader,
-                       device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """Returns (feats [N, D], labels [N]).
+                      device: torch.device) -> tuple[np.ndarray, np.ndarray]:
+    """Returns (feats [N, D], labels [N]) as numpy arrays.
 
-    encode_fn: encoder(x) returns (B, num_patches, D) patch tokens.
-    Mean-pools to (B, D) — same as InlineEvalCallback._run_probe.
+    Mean-pools layer-normed patch tokens — same as InlineEvalCallback._run_probe.
     """
     amp = device.type == "cuda"
     all_feats, all_labels = [], []
     for images, labels in loader:
         images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
         with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            tokens = encoder(images)                                    # (B, N, D)
-            tokens = F.layer_norm(tokens, (tokens.shape[-1],))          # same as ijepa.py
-            feat   = tokens.mean(dim=1)                                 # (B, D)
-        all_feats.append(feat.detach().float())
-        all_labels.append(labels)
-    return torch.cat(all_feats), torch.cat(all_labels)
+            tokens = encoder(images)                           # (B, N, D)
+            tokens = F.layer_norm(tokens, (tokens.shape[-1],))  # same as ijepa.py
+            feat   = tokens.mean(dim=1)                        # (B, D)
+        all_feats.append(feat.float().cpu())
+        all_labels.append(labels.cpu())
+    X = torch.cat(all_feats).numpy()
+    y = torch.cat(all_labels).numpy()
+    return X, y
 
 
 # ---------------------------------------------------------------------------
-# Probe loop — mirrors InlineEvalCallback._run_probe exactly
+# Probe — StandardScaler + LogisticRegression (mirrors logreg eval in eval_suite.py)
 # ---------------------------------------------------------------------------
 
-def _run_probe(encoder: nn.Module, embed_dim: int, num_classes: int,
+def _run_probe(encoder: nn.Module,
                train_loader: DataLoader, val_loader: DataLoader,
-               device: torch.device, probe_epochs: int, probe_lr: float,
-               probe_wd: float, step_size: int, gamma: float,
-               head_type: str, head_hidden_dim: int, head_num_layers: int) -> tuple[float, float]:
-    amp = device.type == "cuda"
+               device: torch.device, max_iter: int, C: float) -> tuple[float, float]:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
 
     print("  Extracting train features …")
-    feats_tr, labs_tr = _extract_features(encoder, train_loader, device)
-    print(f"  train feats: {tuple(feats_tr.shape)}")
+    X_train, y_train = _extract_features(encoder, train_loader, device)
+    print(f"  train feats: {X_train.shape}")
     print("  Extracting val features …")
-    feats_val, labs_val = _extract_features(encoder, val_loader, device)
-    print(f"  val feats:   {tuple(feats_val.shape)}")
+    X_val, y_val = _extract_features(encoder, val_loader, device)
+    print(f"  val feats:   {X_val.shape}")
 
-    bsz = train_loader.batch_size
-    train_cache = DataLoader(TensorDataset(feats_tr, labs_tr),
-                             batch_size=bsz, shuffle=True, drop_last=True)
-    val_cache   = DataLoader(TensorDataset(feats_val, labs_val),
-                             batch_size=bsz, shuffle=False)
+    clf = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(max_iter=max_iter, C=C, solver="lbfgs",
+                           multi_class="multinomial"),
+    )
+    print(f"  Fitting LogisticRegression  C={C}  max_iter={max_iter} …")
+    clf.fit(X_train, y_train)
 
-    from ijepa_lite.engine.eval_linear import _build_head
-    from omegaconf import OmegaConf
-    head_cfg = OmegaConf.create({
-        "type": head_type,
-        "hidden_dim": head_hidden_dim,
-        "num_layers": head_num_layers,
-    })
-    head = _build_head(embed_dim, num_classes, head_cfg).to(device)
-    print(f"  head: {head_type}  hidden_dim={head_hidden_dim}  num_layers={head_num_layers}")
-
-    opt  = torch.optim.SGD(head.parameters(), lr=probe_lr,
-                           momentum=0.9, weight_decay=probe_wd)
-    sched  = torch.optim.lr_scheduler.StepLR(opt, step_size=step_size, gamma=gamma)
-    scaler = GradScaler("cuda", enabled=amp)
-
-    for ep in range(probe_epochs):
-        head.train()
-        for feat, y in train_cache:
-            opt.zero_grad(set_to_none=True)
-            with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                loss = F.cross_entropy(head(feat), y)
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            scaler.update()
-        sched.step()
-        if (ep + 1) % 20 == 0:
-            print(f"    probe epoch {ep+1}/{probe_epochs}  "
-                  f"lr={opt.param_groups[0]['lr']:.4g}")
-
-    @torch.no_grad()
-    def _acc(cache):
-        head.eval()
-        correct = total = 0
-        for feat, y in cache:
-            with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-                logits = head(feat)
-            correct += (logits.argmax(1) == y).sum().item()
-            total   += y.numel()
-        return correct / max(total, 1)
-
-    return _acc(train_cache), _acc(val_cache)
+    train_acc = float((clf.predict(X_train) == y_train).mean())
+    val_acc   = float((clf.predict(X_val)   == y_val).mean())
+    return train_acc, val_acc
 
 
 # ---------------------------------------------------------------------------
@@ -229,16 +193,10 @@ def main():
     parser.add_argument("--depth",       type=int, default=12)
     parser.add_argument("--num-heads",   type=int, default=6)
     parser.add_argument("--num-classes", type=int, default=10)
-    # Probe (defaults match InlineEvalCallback defaults)
-    parser.add_argument("--probe-epochs",    type=int,   default=100)
-    parser.add_argument("--probe-lr",        type=float, default=0.1)
-    parser.add_argument("--probe-wd",        type=float, default=0.0)
-    parser.add_argument("--step-size",       type=int,   default=30)
-    parser.add_argument("--gamma",           type=float, default=0.1)
-    parser.add_argument("--head-type",       default="mlp",
-                        help="mlp or linear (default: mlp, matching InlineEvalCallback)")
-    parser.add_argument("--head-hidden-dim", type=int,   default=384)
-    parser.add_argument("--head-num-layers", type=int,   default=1)
+    # Probe (mirrors eval_suite.py logreg defaults)
+    parser.add_argument("--max-iter", type=int,   default=2000)
+    parser.add_argument("--C",        type=float, default=1.0,
+                        help="Inverse regularisation strength for LogisticRegression")
     # Misc
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -264,11 +222,8 @@ def main():
             args.embed_dim, args.depth, args.num_heads, device,
         )
         train_acc, val_acc = _run_probe(
-            encoder, args.embed_dim, args.num_classes,
-            train_loader, val_loader, device,
-            args.probe_epochs, args.probe_lr, args.probe_wd,
-            args.step_size, args.gamma,
-            args.head_type, args.head_hidden_dim, args.head_num_layers,
+            encoder, train_loader, val_loader, device,
+            args.max_iter, args.C,
         )
         results.append((ckpt, train_acc, val_acc))
         print(f"  → train_acc1={train_acc:.4f}  val_acc1={val_acc:.4f}\n")
