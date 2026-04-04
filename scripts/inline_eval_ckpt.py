@@ -26,6 +26,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets as tv_datasets, transforms
 from torchvision.models.vision_transformer import VisionTransformer
 
+# _build_head is imported lazily inside _run_probe so the script can still
+# be imported even if the repo isn't on sys.path yet.
+
 
 # ---------------------------------------------------------------------------
 # Build + load target encoder (ViTTokens)
@@ -114,7 +117,8 @@ def _extract_features(encoder: nn.Module, loader: DataLoader,
 def _run_probe(encoder: nn.Module, embed_dim: int, num_classes: int,
                train_loader: DataLoader, val_loader: DataLoader,
                device: torch.device, probe_epochs: int, probe_lr: float,
-               probe_wd: float, step_size: int, gamma: float) -> tuple[float, float]:
+               probe_wd: float, step_size: int, gamma: float,
+               head_type: str, head_hidden_dim: int, head_num_layers: int) -> tuple[float, float]:
     amp = device.type == "cuda"
 
     print("  Extracting train features …")
@@ -130,7 +134,16 @@ def _run_probe(encoder: nn.Module, embed_dim: int, num_classes: int,
     val_cache   = DataLoader(TensorDataset(feats_val, labs_val),
                              batch_size=bsz, shuffle=False)
 
-    head = nn.Linear(embed_dim, num_classes).to(device)
+    from ijepa_lite.engine.eval_linear import _build_head
+    from omegaconf import OmegaConf
+    head_cfg = OmegaConf.create({
+        "type": head_type,
+        "hidden_dim": head_hidden_dim,
+        "num_layers": head_num_layers,
+    })
+    head = _build_head(embed_dim, num_classes, head_cfg).to(device)
+    print(f"  head: {head_type}  hidden_dim={head_hidden_dim}  num_layers={head_num_layers}")
+
     opt  = torch.optim.SGD(head.parameters(), lr=probe_lr,
                            momentum=0.9, weight_decay=probe_wd)
     sched  = torch.optim.lr_scheduler.StepLR(opt, step_size=step_size, gamma=gamma)
@@ -217,11 +230,15 @@ def main():
     parser.add_argument("--num-heads",   type=int, default=6)
     parser.add_argument("--num-classes", type=int, default=10)
     # Probe (defaults match InlineEvalCallback defaults)
-    parser.add_argument("--probe-epochs", type=int,   default=100)
-    parser.add_argument("--probe-lr",     type=float, default=0.1)
-    parser.add_argument("--probe-wd",     type=float, default=0.0)
-    parser.add_argument("--step-size",    type=int,   default=30)
-    parser.add_argument("--gamma",        type=float, default=0.1)
+    parser.add_argument("--probe-epochs",    type=int,   default=100)
+    parser.add_argument("--probe-lr",        type=float, default=0.1)
+    parser.add_argument("--probe-wd",        type=float, default=0.0)
+    parser.add_argument("--step-size",       type=int,   default=30)
+    parser.add_argument("--gamma",           type=float, default=0.1)
+    parser.add_argument("--head-type",       default="mlp",
+                        help="mlp or linear (default: mlp, matching InlineEvalCallback)")
+    parser.add_argument("--head-hidden-dim", type=int,   default=384)
+    parser.add_argument("--head-num-layers", type=int,   default=1)
     # Misc
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
@@ -251,6 +268,7 @@ def main():
             train_loader, val_loader, device,
             args.probe_epochs, args.probe_lr, args.probe_wd,
             args.step_size, args.gamma,
+            args.head_type, args.head_hidden_dim, args.head_num_layers,
         )
         results.append((ckpt, train_acc, val_acc))
         print(f"  → train_acc1={train_acc:.4f}  val_acc1={val_acc:.4f}\n")
