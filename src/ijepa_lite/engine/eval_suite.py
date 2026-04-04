@@ -148,6 +148,12 @@ def _run_linear_probe(
         pool=str(getattr(cfg.task, "pool", "mean")),
     ).to(device)
 
+    # Freeze encoder before DDP wrapping: with feature caching the encoder is never
+    # called inside the DDP-wrapped forward, so unfrozen params would cause a
+    # DDP allreduce deadlock (find_unused_parameters=False).
+    unwrap_model(model).encoder.requires_grad_(False)
+    unwrap_model(model).encoder.eval()
+
     if is_distributed():
         from torch.nn.parallel import DistributedDataParallel as DDP
         kwargs: Dict = dict(broadcast_buffers=False)
@@ -165,7 +171,10 @@ def _run_linear_probe(
     scaler = GradScaler("cuda", enabled=amp)
 
     # Pre-extract features — encoder is frozen throughout the probe.
-    encode_fn = lambda x: unwrap_model(model)._features(x)  # noqa: E731
+    def encode_fn(x):
+        t = unwrap_model(model)._features(x)
+        return F.layer_norm(t, (t.shape[-1],))
+
     feats_tr, labs_tr   = _extract_features(encode_fn, train_loader, device, amp)
     feats_val, labs_val = _extract_features(encode_fn, val_loader,   device, amp)
 
@@ -180,7 +189,6 @@ def _run_linear_probe(
         state["epoch"] = epoch
         callbacks.on_epoch_start(cfg=cfg, state=state)
 
-        unwrap_model(model).encoder.eval()
         unwrap_model(model).head.train()
 
         loss_meter = AverageMeter()

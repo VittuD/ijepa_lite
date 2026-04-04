@@ -173,6 +173,12 @@ def linear_probe_eval(
         # Keep it before DDP wrapping, matching the pretrain codepath.
         model = torch.compile(model, dynamic=True)
 
+    # Freeze encoder before DDP wrapping: with feature caching the encoder is never
+    # called inside the DDP-wrapped forward, so unfrozen params would cause a
+    # DDP allreduce deadlock (find_unused_parameters=False).
+    unwrap_model(model).encoder.requires_grad_(False)
+    unwrap_model(model).encoder.eval()
+
     if is_distributed():
         from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -198,7 +204,10 @@ def linear_probe_eval(
     # each batch of each epoch.  Each DDP rank caches its own data shard;
     # DDP gradient sync for the head still fires normally via the model wrapper.
     # ------------------------------------------------------------------
-    encode_fn = lambda x: unwrap_model(model)._features(x)  # noqa: E731
+    def encode_fn(x):
+        t = unwrap_model(model)._features(x)
+        return F.layer_norm(t, (t.shape[-1],))
+
     feats_tr, labs_tr   = _extract_features(encode_fn, train_loader, device, amp)
     feats_val, labs_val = _extract_features(encode_fn, val_loader,   device, amp)
 
@@ -221,7 +230,6 @@ def linear_probe_eval(
         # --------------------------------------------------------------
         # Train — encoder stays frozen; DDP syncs head grads via model wrapper
         # --------------------------------------------------------------
-        unwrap_model(model).encoder.eval()
         unwrap_model(model).head.train()
 
         loss_meter = AverageMeter()

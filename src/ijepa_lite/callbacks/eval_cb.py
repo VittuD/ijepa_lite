@@ -184,7 +184,10 @@ class InlineEvalCallback(Callback):
         encoder.eval()
 
         # Pre-extract features once — encoder is frozen so features are epoch-invariant.
-        encode_fn = lambda x: encoder(x).mean(dim=1)  # noqa: E731
+        # Apply the same F.layer_norm used on target tokens during pretraining (ijepa.py).
+        def encode_fn(x):
+            t = encoder(x)
+            return F.layer_norm(t, (t.shape[-1],)).mean(dim=1)
         feats_tr, labs_tr   = _extract_features(encode_fn, self._train_loader, self._device, amp)
         feats_val, labs_val = _extract_features(encode_fn, self._val_loader,   self._device, amp)
 

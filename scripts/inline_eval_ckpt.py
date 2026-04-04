@@ -99,8 +99,9 @@ def _extract_features(encoder: nn.Module, loader: DataLoader,
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
-            tokens = encoder(images)       # (B, N, D)
-            feat   = tokens.mean(dim=1)    # (B, D)
+            tokens = encoder(images)                                    # (B, N, D)
+            tokens = F.layer_norm(tokens, (tokens.shape[-1],))          # same as ijepa.py
+            feat   = tokens.mean(dim=1)                                 # (B, D)
         all_feats.append(feat.detach().float())
         all_labels.append(labels)
     return torch.cat(all_feats), torch.cat(all_labels)
