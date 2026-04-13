@@ -134,8 +134,7 @@ def _run_probe(encoder: nn.Module,
 
     clf = make_pipeline(
         StandardScaler(),
-        LogisticRegression(max_iter=max_iter, C=C, solver="lbfgs",
-                           multi_class="multinomial"),
+        LogisticRegression(max_iter=max_iter, C=C, solver="lbfgs"),
     )
     print(f"  Fitting LogisticRegression  C={C}  max_iter={max_iter} …")
     clf.fit(X_train, y_train)
