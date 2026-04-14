@@ -12,9 +12,11 @@
 #SBATCH --error=sbatch_logs/progressive_kl/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Probe benchmark: runs all three probing strategies (logreg_mean, logreg_cls,
-# mlp_sgd) on the same checkpoint and reports accuracy, speed, and peak GPU
-# memory in a comparison table.
+# Probe benchmark: compares probing configurations on the same checkpoint.
+#
+# Run 1 — baseline:      normal head (hidden_dim=384), 100 epochs
+# Run 2 — fewer epochs:  normal head (hidden_dim=384),  20 epochs
+# Run 3 — small head:    small head  (hidden_dim=128), 100 epochs
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -36,24 +38,43 @@ mkdir -p sbatch_logs/progressive_kl
 
 CKPT="outputs/2026-03-14/15-43-45_vanilla_baseline_multiblock_separate_pred_stl10/rank0/checkpoints/last.pt"
 
+COMMON_ARGS=(
+  "$CKPT"
+  --data-root $FAST/datasets
+  --image-size 96
+  --patch-size 8
+  --embed-dim 384
+  --depth 12
+  --num-heads 6
+  --num-classes 10
+  --batch-size 256
+  --num-workers 4
+  --max-iter 2000
+  --C 1.0
+  --probe-lr 0.1
+  --step-size 30
+  --gamma 0.1
+  --head-num-layers 1
+  --device cuda
+)
+
+echo "=== Run 1: normal head (hidden_dim=384), 100 epochs ==="
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python ijepa_lite/scripts/probe_benchmark.py \
-    "$CKPT" \
-    --data-root $FAST/datasets \
-    --image-size 96 \
-    --patch-size 8 \
-    --embed-dim 384 \
-    --depth 12 \
-    --num-heads 6 \
-    --num-classes 10 \
-    --batch-size 256 \
-    --num-workers 4 \
-    --max-iter 2000 \
-    --C 1.0 \
+    "${COMMON_ARGS[@]}" \
     --probe-epochs 100 \
-    --probe-lr 0.1 \
-    --step-size 30 \
-    --gamma 0.1 \
-    --head-hidden-dim 384 \
-    --head-num-layers 1 \
-    --device cuda
+    --head-hidden-dim 384
+
+echo "=== Run 2: normal head (hidden_dim=384), 20 epochs ==="
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+  python ijepa_lite/scripts/probe_benchmark.py \
+    "${COMMON_ARGS[@]}" \
+    --probe-epochs 20 \
+    --head-hidden-dim 384
+
+echo "=== Run 3: small head (hidden_dim=128), 100 epochs ==="
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+  python ijepa_lite/scripts/probe_benchmark.py \
+    "${COMMON_ARGS[@]}" \
+    --probe-epochs 100 \
+    --head-hidden-dim 128
