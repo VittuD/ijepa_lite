@@ -56,7 +56,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
       +masking.latent.terms.nway_progressive_kl.weight='[0.01,0.01]' \
       +masking.latent.terms.nway_progressive_kl.direction=forward \
-      model.predict_blocks_jointly=false \
+      +model.predict_blocks_jointly=false \
       data.root=$FAST/datasets/ \
       data.batch_size=512 \
       train.epochs=1000 \
