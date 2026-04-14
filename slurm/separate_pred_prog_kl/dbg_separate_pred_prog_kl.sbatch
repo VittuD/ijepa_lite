@@ -25,6 +25,8 @@ source $WORK/vitturini/ijepa_venv/bin/activate
 
 export WANDB_MODE=offline
 
+export PYTHONUNBUFFERED=1
+
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
 export OPENBLAS_NUM_THREADS=4

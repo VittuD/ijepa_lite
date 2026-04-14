@@ -237,4 +237,6 @@ class VizCallback(Callback):
                     out_dir / f"{dataset_name}_per_class_score.png",
                 )
 
+        encoder.train()
+        masker.train()
         print(f"[VizCallback] epoch={epoch}  output -> {out_dir}/")
