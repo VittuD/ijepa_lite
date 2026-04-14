@@ -12,11 +12,14 @@
 #SBATCH --error=sbatch_logs/progressive_kl/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Probe benchmark: compares probing configurations on the same checkpoint.
+# Probe benchmark: epoch-count sweep on a weak checkpoint to find where
+# train_acc drops below 1.
 #
-# Run 1 — baseline:      normal head (hidden_dim=384), 100 epochs
-# Run 2 — fewer epochs:  normal head (hidden_dim=384),  20 epochs
-# Run 3 — small head:    small head  (hidden_dim=128), 100 epochs
+# Run 1 — normal head (hidden_dim=384), 100 epochs
+# Run 2 — normal head (hidden_dim=384),  20 epochs
+# Run 3 — normal head (hidden_dim=384),  10 epochs
+# Run 4 — normal head (hidden_dim=384),   5 epochs
+# Run 5 — small head  (hidden_dim=128), 100 epochs
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -36,7 +39,7 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/progressive_kl
 
-CKPT="outputs/2026-03-14/15-43-45_vanilla_baseline_multiblock_separate_pred_stl10/rank0/checkpoints/last.pt"
+CKPT="outputs/2026-04-14/15-00-51_mi_HmargBS_floor_learned/rank0/checkpoints/last.pt"
 
 COMMON_ARGS=(
   "$CKPT"
@@ -72,7 +75,21 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     --probe-epochs 20 \
     --head-hidden-dim 384
 
-echo "=== Run 3: small head (hidden_dim=128), 100 epochs ==="
+echo "=== Run 3: normal head (hidden_dim=384), 10 epochs ==="
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+  python ijepa_lite/scripts/probe_benchmark.py \
+    "${COMMON_ARGS[@]}" \
+    --probe-epochs 10 \
+    --head-hidden-dim 384
+
+echo "=== Run 4: normal head (hidden_dim=384), 5 epochs ==="
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+  python ijepa_lite/scripts/probe_benchmark.py \
+    "${COMMON_ARGS[@]}" \
+    --probe-epochs 5 \
+    --head-hidden-dim 384
+
+echo "=== Run 5: small head (hidden_dim=128), 100 epochs ==="
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python ijepa_lite/scripts/probe_benchmark.py \
     "${COMMON_ARGS[@]}" \
