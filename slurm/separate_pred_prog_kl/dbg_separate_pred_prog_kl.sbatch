@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-dbg-sep-pred-prog-kl
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=10:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/separate_pred_prog_kl/%x_%j.out
 #SBATCH --error=sbatch_logs/separate_pred_prog_kl/%x_%j.err
 
