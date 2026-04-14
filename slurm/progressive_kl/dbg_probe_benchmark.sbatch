@@ -39,7 +39,7 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/progressive_kl
 
-CKPT="outputs/2026-04-14/15-00-51_mi_HmargBS_floor_learned/rank0/checkpoints/last.pt"
+CKPT="outputs/2026-03-14/15-43-45_vanilla_baseline_multiblock_separate_pred_stl10/rank0/checkpoints/last.pt"
 
 COMMON_ARGS=(
   "$CKPT"
