@@ -12,8 +12,7 @@
 #SBATCH --error=sbatch_logs/separate_pred_prog_kl/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Debug: single run matching TASK_ID=0 of separate_pred_prog_kl.sbatch.
-# num_tgt_blocks=5, λ_kl=0.01, predict_blocks_jointly=false.
+# Debug: num_tgt_blocks=5, cross_surprise=1.0, λ_kl=10, predict_blocks_jointly=false.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -38,7 +37,7 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/separate_pred_prog_kl
 
-export EXP_NAME="dbg_prog_kl_5blk_klw0.01_sep"
+export EXP_NAME="dbg_prog_kl_5blk_csw1_klw10_sep"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -53,8 +52,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.phase_mode=deterministic \
       ~masking.latent.terms.nway_neg_H_marg \
       ~masking.latent.terms.nway_floor_penalty \
-      masking.latent.terms.nway_cross_surprise.weight='[0.1,0.1]' \
-      +masking.latent.terms.nway_progressive_kl.weight='[0.01,0.01]' \
+      masking.latent.terms.nway_cross_surprise.weight='[1.0,1.0]' \
+      +masking.latent.terms.nway_progressive_kl.weight='[10.0,10.0]' \
       +masking.latent.terms.nway_progressive_kl.direction=forward \
       +model.predict_blocks_jointly=false \
       data.root=$FAST/datasets/ \
