@@ -66,7 +66,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.n_start_tgt=2 \
       +masking.latent.phase_mode=deterministic \
       data.root=$FAST/datasets/ \
-      data.batch_size=512 \
+      data.batch_size=2048 \
       train.epochs=30 \
       train.log_every=10 \
       train.save_every_epochs=30 \

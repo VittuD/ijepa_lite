@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-prog-kl-det-6blk
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=06:30:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/progressive_kl/%x_%j.out
 #SBATCH --error=sbatch_logs/progressive_kl/%x_%j.err
 
@@ -64,7 +64,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       data.batch_size=2048 \
       train.epochs=1000 \
       train.viz_enabled=true \
-      +train.viz_every_epochs=10 \
+      +train.viz_every_epochs=1 \
       train.viz.n_images=30 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline

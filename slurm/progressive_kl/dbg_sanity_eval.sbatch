@@ -37,11 +37,11 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/progressive_kl
 
-CKPT_A="outputs/2026-04-02/20-33-35_prog_kl_det_5blk_klw1.0_fwd/rank0/checkpoints/last.pt"
-CKPT_B="outputs/2026-04-01/11-46-37_prog_kl_det_5blk_fwd/rank0/checkpoints/last.pt"
+CKPT_A="outputs/2026-03-13/10-30-44_vanilla_baseline_multiblock_stl10/rank0/checkpoints/last.pt"
+CKPT_B="outputs/2026-04-01/11-46-37_prog_kl_det_5blk_fwd/rank0/checkpoints/epoch_00899.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python scripts/inline_eval_ckpt.py \
+  python ijepa_lite/scripts/inline_eval_ckpt.py \
     "$CKPT_A" "$CKPT_B" \
     --data-root $FAST/datasets \
     --image-size 96 \

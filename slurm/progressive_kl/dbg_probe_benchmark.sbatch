@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-probe-bench-dbg
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
@@ -34,10 +34,10 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/progressive_kl
 
-CKPT="outputs/2026-04-02/20-33-35_prog_kl_det_5blk_klw1.0_fwd/rank0/checkpoints/last.pt"
+CKPT="outputs/2026-03-14/15-43-45_vanilla_baseline_multiblock_separate_pred_stl10/rank0/checkpoints/last.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python scripts/probe_benchmark.py \
+  python ijepa_lite/scripts/probe_benchmark.py \
     "$CKPT" \
     --data-root $FAST/datasets \
     --image-size 96 \

@@ -14,7 +14,7 @@
 
 # ---------------------------------------------------------------------------
 # Sweep: progressive KL deterministic, n_start_tgt=2, num_tgt_blocks in {4,5,6,7,8}.
-# Global batch size = 2048 (512 per GPU × 4 GPUs).
+# Global batch size = 8192 (2048 per GPU × 4 GPUs).
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -61,10 +61,10 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.n_start_tgt=2 \
       +masking.latent.phase_mode=deterministic \
       data.root=$FAST/datasets/ \
-      data.batch_size=512 \
+      data.batch_size=2048 \
       train.epochs=1000 \
       train.viz_enabled=true \
-      +train.viz_every_epochs=10 \
+      +train.viz_every_epochs=1 \
       train.viz.n_images=30 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
