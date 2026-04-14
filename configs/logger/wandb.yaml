@@ -2,7 +2,7 @@ name: wandb
 project: ijepa-lite
 entity: null
 mode: offline   # online | offline | disabled
-tags: []
+tags: [evalv2]
 notes: null
 
 group: ${exp_name}
