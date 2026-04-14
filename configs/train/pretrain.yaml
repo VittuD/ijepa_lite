@@ -18,7 +18,7 @@ inline_eval:
   head_type: mlp
   head_hidden_dim: 384
   head_num_layers: 1
-  probe_epochs: 100
+  probe_epochs: 10
   probe_lr: 0.1
   probe_weight_decay: 0.0
   probe_sched: step
