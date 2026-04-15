@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 from torch.amp import GradScaler, autocast
@@ -9,6 +10,7 @@ from torch.amp import GradScaler, autocast
 from ijepa_lite.utils.dist import (
     all_reduce_sum,
     barrier,
+    get_rank,
     is_rank0,
     unwrap_model,
 )
@@ -35,6 +37,17 @@ def _cosine_wd(wd_start: float, wd_end: float, step: int, total_steps: int) -> f
     if wd_end <= wd_start:
         return max(wd_end, wd)
     return min(wd_end, wd)
+
+
+def _ddp_debug_enabled(step: int) -> bool:
+    if int(os.environ.get("IJEPA_DDP_DEBUG", "0")) == 0:
+        return False
+    return step <= int(os.environ.get("IJEPA_DDP_DEBUG_STEPS", "8"))
+
+
+def _ddp_debug_print(step: int, msg: str) -> None:
+    if _ddp_debug_enabled(step):
+        print(f"[ddp-debug][rank{get_rank()}][step={step}] {msg}", flush=True)
 
 
 def train(
@@ -192,12 +205,42 @@ def train(
 
             next_step = state["global_step"] + 1
             do_log = next_step % log_every == 0
+            _ddp_debug_print(
+                next_step,
+                f"forward_start epoch={epoch} batch_shape={tuple(images.shape)}",
+            )
 
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 out = model(images, masks=masks, compute_agreement=do_log, compute_mask_metrics=do_log, epoch=epoch)
                 loss = out["loss"]
 
+            mask_stats = out.get("mask_stats", {})
+            _ddp_debug_print(
+                next_step,
+                "forward_done "
+                f"loss={float(loss.detach().item()):.6f} "
+                f"pred_shape={tuple(out['pred'].shape)} "
+                f"target_shape={tuple(out['target'].shape)} "
+                f"nctx={mask_stats.get('mask/nctx')} "
+                f"ntgt={mask_stats.get('mask/ntgt')} "
+                f"prog_kl={mask_stats.get('mask/prog_kl/loss')} "
+                f"n_active={mask_stats.get('mask/prog_kl/n_active_tgt')} "
+                f"alpha={mask_stats.get('mask/prog_kl/transition_alpha')}",
+            )
+
+            _ddp_debug_print(next_step, "backward_start")
             scaler.scale(loss).backward()
+            _ddp_debug_print(next_step, "backward_done")
+            if _ddp_debug_enabled(next_step):
+                grad_none = [
+                    name
+                    for name, param in model.named_parameters()
+                    if param.requires_grad and param.grad is None
+                ]
+                _ddp_debug_print(
+                    next_step,
+                    f"grad_none_count={len(grad_none)} grad_none_sample={grad_none[:8]}",
+                )
             state["global_step"] = next_step
 
             gnorm = None
@@ -213,6 +256,7 @@ def train(
 
             is_masker_step = masker_step_every == 1 or next_step % masker_step_every == 0
 
+            _ddp_debug_print(next_step, f"optimizer_step_start masker_step={is_masker_step}")
             if masker_optimizer is not None:
                 # Separate optimizer path: skip masker step on non-masker steps
                 scaler.step(optimizer)
@@ -226,6 +270,7 @@ def train(
                             p.grad = None
                 scaler.step(optimizer)
             scaler.update()
+            _ddp_debug_print(next_step, "optimizer_step_done")
 
             # ----------------------------------------------------------
             # WD cosine schedule
@@ -256,6 +301,13 @@ def train(
                 _masker.set_ema_decay(core.ema_momentum)
             if _masker is not None and hasattr(_masker, "set_step"):
                 _masker.set_step(state["global_step"], total_steps)
+            masker_n_active = None
+            if _masker is not None and hasattr(_masker, "_n_active_buf"):
+                masker_n_active = int(_masker._n_active_buf.item())
+            _ddp_debug_print(
+                next_step,
+                f"post_step ema={float(core.ema_momentum):.6f} masker_n_active={masker_n_active}",
+            )
 
             loss_meter.update(float(loss.item()), n=images.size(0))
 

@@ -16,6 +16,7 @@ to the loss weighting.
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import torch
@@ -25,6 +26,18 @@ import torch.nn.functional as F
 from ijepa_lite.losses.composite import CompositeMaskerLoss
 from ijepa_lite.masking.base import LatentMasker, MaskOutput
 from ijepa_lite.masking.registry import register
+from ijepa_lite.utils.dist import get_rank
+
+
+def _ddp_debug_enabled(step: int) -> bool:
+    if int(os.environ.get("IJEPA_DDP_DEBUG", "0")) == 0:
+        return False
+    return step <= int(os.environ.get("IJEPA_DDP_DEBUG_STEPS", "8"))
+
+
+def _ddp_debug_print(step: int, msg: str) -> None:
+    if _ddp_debug_enabled(step):
+        print(f"[ddp-debug][rank{get_rank()}][step={step}] {msg}", flush=True)
 
 
 @register("mi_3way")
@@ -648,6 +661,34 @@ class MINWayMasker(LatentMasker):
             tgt_flat = tgt_idx.reshape(B, -1)  # (B, M*K)
             p_ctx_masked = p_ctx.clone().scatter_(1, tgt_flat, 0.0)
             _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
+
+        step = int(getattr(self, "_global_step", 0))
+        if _ddp_debug_enabled(step):
+            if self.hard_assignment in ("argmax", "gumbel"):
+                extra = (
+                    f"hard={self.hard_assignment} n_active={n_active} K={K} nctx={nctx} "
+                    f"tgt_counts=[{int(counts.min().item())},{int(counts.max().item())}] "
+                    f"ctx_counts=[{int(ctx_counts.min().item())},{int(ctx_counts.max().item())}] "
+                    f"fb_blocks={int(needs_fallback.sum().item())} "
+                    f"ctx_fb={int(needs_ctx_fallback.sum().item())}"
+                )
+            else:
+                per_block_mass_l = [
+                    round(float(x), 3) for x in per_block_mass.detach().cpu().tolist()
+                ]
+                extra = (
+                    f"hard={self.hard_assignment} n_active={n_active} K={K} nctx={nctx} "
+                    f"per_block_mass={per_block_mass_l} "
+                    f"ctx_mass_mean={float(p_ctx.sum(dim=-1).mean().item()):.3f}"
+                )
+            _ddp_debug_print(
+                step,
+                "masker_forward "
+                f"ctx_idx_shape={tuple(ctx_idx.shape)} "
+                f"target_idx_shape={tuple(tgt_idx.shape)} "
+                f"logits_finite={bool(torch.isfinite(logits).all().item())} "
+                f"{extra}",
+            )
 
         # Sample weights for this step
         weights = self._sample_weights(tokens.device)
