@@ -291,6 +291,7 @@ class MINWayMasker(LatentMasker):
         num_patches: int,
         terms: dict,
         num_tgt_blocks: int = 4,
+        winners_mode: bool = False,
         ntgt_min_per_block: int = 4,
         max_total_tgt: int = 0,
         max_tgt_per_block: int = 0,
@@ -320,6 +321,7 @@ class MINWayMasker(LatentMasker):
 
         self.num_patches = int(num_patches)
         self.M = int(num_tgt_blocks)
+        self.winners_mode = bool(winners_mode)
         self.ntgt_min_per_block = max(1, int(ntgt_min_per_block))
         self.max_total_tgt = int(max_total_tgt)
         self.max_tgt_per_block = int(max_tgt_per_block)
@@ -328,6 +330,28 @@ class MINWayMasker(LatentMasker):
         self.arch = str(arch)
         self.gumbel_tau = float(gumbel_tau)
         self.warmup_epochs = int(warmup_epochs)
+
+        if self.winners_mode:
+            if self.hard_assignment not in ("argmax", "gumbel"):
+                raise ValueError(
+                    "MINWayMasker winners_mode requires hard_assignment to be "
+                    f"'argmax' or 'gumbel', got {self.hard_assignment!r}."
+                )
+            if self.max_total_tgt > 0:
+                raise ValueError(
+                    "MINWayMasker winners_mode does not support max_total_tgt > 0. "
+                    "Exact winners cannot be post-edited by a total target cap."
+                )
+            if self.max_tgt_per_block > 0:
+                raise ValueError(
+                    "MINWayMasker winners_mode does not support max_tgt_per_block > 0. "
+                    "Exact winners cannot be post-edited by a per-block target cap."
+                )
+            if self.ntgt_min_per_block > 1:
+                raise ValueError(
+                    "MINWayMasker winners_mode does not support ntgt_min_per_block > 1. "
+                    "Exact winners cannot be post-edited by a per-block minimum."
+                )
 
         # k schedule state: k_start → k_max (warmup) → k_min (cosine)
         self.k_start = float(k_start)

@@ -87,6 +87,7 @@ class IJEPAModel(nn.Module):
         self._mask_generator = mask_generator   # fallback only
 
         self.predict_blocks_jointly = predict_blocks_jointly
+        self.winners_mode = bool(getattr(latent_masker, "winners_mode", False))
 
         # Context loss config
         self.ctx_loss_weight = float(ctx_loss_weight)
@@ -95,6 +96,16 @@ class IJEPAModel(nn.Module):
         self.ctx_warmup_start = int(ctx_loss_warmup_start)
         self.ctx_warmup_end = int(ctx_loss_warmup_end)
         self.grid_size = int(grid_size)
+
+        if self.winners_mode and not self.predict_blocks_jointly:
+            raise ValueError(
+                "IJEPAModel winners_mode currently requires predict_blocks_jointly=true."
+            )
+        if self.winners_mode and self.ctx_loss_enabled:
+            raise ValueError(
+                "IJEPAModel winners_mode does not support ctx_loss. "
+                "Set ctx_loss.weight=0 for winners-mode runs."
+            )
 
         # Registered as submodules so their params are checkpointed and optimised.
         self.latent_masker = latent_masker

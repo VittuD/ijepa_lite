@@ -1,6 +1,7 @@
 # @package masking.latent
 name: mi_nway
 
+winners_mode: false     # exact-winners experimental path; requires joint prediction and no ctx loss
 num_tgt_blocks: 4
 ntgt_min_per_block: 4
 max_total_tgt: 0        # 0 = disabled; otherwise cap the sum across target blocks

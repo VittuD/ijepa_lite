@@ -12,10 +12,10 @@
 #SBATCH --error=sbatch_logs/separate_pred_prog_kl/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Stage 1 winners smoke test:
-# - preserve raw hard winners in MINWayMasker.aux
-# - keep the current dense training path unchanged
-# - run the separate-pred progressive-KL setup on a safer debug batch size
+# Winners-mode debug run:
+# - explicitly opt into masking.latent.winners_mode=true
+# - keep progressive-KL / gumbel masking enabled
+# - use the joint-prediction path required by winners-mode guardrails
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -50,12 +50,11 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_mi_nway \
       exp_name="$EXP_NAME" \
+      masking.latent.winners_mode=true \
       masking.latent.hard_assignment=gumbel \
       masking.latent.gumbel_tau=0.5 \
       masking.latent.num_tgt_blocks=5 \
       masking.latent.ntgt_min_per_block=1 \
-      masking.latent.max_total_tgt=112 \
-      masking.latent.max_tgt_per_block=48 \
       distributed.find_unused_parameters=true \
       +masking.latent.n_start_tgt=2 \
       +masking.latent.phase_mode=deterministic \
@@ -64,7 +63,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.nway_cross_surprise.weight='[1.0,1.0]' \
       +masking.latent.terms.nway_progressive_kl.weight='[10.0,10.0]' \
       +masking.latent.terms.nway_progressive_kl.direction=forward \
-      +model.predict_blocks_jointly=false \
+      model.predict_blocks_jointly=true \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
       train.epochs=1 \
