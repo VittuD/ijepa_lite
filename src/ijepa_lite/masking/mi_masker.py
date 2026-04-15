@@ -16,7 +16,6 @@ to the loss weighting.
 from __future__ import annotations
 
 import math
-import os
 from typing import Optional
 
 import torch
@@ -26,18 +25,6 @@ import torch.nn.functional as F
 from ijepa_lite.losses.composite import CompositeMaskerLoss
 from ijepa_lite.masking.base import LatentMasker, MaskOutput
 from ijepa_lite.masking.registry import register
-from ijepa_lite.utils.dist import get_rank
-
-
-def _ddp_debug_enabled(step: int) -> bool:
-    if int(os.environ.get("IJEPA_DDP_DEBUG", "0")) == 0:
-        return False
-    return step <= int(os.environ.get("IJEPA_DDP_DEBUG_STEPS", "8"))
-
-
-def _ddp_debug_print(step: int, msg: str) -> None:
-    if _ddp_debug_enabled(step):
-        print(f"[ddp-debug][rank{get_rank()}][step={step}] {msg}", flush=True)
 
 
 @register("mi_3way")
@@ -725,7 +712,6 @@ class MINWayMasker(LatentMasker):
 
             sorted_idx = scores.argsort(dim=1, descending=True)  # (B, N, M)
             tgt_idx_list = []
-            tgt_valid_list = []
             tgt_flat_parts = []
             for i in range(M):
                 k_i = int(target_block_counts[i].item())
@@ -737,11 +723,7 @@ class MINWayMasker(LatentMasker):
                     )
                     idx_i = torch.cat([idx_i, pad_val.expand(-1, K - k_i)], dim=1)
                 tgt_idx_list.append(idx_i)
-                valid_i = torch.zeros(K, device=scores.device, dtype=torch.bool)
-                valid_i[:k_i] = True
-                tgt_valid_list.append(valid_i)
             tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
-            tgt_valid = torch.stack(tgt_valid_list, dim=0)  # (M, K)
             tgt_flat = torch.cat(tgt_flat_parts, dim=1)
 
             # --- Vectorized context indices ---
@@ -772,7 +754,6 @@ class MINWayMasker(LatentMasker):
                 K = int(target_block_counts.max().item())
 
             tgt_idx_list = []
-            tgt_valid_list = []
             tgt_flat_parts = []
             for k in range(M):
                 k_i = int(target_block_counts[k].item())
@@ -784,55 +765,13 @@ class MINWayMasker(LatentMasker):
                     )
                     idx_k = torch.cat([idx_k, pad_val.expand(-1, K - k_i)], dim=1)
                 tgt_idx_list.append(idx_k)
-                valid_k = torch.zeros(K, device=p_tgts.device, dtype=torch.bool)
-                valid_k[:k_i] = True
-                tgt_valid_list.append(valid_k)
             tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
-            tgt_valid = torch.stack(tgt_valid_list, dim=0)  # (M, K)
             tgt_flat = torch.cat(tgt_flat_parts, dim=1)
 
             # Context: topk on p_ctx after zeroing all target positions
             nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
             p_ctx_masked = p_ctx.clone().scatter_(1, tgt_flat, 0.0)
             _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
-
-        step = int(getattr(self, "_global_step", 0))
-        if _ddp_debug_enabled(step):
-            if self.hard_assignment in ("argmax", "gumbel"):
-                extra = (
-                    f"hard={self.hard_assignment} n_active={n_active} K={K} "
-                    f"total_tgt={int(target_block_counts.sum().item())} "
-                    f"counts={target_block_counts.tolist()} "
-                    f"max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
-                    f"max_tgt_per_block={self.max_tgt_per_block if self.max_tgt_per_block > 0 else 'none'} "
-                    f"legacy_K_cap={K_max_cap} nctx={nctx} "
-                    f"tgt_counts=[{int(counts.min().item())},{int(counts.max().item())}] "
-                    f"ctx_counts=[{int(ctx_counts.min().item())},{int(ctx_counts.max().item())}] "
-                    f"fb_blocks={int(needs_fallback.sum().item())} "
-                    f"ctx_fb={int(needs_ctx_fallback.sum().item())}"
-                )
-            else:
-                per_block_mass_l = [
-                    round(float(x), 3) for x in per_block_mass.detach().cpu().tolist()
-                ]
-                extra = (
-                    f"hard={self.hard_assignment} n_active={n_active} K={K} "
-                    f"total_tgt={int(target_block_counts.sum().item())} "
-                    f"counts={target_block_counts.tolist()} "
-                    f"max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
-                    f"max_tgt_per_block={self.max_tgt_per_block if self.max_tgt_per_block > 0 else 'none'} "
-                    f"nctx={nctx} "
-                    f"per_block_mass={per_block_mass_l} "
-                    f"ctx_mass_mean={float(p_ctx.sum(dim=-1).mean().item()):.3f}"
-                )
-            _ddp_debug_print(
-                step,
-                "masker_forward "
-                f"ctx_idx_shape={tuple(ctx_idx.shape)} "
-                f"target_idx_shape={tuple(tgt_idx.shape)} "
-                f"logits_finite={bool(torch.isfinite(logits).all().item())} "
-                f"{extra}",
-            )
 
         # Sample weights for this step
         weights = self._sample_weights(tokens.device)
@@ -847,7 +786,6 @@ class MINWayMasker(LatentMasker):
             "n_active_tgt": n_active,
             "global_step":  getattr(self, "_global_step", 0),
             "target_block_counts": target_block_counts,
-            "target_valid": tgt_valid,
             "max_total_tgt": self.max_total_tgt,
             "max_tgt_per_block": self.max_tgt_per_block,
         }

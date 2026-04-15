@@ -31,12 +31,8 @@ export OPENBLAS_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
 
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export TORCH_DISTRIBUTED_DEBUG=DETAIL
-export TORCH_FR_BUFFER_SIZE=2000
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-export IJEPA_DDP_DEBUG=1
-export IJEPA_DDP_DEBUG_STEPS=8
 export PYTHONUNBUFFERED=1
 
 nvidia-smi -L
@@ -54,8 +50,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.gumbel_tau=0.5 \
       masking.latent.num_tgt_blocks=5 \
       masking.latent.ntgt_min_per_block=1 \
-      +masking.latent.max_total_tgt=112 \
-      +masking.latent.max_tgt_per_block=48 \
+      masking.latent.max_total_tgt=112 \
+      masking.latent.max_tgt_per_block=48 \
       +masking.latent.n_start_tgt=2 \
       +masking.latent.phase_mode=deterministic \
       ~masking.latent.terms.nway_neg_H_marg \

@@ -9,24 +9,9 @@ Terms are fully independent — no shared state, no cross-term coupling.
 """
 from __future__ import annotations
 
-import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from ijepa_lite.utils.dist import get_rank
-
-
-def _ddp_debug_enabled(step: int) -> bool:
-    if int(os.environ.get("IJEPA_DDP_DEBUG", "0")) == 0:
-        return False
-    return step <= int(os.environ.get("IJEPA_DDP_DEBUG_STEPS", "8"))
-
-
-def _ddp_debug_print(step: int, msg: str) -> None:
-    if _ddp_debug_enabled(step):
-        print(f"[ddp-debug][rank{get_rank()}][step={step}] {msg}", flush=True)
 
 
 def _mean_sq_norm(x: torch.Tensor) -> torch.Tensor:
@@ -540,22 +525,6 @@ class NWayProgressiveKLTerm(MaskerTerm):
         # Blended target distribution
         q_eff, alpha = self._get_q_eff(global_step)
         p_target = q_eff.to(p_bar.device).unsqueeze(0).expand_as(p_bar)
-
-        if _ddp_debug_enabled(global_step):
-            q_eff_l = [round(float(x), 4) for x in q_eff.detach().cpu().tolist()]
-            p_bar_l = [
-                round(float(x), 4)
-                for x in p_bar.detach().mean(dim=0).cpu().tolist()
-            ]
-            _ddp_debug_print(
-                global_step,
-                "prog_kl_forward "
-                f"n_active={n_active} prev_n={prev_n} "
-                f"transition_start={int(self._transition_start.item())} "
-                f"alpha={alpha:.4f} "
-                f"q_eff={q_eff_l} "
-                f"p_bar_mean={p_bar_l}",
-            )
 
         EPS = 1e-8
         log_q = p_bar.clamp(min=EPS).log()
