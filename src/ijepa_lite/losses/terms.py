@@ -29,6 +29,11 @@ def _ddp_debug_print(step: int, msg: str) -> None:
         print(f"[ddp-debug][rank{get_rank()}][step={step}] {msg}", flush=True)
 
 
+def _mean_sq_norm(x: torch.Tensor) -> torch.Tensor:
+    """Return mean_d(x^2) without materializing x.pow(2)."""
+    return torch.einsum("...d,...d->...", x, x) / x.shape[-1]
+
+
 class MaskerTerm(nn.Module):
     """Base class for atomic masker loss terms."""
 
@@ -232,9 +237,9 @@ class NWayCrossSurpriseTerm(MaskerTerm):
 
         # --- Vectorized pairwise distances: one bmm instead of M*(M-1) dots ---
         # ‖zᵢ − μ_l‖² = mean_d(zᵢ²) − 2·mean_d(zᵢ·μ_l) + mean_d(μ_l²)
-        norm_ema_sq = ema_full.pow(2).mean(-1)                              # (B, N)
+        norm_ema_sq = _mean_sq_norm(ema_full)                               # (B, N)
         all_dots = torch.bmm(ema_full, centroids.transpose(1, 2)) / D      # (B, N, M)
-        all_norm_c = centroids.pow(2).mean(-1).unsqueeze(1)                 # (B, 1, M)
+        all_norm_c = _mean_sq_norm(centroids).unsqueeze(1)                  # (B, 1, M)
         dist_sq_all = norm_ema_sq.unsqueeze(-1) - 2.0 * all_dots + all_norm_c  # (B, N, M)
 
         # S_total = Σ_{k≠l} E_k[dist_sq_l]
@@ -284,9 +289,9 @@ class NWayFullCrossSurpriseTerm(MaskerTerm):
                     / (p_groups_sum.unsqueeze(-1) + virtual_w).clamp(min=1e-6)  # (B, M+1, D)
 
         # --- Vectorized pairwise distances for all M+1 groups ---
-        norm_ema_sq = ema_full.pow(2).mean(-1)                               # (B, N)
+        norm_ema_sq = _mean_sq_norm(ema_full)                                # (B, N)
         all_dots = torch.bmm(ema_full, centroids.transpose(1, 2)) / D       # (B, N, M+1)
-        all_norm_c = centroids.pow(2).mean(-1).unsqueeze(1)                  # (B, 1, M+1)
+        all_norm_c = _mean_sq_norm(centroids).unsqueeze(1)                   # (B, 1, M+1)
         dist_sq_all = norm_ema_sq.unsqueeze(-1) - 2.0 * all_dots + all_norm_c  # (B, N, M+1)
 
         # --- Inter-target surprise: pairs (k,l) both in {1..M} ---
