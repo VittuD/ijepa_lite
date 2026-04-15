@@ -262,7 +262,12 @@ def maybe_wrap_ddp(
     if not is_distributed():
         return model
 
-    kwargs = dict(broadcast_buffers=False)
+    kwargs = dict(
+        broadcast_buffers=False,
+        find_unused_parameters=bool(
+            getattr(getattr(cfg, "distributed", None), "find_unused_parameters", False)
+        ),
+    )
     if device.type == "cuda":
         kwargs.update(device_ids=[device.index], output_device=device.index)
 
