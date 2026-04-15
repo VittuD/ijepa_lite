@@ -222,7 +222,9 @@ class NWayCrossSurpriseTerm(MaskerTerm):
         if soft is None:
             return p_ctx.new_zeros(()), {}
 
-        M = self.M
+        M = min(self.M, int(kw.get("n_active_tgt", self.M)))
+        if M < 2:
+            return p_ctx.new_zeros(()), {}
         D = ema_full.shape[-1]
         image_mean = ema_full.mean(dim=1)  # (B, D)
 
@@ -276,7 +278,9 @@ class NWayFullCrossSurpriseTerm(MaskerTerm):
         if soft is None:
             return p_ctx.new_zeros(()), {}
 
-        M = self.M
+        M = min(self.M, int(kw.get("n_active_tgt", self.M)))
+        if M < 1:
+            return p_ctx.new_zeros(()), {}
         D = ema_full.shape[-1]
         image_mean = ema_full.mean(dim=1)  # (B, D)
 
