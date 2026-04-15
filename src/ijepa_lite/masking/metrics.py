@@ -102,11 +102,19 @@ def mask_diagnostics(
     stats["mask/context_ratio"] = float(nctx) / num_patches
     stats["mask/target_ratio"] = float(ntgt_total) / num_patches
     stats["mask/masker_loss"] = float(masker_loss.item()) if masker_loss is not None else 0.0
+    if tgt_idx.dim() == 3 and tgt_counts is not None:
+        for i, count in enumerate(counts):
+            stats[f"mask/hard_tgt_{i}"] = float(count)
 
     # ------------------------------------------------------------------
     # RD masker — read from aux (written by aux_loss in-place)
     # ------------------------------------------------------------------
     aux = mask_output.aux
+
+    if "max_total_tgt" in aux:
+        stats["mask/max_total_tgt"] = float(aux["max_total_tgt"])
+    if "max_tgt_per_block" in aux:
+        stats["mask/max_tgt_per_block"] = float(aux["max_tgt_per_block"])
 
     if "lambda" in aux:
         lam = aux["lambda"]

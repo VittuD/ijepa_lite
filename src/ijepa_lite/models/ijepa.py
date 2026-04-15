@@ -241,7 +241,12 @@ class IJEPAModel(nn.Module):
         # ------------------------------------------------------------------
         ctx_loss_val = None
         if pred_ctx is not None:
-            tgt_idx_flat = tgt_idx.reshape(b, -1) if tgt_idx.dim() == 3 else tgt_idx
+            if tgt_idx.dim() == 3:
+                tgt_idx_flat = self._flatten_multi_block_target_idx(
+                    tgt_idx, b, target_block_counts
+                )
+            else:
+                tgt_idx_flat = tgt_idx
             tgt_at_ctx_pos = tgt_tokens_all.gather(
                 1, ctx_idx.unsqueeze(-1).expand(-1, -1, d)
             )
@@ -396,6 +401,21 @@ class IJEPAModel(nn.Module):
         loss = patch_loss.mean()
         return loss, pred, tgt_tokens, patch_loss, pred_ctx
 
+    def _flatten_multi_block_target_idx(
+        self,
+        tgt_idx: torch.Tensor,        # (B, M, K)
+        batch_size: int,
+        target_block_counts: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if target_block_counts is None:
+            return tgt_idx.reshape(batch_size, -1)
+
+        counts = [int(x) for x in target_block_counts.detach().cpu().tolist()]
+        parts = [tgt_idx[:, i, :counts[i]] for i in range(tgt_idx.shape[1]) if counts[i] > 0]
+        if not parts:
+            raise ValueError("Expected at least one valid target block when flattening targets.")
+        return torch.cat(parts, dim=1)
+
     def _forward_multi_block(
         self,
         ctx_tokens: torch.Tensor,     # (B, Nctx, D)
@@ -447,12 +467,9 @@ class IJEPAModel(nn.Module):
             return loss, pred, tgt_tokens, patch_loss_cat, None
 
         # -- Joint prediction (default): all blocks concatenated ---------------
-        if counts is None:
-            tgt_idx_cat = tgt_idx.reshape(b, m * k)  # (B, M*K)
-        else:
-            tgt_idx_cat = torch.cat(
-                [tgt_idx[:, i, :counts[i]] for i in range(m) if counts[i] > 0], dim=1
-            )
+        tgt_idx_cat = self._flatten_multi_block_target_idx(
+            tgt_idx, b, target_block_counts
+        )
 
         tgt_tokens_cat = tgt_tokens_all.gather(
             1, tgt_idx_cat.unsqueeze(-1).expand(-1, -1, d)

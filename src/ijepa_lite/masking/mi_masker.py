@@ -304,6 +304,7 @@ class MINWayMasker(LatentMasker):
         num_tgt_blocks: int = 4,
         ntgt_min_per_block: int = 4,
         max_total_tgt: int = 0,
+        max_tgt_per_block: int = 0,
         nctx_min: int = 1,
         hard_assignment: str = "topk",
         arch: str = "transformer",
@@ -332,6 +333,7 @@ class MINWayMasker(LatentMasker):
         self.M = int(num_tgt_blocks)
         self.ntgt_min_per_block = max(1, int(ntgt_min_per_block))
         self.max_total_tgt = int(max_total_tgt)
+        self.max_tgt_per_block = int(max_tgt_per_block)
         self.nctx_min = max(1, int(nctx_min))
         self.hard_assignment = str(hard_assignment)
         self.arch = str(arch)
@@ -534,7 +536,8 @@ class MINWayMasker(LatentMasker):
         signal: torch.Tensor,
     ) -> torch.Tensor | None:
         """
-        Allocate a per-block target budget under a global sum cap.
+        Allocate a per-block target budget under a global sum cap and an
+        optional per-block ceiling.
 
         Returns
         -------
@@ -558,6 +561,11 @@ class MINWayMasker(LatentMasker):
             weights[0] = 1.0
 
         max_per_block = self.num_patches
+        if self.max_tgt_per_block > 0:
+            max_per_block = min(
+                max_per_block,
+                max(self.ntgt_min_per_block, self.max_tgt_per_block),
+            )
         while extra_budget > 0:
             capacity = max_per_block - counts
             active = capacity > 0
@@ -689,6 +697,11 @@ class MINWayMasker(LatentMasker):
             # argsort descending puts winners first; remaining slots fill with
             # non-winning patches in stable index order (replaces cycling pad).
             K_max_cap = self.num_patches // 2
+            if self.max_tgt_per_block > 0:
+                K_max_cap = min(
+                    K_max_cap,
+                    max(self.ntgt_min_per_block, self.max_tgt_per_block),
+                )
             all_masks = (
                 winners.unsqueeze(-1) == torch.arange(1, M + 1, device=winners.device)
             )  # (B, N, M)
@@ -749,6 +762,8 @@ class MINWayMasker(LatentMasker):
             alloc_counts = self._allocate_block_counts(per_block_mass)
             if alloc_counts is None:
                 K = max(self.ntgt_min_per_block, int(round(per_block_mass.max().item())))
+                if self.max_tgt_per_block > 0:
+                    K = min(K, max(self.ntgt_min_per_block, self.max_tgt_per_block))
                 target_block_counts = torch.full(
                     (M,), K, device=p_tgts.device, dtype=torch.long
                 )
@@ -789,6 +804,7 @@ class MINWayMasker(LatentMasker):
                     f"total_tgt={int(target_block_counts.sum().item())} "
                     f"counts={target_block_counts.tolist()} "
                     f"max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
+                    f"max_tgt_per_block={self.max_tgt_per_block if self.max_tgt_per_block > 0 else 'none'} "
                     f"legacy_K_cap={K_max_cap} nctx={nctx} "
                     f"tgt_counts=[{int(counts.min().item())},{int(counts.max().item())}] "
                     f"ctx_counts=[{int(ctx_counts.min().item())},{int(ctx_counts.max().item())}] "
@@ -804,6 +820,7 @@ class MINWayMasker(LatentMasker):
                     f"total_tgt={int(target_block_counts.sum().item())} "
                     f"counts={target_block_counts.tolist()} "
                     f"max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
+                    f"max_tgt_per_block={self.max_tgt_per_block if self.max_tgt_per_block > 0 else 'none'} "
                     f"nctx={nctx} "
                     f"per_block_mass={per_block_mass_l} "
                     f"ctx_mass_mean={float(p_ctx.sum(dim=-1).mean().item()):.3f}"
@@ -831,6 +848,8 @@ class MINWayMasker(LatentMasker):
             "global_step":  getattr(self, "_global_step", 0),
             "target_block_counts": target_block_counts,
             "target_valid": tgt_valid,
+            "max_total_tgt": self.max_total_tgt,
+            "max_tgt_per_block": self.max_tgt_per_block,
         }
         if self._k_enabled:
             aux["k"] = self._current_k.item()
