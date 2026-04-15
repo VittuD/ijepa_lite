@@ -29,6 +29,10 @@ class MaskOutput:
     aux
     ---
     Open dict for diagnostics and intermediate values.
+    Additional masker-specific semantic metadata may also live here when a
+    rollout needs to preserve richer internal state without changing the main
+    tensor contract yet (for example, winners-first metadata alongside legacy
+    dense target tensors).
     Keys set by RateDist3WayMasker:
       "lambda"  : (B,) tensor — the λ sample used this step
       "p_ign"   : (B, N) tensor — ignore-class probability (detached)

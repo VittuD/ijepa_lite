@@ -668,7 +668,17 @@ class MINWayMasker(LatentMasker):
 
         # ----------------------------------------------------------------
         # Hard indices → (B, M, K)
+        #
+        # Stage 1 note: when the hard path produces exact per-patch winners,
+        # we preserve them in aux for future winners-first execution.  The
+        # dense context_idx / target_idx tensors below remain the active
+        # training contract for now.
         # ----------------------------------------------------------------
+        winners = None
+        role_counts = None
+        target_counts = None
+        nctx_per_sample = None
+        ntgt_total_per_sample = None
         if self.hard_assignment in ("argmax", "gumbel"):
             # Each patch goes to its winning role; no topk budget constraint.
             # Blocks may have variable sizes → pad to max for rectangular tensor.
@@ -678,6 +688,11 @@ class MINWayMasker(LatentMasker):
                 winners = (logits / self.gumbel_tau + g).argmax(dim=-1)
             else:
                 winners = soft.argmax(dim=-1)  # (B, N)  values in [0, M+1]
+
+            role_counts = F.one_hot(winners, num_classes=M + 2).sum(dim=1)
+            target_counts = role_counts[:, 1:M + 1]
+            nctx_per_sample = role_counts[:, 0]
+            ntgt_total_per_sample = target_counts.sum(dim=-1)
 
             # --- Vectorized target block indices ---
             # Build (B, N, M) score tensor: 1.0 where patch won block k, else 0.0.
@@ -791,6 +806,12 @@ class MINWayMasker(LatentMasker):
         }
         if self._k_enabled:
             aux["k"] = self._current_k.item()
+        if winners is not None:
+            aux["winners"] = winners.detach()
+            aux["role_counts"] = role_counts.detach()
+            aux["target_counts"] = target_counts.detach()
+            aux["nctx_per_sample"] = nctx_per_sample.detach()
+            aux["ntgt_total_per_sample"] = ntgt_total_per_sample.detach()
 
         return MaskOutput(
             context_idx=ctx_idx,       # (B, Nctx)
