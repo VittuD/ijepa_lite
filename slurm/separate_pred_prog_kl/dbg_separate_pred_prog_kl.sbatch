@@ -54,7 +54,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.gumbel_tau=0.5 \
       masking.latent.num_tgt_blocks=5 \
       masking.latent.ntgt_min_per_block=1 \
-      +masking.latent.max_total_tgt=160 \
+      +masking.latent.max_total_tgt=112 \
+      +masking.latent.max_tgt_per_block=48 \
       +masking.latent.n_start_tgt=2 \
       +masking.latent.phase_mode=deterministic \
       ~masking.latent.terms.nway_neg_H_marg \
