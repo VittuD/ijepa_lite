@@ -17,6 +17,9 @@ class MaskOutput:
     ------------
     context_idx / target_idx are LongTensors used directly for token
     gathering in the JEPA forward pass.  No gradients flow through them.
+    When a staged rollout needs padded execution without synthetic filler
+    semantics, optional context_valid / target_valid masks can mark which
+    gathered slots are real.
 
     Soft scores  (learned maskers only)
     ------------
@@ -44,6 +47,8 @@ class MaskOutput:
 
     context_idx: torch.Tensor                        # (B, Nctx)            always
     target_idx: torch.Tensor                         # (B, Ntgt)|(B, M, K)  always
+    context_valid: Optional[torch.Tensor] = None     # shape matches context_idx
+    target_valid: Optional[torch.Tensor] = None      # shape matches target_idx
     context_soft: Optional[torch.Tensor] = None      # (B, N)               learned only
     target_soft: Optional[torch.Tensor] = None       # (B, N)               learned only
     aux: dict = field(default_factory=dict)

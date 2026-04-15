@@ -12,6 +12,44 @@ def _gather_pos(pos: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     return pos.gather(1, idx.unsqueeze(-1).expand(-1, -1, d))
 
 
+def _build_src_key_padding_mask(
+    ctx_valid: torch.Tensor | None,
+    tgt_valid: torch.Tensor | None,
+    *,
+    batch_size: int,
+    nctx: int,
+    ntgt: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if ctx_valid is None and tgt_valid is None:
+        return None
+
+    if ctx_valid is None:
+        ctx_valid = torch.ones(batch_size, nctx, device=device, dtype=torch.bool)
+    else:
+        ctx_valid = ctx_valid.to(device=device, dtype=torch.bool)
+        if ctx_valid.shape != (batch_size, nctx):
+            raise ValueError(
+                f"ctx_valid shape {tuple(ctx_valid.shape)} does not match "
+                f"(B, Nctx)=({batch_size}, {nctx})."
+            )
+
+    if tgt_valid is None:
+        tgt_valid = torch.ones(batch_size, ntgt, device=device, dtype=torch.bool)
+    else:
+        tgt_valid = tgt_valid.to(device=device, dtype=torch.bool)
+        if tgt_valid.shape != (batch_size, ntgt):
+            raise ValueError(
+                f"tgt_valid shape {tuple(tgt_valid.shape)} does not match "
+                f"(B, Ntgt)=({batch_size}, {ntgt})."
+            )
+
+    src_key_padding_mask = ~torch.cat([ctx_valid, tgt_valid], dim=1)
+    if not bool(src_key_padding_mask.any().item()):
+        return None
+    return src_key_padding_mask
+
+
 class Predictor(nn.Module):
     """
     Lightweight JEPA-style predictor:
@@ -70,6 +108,8 @@ class Predictor(nn.Module):
         ctx_tokens: torch.Tensor,  # (B, Nctx, D)
         ctx_idx: torch.Tensor,  # (B, Nctx)
         tgt_idx: torch.Tensor,  # (B, K)
+        ctx_valid: torch.Tensor | None = None,  # (B, Nctx)
+        tgt_valid: torch.Tensor | None = None,  # (B, K)
         return_ctx_pred: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         b, nctx, _ = ctx_tokens.shape
@@ -84,7 +124,15 @@ class Predictor(nn.Module):
         tgt = self.mask_token.expand(b, ntgt, -1)  # (B, K, predictor_dim)
 
         seq = torch.cat([ctx + ctx_pos, tgt + tgt_pos], dim=1)
-        out = self.blocks(seq)
+        src_key_padding_mask = _build_src_key_padding_mask(
+            ctx_valid,
+            tgt_valid,
+            batch_size=b,
+            nctx=nctx,
+            ntgt=ntgt,
+            device=seq.device,
+        )
+        out = self.blocks(seq, src_key_padding_mask=src_key_padding_mask)
         out = self.norm(out)
 
         pred_tgt = self.proj_out(out[:, -ntgt:])  # (B, K, D)

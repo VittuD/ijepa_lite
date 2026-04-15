@@ -36,6 +36,71 @@ def _remove_classifier_head(vit: nn.Module) -> None:
         setattr(vit, "fc", nn.Identity())
 
 
+def _build_src_key_padding_mask(
+    valid: Optional[torch.Tensor],
+    *,
+    prepend_cls: bool = False,
+) -> Optional[torch.Tensor]:
+    """
+    Convert a per-token validity mask into PyTorch's src_key_padding_mask
+    convention, where True means "ignore this position".
+    """
+    if valid is None:
+        return None
+
+    valid = valid.to(dtype=torch.bool)
+    if prepend_cls:
+        cls_valid = torch.ones(
+            valid.shape[0], 1, device=valid.device, dtype=torch.bool
+        )
+        valid = torch.cat([cls_valid, valid], dim=1)
+
+    src_key_padding_mask = ~valid
+    if not bool(src_key_padding_mask.any().item()):
+        return None
+    return src_key_padding_mask
+
+
+def _run_vit_layers_with_padding_mask(
+    vit: VisionTransformer,
+    x: torch.Tensor,
+    src_key_padding_mask: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """
+    Torchvision's encoder stack is stored as an nn.Sequential, so the stock
+    `vit.encoder.layers(x)` call cannot thread a padding mask. When no mask is
+    needed we keep the exact legacy path; otherwise we replay the EncoderBlock
+    forward manually with `key_padding_mask`.
+    """
+    if src_key_padding_mask is None:
+        return vit.encoder.layers(x)
+
+    for block in vit.encoder.layers:
+        required = ("ln_1", "self_attention", "dropout", "ln_2", "mlp")
+        if not all(hasattr(block, name) for name in required):
+            raise RuntimeError(
+                "Unsupported torchvision EncoderBlock layout for padding-mask forward."
+            )
+
+        residual = x
+        y = block.ln_1(x)
+        y, _ = block.self_attention(
+            y,
+            y,
+            y,
+            need_weights=False,
+            key_padding_mask=src_key_padding_mask,
+        )
+        y = block.dropout(y)
+        x = residual + y
+
+        y = block.ln_2(x)
+        y = block.mlp(y)
+        x = x + y
+
+    return x
+
+
 class ViTTokens(nn.Module):
     """
     Wrap torchvision ViT to return patch tokens (B, K, D), with optional
@@ -80,6 +145,7 @@ class ViTTokens(nn.Module):
         self,
         x: torch.Tensor,
         keep_idx: Optional[torch.Tensor] = None,
+        keep_valid: Optional[torch.Tensor] = None,
         return_cls: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -89,6 +155,10 @@ class ViTTokens(nn.Module):
                          When provided, only those K patches enter the transformer.
                          When None, all N patches are processed (target encoder /
                          linear probe path).
+            keep_valid : optional boolean mask matching keep_idx (or the full patch
+                         sequence when keep_idx=None). True marks real tokens;
+                         False marks padded slots that should be ignored by
+                         self-attention. When omitted, behaviour is unchanged.
             return_cls : when False (default) return patch tokens only — (B, K, D).
                          when True return (cls_token, patch_tokens):
                            cls_token    : (B, D)   — ViT global summary token
@@ -126,6 +196,22 @@ class ViTTokens(nn.Module):
                 1, keep_idx.unsqueeze(-1).expand(-1, -1, d)
             )  # (B, K, D)
             x = torch.cat([x[:, :1], patch_tokens], dim=1)  # (B, 1+K, D)
+            if keep_valid is not None and keep_valid.shape != keep_idx.shape:
+                raise ValueError(
+                    f"keep_valid shape {tuple(keep_valid.shape)} does not match "
+                    f"keep_idx shape {tuple(keep_idx.shape)}."
+                )
+        elif keep_valid is not None:
+            expected_shape = (b, x.shape[1] - 1)
+            if tuple(keep_valid.shape) != expected_shape:
+                raise ValueError(
+                    f"keep_valid shape {tuple(keep_valid.shape)} does not match "
+                    f"the full patch-token shape {expected_shape}."
+                )
+
+        src_key_padding_mask = _build_src_key_padding_mask(
+            keep_valid, prepend_cls=True
+        )
 
         # ------------------------------------------------------------------
         # Stage 3: transformer blocks + layer norm
@@ -133,7 +219,9 @@ class ViTTokens(nn.Module):
         #   1+K  (masked context encoder path)
         #   1+N  (full target encoder / linear probe path)
         # ------------------------------------------------------------------
-        x = self.vit.encoder.layers(x)
+        x = _run_vit_layers_with_padding_mask(
+            self.vit, x, src_key_padding_mask=src_key_padding_mask
+        )
         x = self.vit.encoder.ln(x)
 
         patch_tokens = x[:, 1:]  # (B, K, D) or (B, N, D) — drop CLS from sequence
