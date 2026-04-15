@@ -89,6 +89,10 @@ def train(
 
     core = unwrap_model(model)
     callbacks.on_run_start(cfg=cfg, state=state, model=core)
+    # Rank-0 does more work in on_run_start (wandb.init, dataset loads, etc.).
+    # Without this barrier the other ranks can reach loss.backward() → DDP
+    # all_reduce before rank 0 has left on_run_start, causing a collective hang.
+    barrier(device)
 
     # Unwrap once here; DDP wrapping doesn't change between epochs.
     # (The variable is reused inside the loop for EMA/metrics without re-wrapping.)
