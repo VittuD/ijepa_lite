@@ -36,6 +36,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 nvidia-smi -L
+df -h /dev/shm
 
 mkdir -p sbatch_logs/separate_pred_prog_kl
 
