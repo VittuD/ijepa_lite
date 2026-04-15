@@ -257,7 +257,9 @@ class MIRateMasker(LatentMasker):
         # Write logs into aux for metrics.py to pick up
         mask_output.aux.update(logs)
 
-        return reconstruction_loss + total
+        # owns_loss=False contract: return only the additive masker term.
+        # IJEPAModel adds reconstruction_loss separately.
+        return total
 
 
 # ======================================================================
@@ -867,4 +869,6 @@ class MINWayMasker(LatentMasker):
 
         mask_output.aux.update(logs)
 
-        return reconstruction_loss + total
+        # owns_loss=False contract: return only the additive masker term.
+        # IJEPAModel adds reconstruction_loss separately.
+        return total
