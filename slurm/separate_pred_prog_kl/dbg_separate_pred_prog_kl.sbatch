@@ -60,6 +60,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +model.predict_blocks_jointly=false \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
+      data.num_workers=4 \
+      data.prefetch_factor=2 \
       train.epochs=1000 \
       train.viz_enabled=true \
       train.log_every=1 \
