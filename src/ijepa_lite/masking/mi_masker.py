@@ -529,6 +529,78 @@ class MINWayMasker(LatentMasker):
     # Weight sampling
     # ------------------------------------------------------------------
 
+    def _allocate_block_counts(
+        self,
+        signal: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """
+        Allocate a per-block target budget under a global sum cap.
+
+        Returns
+        -------
+        counts : (M,) LongTensor when max_total_tgt > 0, otherwise None.
+        """
+        if self.max_total_tgt <= 0:
+            return None
+
+        device = signal.device
+        counts = torch.full(
+            (self.M,), self.ntgt_min_per_block, device=device, dtype=torch.long
+        )
+        min_total = int(counts.sum().item())
+        total_budget = max(min_total, self.max_total_tgt)
+        extra_budget = total_budget - min_total
+        if extra_budget <= 0:
+            return counts
+
+        weights = signal.float().clamp(min=0.0)
+        if float(weights.sum().item()) <= 0.0:
+            weights[0] = 1.0
+
+        max_per_block = self.num_patches
+        while extra_budget > 0:
+            capacity = max_per_block - counts
+            active = capacity > 0
+            if not bool(active.any()):
+                break
+
+            active_weights = weights.clone()
+            active_weights[~active] = 0.0
+            if float(active_weights.sum().item()) <= 0.0:
+                active_weights = active.float()
+
+            raw_extra = active_weights * (float(extra_budget) / float(active_weights.sum().item()))
+            extra = torch.floor(raw_extra).to(torch.long)
+            extra = torch.minimum(extra, capacity)
+
+            added = int(extra.sum().item())
+            if added == 0:
+                order = torch.argsort(active_weights, descending=True)
+                for idx in order.tolist():
+                    if capacity[idx] > 0:
+                        counts[idx] += 1
+                        extra_budget -= 1
+                        break
+                continue
+
+            counts += extra
+            extra_budget -= added
+
+            if extra_budget <= 0:
+                break
+
+            frac = raw_extra - torch.floor(raw_extra)
+            frac[capacity <= extra] = -1.0
+            order = torch.argsort(frac, descending=True)
+            for idx in order.tolist():
+                if extra_budget <= 0:
+                    break
+                if counts[idx] < max_per_block:
+                    counts[idx] += 1
+                    extra_budget -= 1
+
+        return counts
+
     def _sample_weights(self, device: torch.device) -> dict[str, float]:
         p = max(self._progress.item(), 1e-3)
         weights: dict[str, float] = {}
@@ -617,8 +689,6 @@ class MINWayMasker(LatentMasker):
             # argsort descending puts winners first; remaining slots fill with
             # non-winning patches in stable index order (replaces cycling pad).
             K_max_cap = self.num_patches // 2
-            if self.max_total_tgt > 0:
-                K_max_cap = min(K_max_cap, max(self.ntgt_min_per_block, self.max_total_tgt // M))
             all_masks = (
                 winners.unsqueeze(-1) == torch.arange(1, M + 1, device=winners.device)
             )  # (B, N, M)
@@ -630,10 +700,36 @@ class MINWayMasker(LatentMasker):
                 # Replace scores with soft probabilities for under-populated blocks
                 fb_b, fb_k = needs_fallback.nonzero(as_tuple=True)
                 scores[fb_b, :, fb_k] = p_tgts[fb_b, :, fb_k]
+            alloc_counts = self._allocate_block_counts(counts.float().mean(dim=0))
+            if alloc_counts is None:
+                K = max(self.ntgt_min_per_block, min(K_max_cap, int(counts.max().item())))
+                target_block_counts = torch.full(
+                    (M,), K, device=scores.device, dtype=torch.long
+                )
+            else:
+                target_block_counts = alloc_counts
+                K = int(target_block_counts.max().item())
 
-            K = max(self.ntgt_min_per_block, min(K_max_cap, int(counts.max().item())))
-            # argsort along patch dim → (B, N, M); slice top K → (B, K, M)
-            tgt_idx = scores.argsort(dim=1, descending=True)[:, :K, :].permute(0, 2, 1)
+            sorted_idx = scores.argsort(dim=1, descending=True)  # (B, N, M)
+            tgt_idx_list = []
+            tgt_valid_list = []
+            tgt_flat_parts = []
+            for i in range(M):
+                k_i = int(target_block_counts[i].item())
+                idx_i = sorted_idx[:, :k_i, i]  # (B, k_i)
+                tgt_flat_parts.append(idx_i)
+                if k_i < K:
+                    pad_val = idx_i[:, -1:] if k_i > 0 else torch.zeros(
+                        B, 1, device=idx_i.device, dtype=idx_i.dtype
+                    )
+                    idx_i = torch.cat([idx_i, pad_val.expand(-1, K - k_i)], dim=1)
+                tgt_idx_list.append(idx_i)
+                valid_i = torch.zeros(K, device=scores.device, dtype=torch.bool)
+                valid_i[:k_i] = True
+                tgt_valid_list.append(valid_i)
+            tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
+            tgt_valid = torch.stack(tgt_valid_list, dim=0)  # (M, K)
+            tgt_flat = torch.cat(tgt_flat_parts, dim=1)
 
             # --- Vectorized context indices ---
             ctx_scores = (winners == 0).float()  # (B, N)
@@ -641,7 +737,6 @@ class MINWayMasker(LatentMasker):
             needs_ctx_fallback = ctx_counts < self.nctx_min
             if needs_ctx_fallback.any():
                 # For fallback samples: use p_ctx with target positions zeroed out
-                tgt_flat = tgt_idx.reshape(B, -1)                        # (B, M*K)
                 p_ctx_fb = p_ctx[needs_ctx_fallback].clone()              # (n_fb, N)
                 p_ctx_fb.scatter_(1, tgt_flat[needs_ctx_fallback], 0.0)
                 ctx_scores[needs_ctx_fallback] = p_ctx_fb
@@ -651,20 +746,38 @@ class MINWayMasker(LatentMasker):
         else:
             # topk (default): fixed K per block from soft mass
             per_block_mass = p_tgts.sum(dim=1).mean(dim=0)  # (M,)
-            K = max(self.ntgt_min_per_block,
-                    int(round(per_block_mass.max().item())))
-            if self.max_total_tgt > 0:
-                K = min(K, max(self.ntgt_min_per_block, self.max_total_tgt // M))
+            alloc_counts = self._allocate_block_counts(per_block_mass)
+            if alloc_counts is None:
+                K = max(self.ntgt_min_per_block, int(round(per_block_mass.max().item())))
+                target_block_counts = torch.full(
+                    (M,), K, device=p_tgts.device, dtype=torch.long
+                )
+            else:
+                target_block_counts = alloc_counts
+                K = int(target_block_counts.max().item())
 
             tgt_idx_list = []
+            tgt_valid_list = []
+            tgt_flat_parts = []
             for k in range(M):
-                _, idx_k = torch.topk(p_tgts[..., k], K, dim=-1, sorted=False)
+                k_i = int(target_block_counts[k].item())
+                _, idx_k = torch.topk(p_tgts[..., k], k_i, dim=-1, sorted=False)
+                tgt_flat_parts.append(idx_k)
+                if k_i < K:
+                    pad_val = idx_k[:, -1:] if k_i > 0 else torch.zeros(
+                        B, 1, device=idx_k.device, dtype=idx_k.dtype
+                    )
+                    idx_k = torch.cat([idx_k, pad_val.expand(-1, K - k_i)], dim=1)
                 tgt_idx_list.append(idx_k)
+                valid_k = torch.zeros(K, device=p_tgts.device, dtype=torch.bool)
+                valid_k[:k_i] = True
+                tgt_valid_list.append(valid_k)
             tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
+            tgt_valid = torch.stack(tgt_valid_list, dim=0)  # (M, K)
+            tgt_flat = torch.cat(tgt_flat_parts, dim=1)
 
             # Context: topk on p_ctx after zeroing all target positions
             nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
-            tgt_flat = tgt_idx.reshape(B, -1)  # (B, M*K)
             p_ctx_masked = p_ctx.clone().scatter_(1, tgt_flat, 0.0)
             _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
 
@@ -673,8 +786,10 @@ class MINWayMasker(LatentMasker):
             if self.hard_assignment in ("argmax", "gumbel"):
                 extra = (
                     f"hard={self.hard_assignment} n_active={n_active} K={K} "
-                    f"total_tgt={M * K} max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
-                    f"K_cap={K_max_cap} nctx={nctx} "
+                    f"total_tgt={int(target_block_counts.sum().item())} "
+                    f"counts={target_block_counts.tolist()} "
+                    f"max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
+                    f"legacy_K_cap={K_max_cap} nctx={nctx} "
                     f"tgt_counts=[{int(counts.min().item())},{int(counts.max().item())}] "
                     f"ctx_counts=[{int(ctx_counts.min().item())},{int(ctx_counts.max().item())}] "
                     f"fb_blocks={int(needs_fallback.sum().item())} "
@@ -686,7 +801,8 @@ class MINWayMasker(LatentMasker):
                 ]
                 extra = (
                     f"hard={self.hard_assignment} n_active={n_active} K={K} "
-                    f"total_tgt={M * K} "
+                    f"total_tgt={int(target_block_counts.sum().item())} "
+                    f"counts={target_block_counts.tolist()} "
                     f"max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
                     f"nctx={nctx} "
                     f"per_block_mass={per_block_mass_l} "
@@ -713,6 +829,8 @@ class MINWayMasker(LatentMasker):
             "ema_full":     ema_full,
             "n_active_tgt": n_active,
             "global_step":  getattr(self, "_global_step", 0),
+            "target_block_counts": target_block_counts,
+            "target_valid": tgt_valid,
         }
         if self._k_enabled:
             aux["k"] = self._current_k.item()

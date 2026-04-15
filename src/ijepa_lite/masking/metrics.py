@@ -77,10 +77,19 @@ def mask_diagnostics(
 
     ctx_idx = mask_output.context_idx   # (B, Nctx)
     tgt_idx = mask_output.target_idx    # (B, Ntgt) or (B, M, K)
+    tgt_counts = mask_output.aux.get("target_block_counts")
 
     nctx = ctx_idx.shape[1]
-    tgt_flat = tgt_idx.reshape(tgt_idx.shape[0], -1)
-    ntgt_total = tgt_flat.shape[1]
+    if tgt_idx.dim() == 3 and tgt_counts is not None:
+        counts = [int(x) for x in tgt_counts.detach().cpu().tolist()]
+        tgt_flat = torch.cat(
+            [tgt_idx[:, i, :counts[i]] for i in range(tgt_idx.shape[1]) if counts[i] > 0],
+            dim=1,
+        )
+        ntgt_total = sum(counts)
+    else:
+        tgt_flat = tgt_idx.reshape(tgt_idx.shape[0], -1)
+        ntgt_total = tgt_flat.shape[1]
     B = tgt_flat.shape[0]
     nblocks = float(tgt_idx.shape[1]) if tgt_idx.dim() == 3 else 1.0
 
