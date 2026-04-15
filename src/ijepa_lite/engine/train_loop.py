@@ -279,13 +279,18 @@ def train(
                 else:
                     masker_lr = lr
 
-                extra = token_metrics(out["pred"], out["target"])
+                extra = token_metrics(
+                    out["pred"],
+                    out["target"],
+                    valid=out.get("pred_valid"),
+                )
 
                 if out.get("ctx_tokens_all") is not None:
                     extra.update(
                         encoder_agreement(
                             out["ctx_tokens_all"],
                             out["tgt_tokens_all"],
+                            valid=out.get("ctx_valid"),
                         )
                     )
 

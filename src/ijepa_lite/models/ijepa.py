@@ -11,7 +11,7 @@ from ijepa_lite.masking.base import CollateMasker, LatentMasker, MaskOutput
 from ijepa_lite.masking.compressor import TokenCompressor
 from ijepa_lite.masking.metrics import mask_diagnostics, winners_fragmentation_probe
 from ijepa_lite.models.ema import ema_update
-from ijepa_lite.utils.dist import all_reduce_sum
+from ijepa_lite.utils.dist import all_reduce_sum, get_world_size, is_distributed
 
 
 class IJEPAModel(nn.Module):
@@ -209,22 +209,18 @@ class IJEPAModel(nn.Module):
             tgt_at_ctx = tgt_tokens_all.gather(
                 1, ctx_idx.unsqueeze(-1).expand(-1, -1, d)
             ).detach()
-            if ctx_valid is not None:
-                ctx_mask = ctx_valid.unsqueeze(-1).to(dtype=ctx_tokens_all.dtype)
-                ctx_tokens_all = ctx_tokens_all * ctx_mask
-                tgt_at_ctx = tgt_at_ctx * ctx_mask
-
         # ------------------------------------------------------------------
         # Step 4: Predictor + loss (single-block or multi-block)
         # ------------------------------------------------------------------
+        pred_valid: Optional[torch.Tensor] = None
         if tgt_idx.dim() == 2:
-            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx = (
+            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx, pred_valid = (
                 self._forward_single_block(
                     ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d
                 )
             )
         elif tgt_idx.dim() == 3:
-            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx = (
+            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx, pred_valid = (
                 self._forward_multi_block(
                     ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d,
                     ctx_valid=ctx_valid,
@@ -312,9 +308,13 @@ class IJEPAModel(nn.Module):
             "winners_probe": winners_probe,
             "ctx_loss": ctx_loss_val,
         }
+        if pred_valid is not None:
+            out["pred_valid"] = pred_valid.detach()
         if compute_agreement:
             out["ctx_tokens_all"] = ctx_tokens_all
             out["tgt_tokens_all"] = tgt_at_ctx
+            if ctx_valid is not None:
+                out["ctx_valid"] = ctx_valid.detach()
         return out
 
     # ------------------------------------------------------------------
@@ -423,7 +423,7 @@ class IJEPAModel(nn.Module):
 
         patch_loss = self.loss_fn(pred, tgt_tokens, reduction="none")  # (B, Ntgt)
         loss = patch_loss.mean()
-        return loss, pred, tgt_tokens, patch_loss, pred_ctx
+        return loss, pred, tgt_tokens, patch_loss, pred_ctx, None
 
     def _masked_token_mean(
         self,
@@ -443,7 +443,8 @@ class IJEPAModel(nn.Module):
         patch_loss = torch.where(valid, patch_loss, patch_loss.new_zeros(()))
         valid_count = valid.to(dtype=patch_loss.dtype).sum()
         valid_count = all_reduce_sum(valid_count)
-        loss = patch_loss.sum() / valid_count.clamp(min=1.0)
+        scale = float(get_world_size()) if is_distributed() else 1.0
+        loss = patch_loss.sum() * scale / valid_count.clamp(min=1.0)
         return loss, patch_loss
 
     def _flatten_multi_block_target_idx(
@@ -536,7 +537,7 @@ class IJEPAModel(nn.Module):
             patch_loss_cat = torch.cat(ploss_list, dim=1) # (B, M*K)
             loss = patch_loss_cat.mean()
             # ctx_loss not supported with separate prediction
-            return loss, pred, tgt_tokens, patch_loss_cat, None
+            return loss, pred, tgt_tokens, patch_loss_cat, None, None
 
         # -- Joint prediction (default): all blocks concatenated ---------------
         tgt_idx_cat, tgt_valid_cat = self._flatten_multi_block_targets(
@@ -579,4 +580,4 @@ class IJEPAModel(nn.Module):
                 pred[:, i, :k_i] = pred_cat[:, offset: offset + k_i]
                 tgt_tokens[:, i, :k_i] = tgt_tokens_cat[:, offset: offset + k_i]
                 offset += k_i
-        return loss, pred, tgt_tokens, patch_loss_cat, pred_ctx
+        return loss, pred, tgt_tokens, patch_loss_cat, pred_ctx, tgt_valid_cat

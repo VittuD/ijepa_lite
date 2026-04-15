@@ -6,8 +6,60 @@ import torch
 import torch.nn.functional as F
 
 
+def _flatten_valid_tokens(
+    x: torch.Tensor,
+    valid: torch.Tensor | None,
+) -> torch.Tensor:
+    x_flat = x.detach().float().reshape(-1, x.shape[-1])
+    if valid is None:
+        return x_flat
+
+    valid = valid.to(dtype=torch.bool)
+    if tuple(valid.shape) != tuple(x.shape[:-1]):
+        raise ValueError(
+            f"valid shape {tuple(valid.shape)} does not match token tensor shape "
+            f"{tuple(x.shape[:-1])}."
+        )
+    valid_flat = valid.reshape(-1)
+    if not bool(valid_flat.any().item()):
+        return x_flat.new_zeros((0, x.shape[-1]))
+    return x_flat[valid_flat]
+
+
+def _masked_spatial_std(
+    x: torch.Tensor,
+    valid: torch.Tensor | None,
+) -> torch.Tensor:
+    x = x.detach().float()
+    if valid is None:
+        return x.std(dim=1, correction=0).mean()
+
+    valid = valid.to(device=x.device, dtype=torch.bool)
+    if tuple(valid.shape) != tuple(x.shape[:-1]):
+        raise ValueError(
+            f"valid shape {tuple(valid.shape)} does not match token tensor shape "
+            f"{tuple(x.shape[:-1])}."
+        )
+
+    mask = valid.unsqueeze(-1).to(dtype=x.dtype)
+    counts = mask.sum(dim=1)  # (B, 1)
+    nonzero = counts.squeeze(-1) > 0
+    if not bool(nonzero.any().item()):
+        return x.new_zeros(())
+
+    mean = (x * mask).sum(dim=1) / counts.clamp(min=1.0)
+    centered = (x - mean.unsqueeze(1)) * mask
+    var = centered.pow(2).sum(dim=1) / counts.clamp(min=1.0)
+    std = var.sqrt().mean(dim=-1)
+    return std[nonzero].mean()
+
+
 @torch.no_grad()
-def token_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
+def token_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    valid: torch.Tensor | None = None,
+) -> Dict[str, float]:
     """
     Predictor output vs target encoder output.
 
@@ -20,8 +72,19 @@ def token_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
     It does NOT measure whether encoder representations are semantically
     meaningful. Use encoder_agreement() for that.
     """
-    p = pred.detach().float().reshape(-1, pred.shape[-1])
-    t = target.detach().float().reshape(-1, target.shape[-1])
+    p = _flatten_valid_tokens(pred, valid)
+    t = _flatten_valid_tokens(target, valid)
+    if p.numel() == 0 or t.numel() == 0:
+        return {
+            "train/pred_tgt_cos_sim": 0.0,
+            "train/mse_raw": 0.0,
+            "train/pred_norm": 0.0,
+            "train/tgt_norm": 0.0,
+            "train/pred_std": 0.0,
+            "train/tgt_std": 0.0,
+            "train/pred_var": 0.0,
+            "train/tgt_var": 0.0,
+        }
 
     cos = F.cosine_similarity(
         F.normalize(p, dim=-1), F.normalize(t, dim=-1), dim=-1
@@ -53,6 +116,7 @@ def token_metrics(pred: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
 def encoder_agreement(
     ctx_tokens_all: torch.Tensor,  # (B, Nctx, D) context encoder output at ctx positions
     tgt_tokens_all: torch.Tensor,  # (B, Nctx, D) target encoder output at same positions
+    valid: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     """
     Cosine similarity between context and target encoder at the SAME patch
@@ -82,13 +146,25 @@ def encoder_agreement(
     c = F.normalize(ctx_tokens_all.detach().float(), dim=-1)  # (B, Nctx, D)
     t = F.normalize(tgt_tokens_all.detach().float(), dim=-1)  # (B, Nctx, D)
 
-    # Per-patch cosine similarity averaged over B and Nctx
-    cos = (c * t).sum(dim=-1).mean()
+    cos_map = (c * t).sum(dim=-1)  # (B, Nctx)
+    if valid is not None:
+        valid = valid.to(device=cos_map.device, dtype=torch.bool)
+        if tuple(valid.shape) != tuple(cos_map.shape):
+            raise ValueError(
+                f"valid shape {tuple(valid.shape)} does not match agreement shape "
+                f"{tuple(cos_map.shape)}."
+            )
+        if bool(valid.any().item()):
+            cos = cos_map[valid].mean()
+        else:
+            cos = cos_map.new_zeros(())
+    else:
+        cos = cos_map.mean()
 
     # Spatial diversity: std over patch positions — correction=0 avoids
     # undefined behaviour when Nctx=1 (no change in behaviour when Nctx>1)
-    ctx_spatial_std = ctx_tokens_all.detach().float().std(dim=1, correction=0).mean()
-    tgt_spatial_std = tgt_tokens_all.detach().float().std(dim=1, correction=0).mean()
+    ctx_spatial_std = _masked_spatial_std(ctx_tokens_all, valid)
+    tgt_spatial_std = _masked_spatial_std(tgt_tokens_all, valid)
 
     return {
         "train/encoder_agreement": float(cos.item()),
