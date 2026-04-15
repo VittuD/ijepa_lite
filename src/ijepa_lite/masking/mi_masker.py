@@ -303,7 +303,7 @@ class MINWayMasker(LatentMasker):
         terms: dict,
         num_tgt_blocks: int = 4,
         ntgt_min_per_block: int = 4,
-        max_tgt_per_block: int = 0,
+        max_total_tgt: int = 0,
         nctx_min: int = 1,
         hard_assignment: str = "topk",
         arch: str = "transformer",
@@ -331,7 +331,7 @@ class MINWayMasker(LatentMasker):
         self.num_patches = int(num_patches)
         self.M = int(num_tgt_blocks)
         self.ntgt_min_per_block = max(1, int(ntgt_min_per_block))
-        self.max_tgt_per_block = int(max_tgt_per_block)
+        self.max_total_tgt = int(max_total_tgt)
         self.nctx_min = max(1, int(nctx_min))
         self.hard_assignment = str(hard_assignment)
         self.arch = str(arch)
@@ -617,8 +617,8 @@ class MINWayMasker(LatentMasker):
             # argsort descending puts winners first; remaining slots fill with
             # non-winning patches in stable index order (replaces cycling pad).
             K_max_cap = self.num_patches // 2
-            if self.max_tgt_per_block > 0:
-                K_max_cap = min(K_max_cap, self.max_tgt_per_block)
+            if self.max_total_tgt > 0:
+                K_max_cap = min(K_max_cap, max(self.ntgt_min_per_block, self.max_total_tgt // M))
             all_masks = (
                 winners.unsqueeze(-1) == torch.arange(1, M + 1, device=winners.device)
             )  # (B, N, M)
@@ -653,8 +653,8 @@ class MINWayMasker(LatentMasker):
             per_block_mass = p_tgts.sum(dim=1).mean(dim=0)  # (M,)
             K = max(self.ntgt_min_per_block,
                     int(round(per_block_mass.max().item())))
-            if self.max_tgt_per_block > 0:
-                K = min(K, self.max_tgt_per_block)
+            if self.max_total_tgt > 0:
+                K = min(K, max(self.ntgt_min_per_block, self.max_total_tgt // M))
 
             tgt_idx_list = []
             for k in range(M):
@@ -672,7 +672,9 @@ class MINWayMasker(LatentMasker):
         if _ddp_debug_enabled(step):
             if self.hard_assignment in ("argmax", "gumbel"):
                 extra = (
-                    f"hard={self.hard_assignment} n_active={n_active} K={K} K_cap={K_max_cap} nctx={nctx} "
+                    f"hard={self.hard_assignment} n_active={n_active} K={K} "
+                    f"total_tgt={M * K} max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
+                    f"K_cap={K_max_cap} nctx={nctx} "
                     f"tgt_counts=[{int(counts.min().item())},{int(counts.max().item())}] "
                     f"ctx_counts=[{int(ctx_counts.min().item())},{int(ctx_counts.max().item())}] "
                     f"fb_blocks={int(needs_fallback.sum().item())} "
@@ -684,7 +686,8 @@ class MINWayMasker(LatentMasker):
                 ]
                 extra = (
                     f"hard={self.hard_assignment} n_active={n_active} K={K} "
-                    f"K_cap={self.max_tgt_per_block if self.max_tgt_per_block > 0 else 'none'} "
+                    f"total_tgt={M * K} "
+                    f"max_total_tgt={self.max_total_tgt if self.max_total_tgt > 0 else 'none'} "
                     f"nctx={nctx} "
                     f"per_block_mass={per_block_mass_l} "
                     f"ctx_mass_mean={float(p_ctx.sum(dim=-1).mean().item()):.3f}"
