@@ -11,6 +11,7 @@ from ijepa_lite.masking.base import CollateMasker, LatentMasker, MaskOutput
 from ijepa_lite.masking.compressor import TokenCompressor
 from ijepa_lite.masking.metrics import mask_diagnostics, winners_fragmentation_probe
 from ijepa_lite.models.ema import ema_update
+from ijepa_lite.utils.dist import all_reduce_sum
 
 
 class IJEPAModel(nn.Module):
@@ -172,12 +173,16 @@ class IJEPAModel(nn.Module):
 
         ctx_idx = mask_output.context_idx  # (B, Nctx)
         tgt_idx = mask_output.target_idx   # (B, Ntgt) or (B, M, K)
+        ctx_valid = mask_output.context_valid
+        tgt_valid = mask_output.target_valid
         target_block_counts = mask_output.aux.get("target_block_counts")
 
         # ------------------------------------------------------------------
         # Step 2: Context encoder (masked, gradients flow)
         # ------------------------------------------------------------------
-        ctx_tokens = self.context_encoder(images, keep_idx=ctx_idx)  # (B, Nctx, D)
+        ctx_tokens = self.context_encoder(
+            images, keep_idx=ctx_idx, keep_valid=ctx_valid
+        )  # (B, Nctx, D)
         b = images.shape[0]
         d = ctx_tokens.shape[-1]
 
@@ -204,6 +209,10 @@ class IJEPAModel(nn.Module):
             tgt_at_ctx = tgt_tokens_all.gather(
                 1, ctx_idx.unsqueeze(-1).expand(-1, -1, d)
             ).detach()
+            if ctx_valid is not None:
+                ctx_mask = ctx_valid.unsqueeze(-1).to(dtype=ctx_tokens_all.dtype)
+                ctx_tokens_all = ctx_tokens_all * ctx_mask
+                tgt_at_ctx = tgt_at_ctx * ctx_mask
 
         # ------------------------------------------------------------------
         # Step 4: Predictor + loss (single-block or multi-block)
@@ -218,6 +227,8 @@ class IJEPAModel(nn.Module):
             reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx = (
                 self._forward_multi_block(
                     ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d,
+                    ctx_valid=ctx_valid,
+                    target_valid=tgt_valid,
                     target_block_counts=target_block_counts,
                 )
             )
@@ -414,6 +425,27 @@ class IJEPAModel(nn.Module):
         loss = patch_loss.mean()
         return loss, pred, tgt_tokens, patch_loss, pred_ctx
 
+    def _masked_token_mean(
+        self,
+        patch_loss: torch.Tensor,
+        valid: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if valid is None:
+            return patch_loss.mean(), patch_loss
+
+        valid = valid.to(device=patch_loss.device, dtype=torch.bool)
+        if valid.shape != patch_loss.shape:
+            raise ValueError(
+                f"valid shape {tuple(valid.shape)} does not match "
+                f"patch_loss shape {tuple(patch_loss.shape)}."
+            )
+
+        patch_loss = torch.where(valid, patch_loss, patch_loss.new_zeros(()))
+        valid_count = valid.to(dtype=patch_loss.dtype).sum()
+        valid_count = all_reduce_sum(valid_count)
+        loss = patch_loss.sum() / valid_count.clamp(min=1.0)
+        return loss, patch_loss
+
     def _flatten_multi_block_target_idx(
         self,
         tgt_idx: torch.Tensor,        # (B, M, K)
@@ -429,6 +461,31 @@ class IJEPAModel(nn.Module):
             raise ValueError("Expected at least one valid target block when flattening targets.")
         return torch.cat(parts, dim=1)
 
+    def _flatten_multi_block_targets(
+        self,
+        tgt_idx: torch.Tensor,        # (B, M, K)
+        batch_size: int,
+        target_block_counts: torch.Tensor | None = None,
+        target_valid: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if target_valid is not None:
+            if target_valid.shape != tgt_idx.shape:
+                raise ValueError(
+                    f"target_valid shape {tuple(target_valid.shape)} does not match "
+                    f"target_idx shape {tuple(tgt_idx.shape)}."
+                )
+            idx_flat = tgt_idx.reshape(batch_size, -1)
+            valid_flat = target_valid.reshape(batch_size, -1).to(dtype=torch.bool)
+            order = torch.argsort((~valid_flat).to(torch.int64), dim=1, stable=True)
+            idx_flat = idx_flat.gather(1, order)
+            valid_flat = valid_flat.gather(1, order)
+            width = max(1, int(valid_flat.sum(dim=1).max().item()))
+            return idx_flat[:, :width], valid_flat[:, :width]
+
+        return self._flatten_multi_block_target_idx(
+            tgt_idx, batch_size, target_block_counts
+        ), None
+
     def _forward_multi_block(
         self,
         ctx_tokens: torch.Tensor,     # (B, Nctx, D)
@@ -437,6 +494,8 @@ class IJEPAModel(nn.Module):
         tgt_tokens_all: torch.Tensor, # (B, N, D)
         b: int,
         d: int,
+        ctx_valid: torch.Tensor | None = None,
+        target_valid: torch.Tensor | None = None,
         target_block_counts: torch.Tensor | None = None,
     ):
         m = tgt_idx.shape[1]
@@ -460,7 +519,7 @@ class IJEPAModel(nn.Module):
                     1, block_idx.unsqueeze(-1).expand(-1, -1, d)
                 )  # (B, K_i, D)
                 block_pred = self.predictor(
-                    ctx_tokens, ctx_idx=ctx_idx, tgt_idx=block_idx
+                    ctx_tokens, ctx_idx=ctx_idx, tgt_idx=block_idx, ctx_valid=ctx_valid
                 )  # (B, K_i, D)
                 block_ploss = self.loss_fn(block_pred, block_tgt, reduction="none")  # (B, K_i)
 
@@ -480,8 +539,8 @@ class IJEPAModel(nn.Module):
             return loss, pred, tgt_tokens, patch_loss_cat, None
 
         # -- Joint prediction (default): all blocks concatenated ---------------
-        tgt_idx_cat = self._flatten_multi_block_target_idx(
-            tgt_idx, b, target_block_counts
+        tgt_idx_cat, tgt_valid_cat = self._flatten_multi_block_targets(
+            tgt_idx, b, target_block_counts, target_valid=target_valid
         )
 
         tgt_tokens_cat = tgt_tokens_all.gather(
@@ -490,6 +549,8 @@ class IJEPAModel(nn.Module):
 
         result = self.predictor(
             ctx_tokens, ctx_idx=ctx_idx, tgt_idx=tgt_idx_cat,
+            ctx_valid=ctx_valid,
+            tgt_valid=tgt_valid_cat,
             return_ctx_pred=self.ctx_loss_enabled,
         )
         if self.ctx_loss_enabled:
@@ -498,9 +559,15 @@ class IJEPAModel(nn.Module):
             pred_cat, pred_ctx = result, None
 
         patch_loss_cat = self.loss_fn(pred_cat, tgt_tokens_cat, reduction="none")  # (B, sum(K_i))
+        loss, patch_loss_cat = self._masked_token_mean(patch_loss_cat, tgt_valid_cat)
         if counts is None:
-            pred = pred_cat.reshape(b, m, k, d)  # (B, M, K, D)
-            tgt_tokens = tgt_tokens_cat.reshape(b, m, k, d)  # (B, M, K, D)
+            if tgt_valid_cat is not None:
+                mask = tgt_valid_cat.unsqueeze(-1).to(dtype=pred_cat.dtype)
+                pred = pred_cat * mask
+                tgt_tokens = tgt_tokens_cat * mask
+            else:
+                pred = pred_cat.reshape(b, m, k, d)  # (B, M, K, D)
+                tgt_tokens = tgt_tokens_cat.reshape(b, m, k, d)  # (B, M, K, D)
         else:
             pred = pred_cat.new_zeros((b, m, k, d))
             tgt_tokens = tgt_tokens_cat.new_zeros((b, m, k, d))
@@ -512,5 +579,4 @@ class IJEPAModel(nn.Module):
                 pred[:, i, :k_i] = pred_cat[:, offset: offset + k_i]
                 tgt_tokens[:, i, :k_i] = tgt_tokens_cat[:, offset: offset + k_i]
                 offset += k_i
-        loss = patch_loss_cat.mean()
         return loss, pred, tgt_tokens, patch_loss_cat, pred_ctx

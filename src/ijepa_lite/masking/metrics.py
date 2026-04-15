@@ -9,6 +9,24 @@ import torch
 from ijepa_lite.masking.base import MaskOutput
 
 
+def _compact_valid_targets(
+    tgt_idx: torch.Tensor,
+    target_valid: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Flatten (B, M, K) target tensors into a compact block-major (B, K_joint)
+    view with valid entries first and padded entries moved to the tail.
+    """
+    B = tgt_idx.shape[0]
+    idx_flat = tgt_idx.reshape(B, -1)
+    valid_flat = target_valid.reshape(B, -1).to(dtype=torch.bool)
+    order = torch.argsort((~valid_flat).to(torch.int64), dim=1, stable=True)
+    idx_flat = idx_flat.gather(1, order)
+    valid_flat = valid_flat.gather(1, order)
+    width = max(1, int(valid_flat.sum(dim=1).max().item()))
+    return idx_flat[:, :width], valid_flat[:, :width]
+
+
 @torch.no_grad()
 def mask_diagnostics(
     mask_output: MaskOutput,
@@ -78,19 +96,40 @@ def mask_diagnostics(
 
     ctx_idx = mask_output.context_idx   # (B, Nctx)
     tgt_idx = mask_output.target_idx    # (B, Ntgt) or (B, M, K)
+    ctx_valid = mask_output.context_valid
+    tgt_valid = mask_output.target_valid
     tgt_counts = mask_output.aux.get("target_block_counts")
 
-    nctx = ctx_idx.shape[1]
-    if tgt_idx.dim() == 3 and tgt_counts is not None:
+    if ctx_valid is not None:
+        ctx_valid = ctx_valid.to(dtype=torch.bool)
+        nctx = float(ctx_valid.sum(dim=1).float().mean().item())
+    else:
+        nctx = float(ctx_idx.shape[1])
+
+    counts = None
+    counts_per_sample = None
+    if tgt_valid is not None:
+        tgt_valid = tgt_valid.to(dtype=torch.bool)
+        if tgt_idx.dim() == 3:
+            counts_per_sample = tgt_valid.sum(dim=-1)  # (B, M)
+            tgt_flat, tgt_flat_valid = _compact_valid_targets(tgt_idx, tgt_valid)
+        else:
+            counts_per_sample = tgt_valid.sum(dim=-1, keepdim=True)  # (B, 1)
+            tgt_flat = tgt_idx.reshape(tgt_idx.shape[0], -1)
+            tgt_flat_valid = tgt_valid.reshape(tgt_idx.shape[0], -1)
+        ntgt_total = float(counts_per_sample.sum(dim=1).float().mean().item())
+    elif tgt_idx.dim() == 3 and tgt_counts is not None:
         counts = [int(x) for x in tgt_counts.detach().cpu().tolist()]
         tgt_flat = torch.cat(
             [tgt_idx[:, i, :counts[i]] for i in range(tgt_idx.shape[1]) if counts[i] > 0],
             dim=1,
         )
-        ntgt_total = sum(counts)
+        tgt_flat_valid = torch.ones_like(tgt_flat, dtype=torch.bool)
+        ntgt_total = float(sum(counts))
     else:
         tgt_flat = tgt_idx.reshape(tgt_idx.shape[0], -1)
-        ntgt_total = tgt_flat.shape[1]
+        tgt_flat_valid = torch.ones_like(tgt_flat, dtype=torch.bool)
+        ntgt_total = float(tgt_flat.shape[1])
     B = tgt_flat.shape[0]
     nblocks = float(tgt_idx.shape[1]) if tgt_idx.dim() == 3 else 1.0
 
@@ -103,9 +142,14 @@ def mask_diagnostics(
     stats["mask/context_ratio"] = float(nctx) / num_patches
     stats["mask/target_ratio"] = float(ntgt_total) / num_patches
     stats["mask/masker_loss"] = float(masker_loss.item()) if masker_loss is not None else 0.0
-    if tgt_idx.dim() == 3 and tgt_counts is not None:
-        for i, count in enumerate(counts):
-            stats[f"mask/hard_tgt_{i}"] = float(count)
+    if tgt_idx.dim() == 3:
+        if counts_per_sample is not None:
+            mean_counts = counts_per_sample.float().mean(dim=0)
+            for i in range(mean_counts.shape[0]):
+                stats[f"mask/hard_tgt_{i}"] = float(mean_counts[i].item())
+        elif counts is not None:
+            for i, count in enumerate(counts):
+                stats[f"mask/hard_tgt_{i}"] = float(count)
 
     # ------------------------------------------------------------------
     # RD masker — read from aux (written by aux_loss in-place)
@@ -129,6 +173,8 @@ def mask_diagnostics(
         stats["mask/max_total_tgt"] = float(aux["max_total_tgt"])
     if "max_tgt_per_block" in aux:
         stats["mask/max_tgt_per_block"] = float(aux["max_tgt_per_block"])
+    if "predictor_seq_len_max" in aux:
+        stats["mask/predictor_seq_len_max"] = float(aux["predictor_seq_len_max"])
 
     if "lambda" in aux:
         lam = aux["lambda"]
@@ -155,7 +201,10 @@ def mask_diagnostics(
         stats["mask/expected_nctx"] = R * num_patches
 
     # Hard ignore count (complements the always-on nctx / ntgt)
-    stats["mask/nign"] = float(num_patches - nctx - ntgt_total)
+    if role_counts is not None:
+        stats["mask/nign"] = float(role_counts.float()[:, -1].mean().item())
+    else:
+        stats["mask/nign"] = float(num_patches - nctx - ntgt_total)
 
     # Expected counts from soft probabilities
     p_tgt = mask_output.target_soft   # (B, N) or None
@@ -328,7 +377,8 @@ def mask_diagnostics(
     # ------------------------------------------------------------------
     device = tgt_flat.device
     binary = torch.zeros(B, num_patches, device=device, dtype=torch.float32)
-    binary.scatter_(1, tgt_flat, 1.0)
+    binary.scatter_add_(1, tgt_flat, tgt_flat_valid.float())
+    binary = binary.gt(0).float()
 
     stats["mask/spatial_coverage"] = float(
         binary.sum(dim=0).gt(0).float().mean().item()

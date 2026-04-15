@@ -622,6 +622,29 @@ class MINWayMasker(LatentMasker):
 
         return counts
 
+    def _pad_role_indices(
+        self,
+        winners: torch.Tensor,
+        role_id: int,
+        width: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Build padded hard indices and a validity mask for one exact-winners role.
+        """
+        B = winners.shape[0]
+        device = winners.device
+
+        if width <= 0:
+            empty_idx = torch.empty(B, 0, device=device, dtype=torch.long)
+            empty_valid = torch.empty(B, 0, device=device, dtype=torch.bool)
+            return empty_idx, empty_valid
+
+        role_mask = winners == role_id  # (B, N)
+        sorted_idx = role_mask.float().argsort(dim=-1, descending=True)[:, :width]
+        counts = role_mask.sum(dim=-1)
+        valid = torch.arange(width, device=device).unsqueeze(0) < counts.unsqueeze(1)
+        return sorted_idx, valid
+
     def _sample_weights(self, device: torch.device) -> dict[str, float]:
         p = max(self._progress.item(), 1e-3)
         weights: dict[str, float] = {}
@@ -705,6 +728,10 @@ class MINWayMasker(LatentMasker):
         target_counts = None
         nctx_per_sample = None
         ntgt_total_per_sample = None
+        ctx_valid = None
+        target_valid = None
+        target_block_counts = None
+        predictor_seq_len_max = None
         if self.hard_assignment in ("argmax", "gumbel"):
             # Each patch goes to its winning role; no topk budget constraint.
             # Blocks may have variable sizes → pad to max for rectangular tensor.
@@ -720,65 +747,88 @@ class MINWayMasker(LatentMasker):
             nctx_per_sample = role_counts[:, 0]
             ntgt_total_per_sample = target_counts.sum(dim=-1)
 
-            # --- Vectorized target block indices ---
-            # Build (B, N, M) score tensor: 1.0 where patch won block k, else 0.0.
-            # argsort descending puts winners first; remaining slots fill with
-            # non-winning patches in stable index order (replaces cycling pad).
-            K_max_cap = self.num_patches // 2
-            if self.max_tgt_per_block > 0:
-                K_max_cap = min(
-                    K_max_cap,
-                    max(self.ntgt_min_per_block, self.max_tgt_per_block),
-                )
-            all_masks = (
-                winners.unsqueeze(-1) == torch.arange(1, M + 1, device=winners.device)
-            )  # (B, N, M)
-            scores = all_masks.float()  # (B, N, M)
+            if self.winners_mode:
+                nctx = max(1, int(nctx_per_sample.max().item()))
+                K = max(1, int(target_counts.max().item()))
 
-            counts = scores.sum(1)  # (B, M) — winner count per block per sample
-            needs_fallback = counts < self.ntgt_min_per_block  # (B, M)
-            if needs_fallback.any():
-                # Replace scores with soft probabilities for under-populated blocks
-                fb_b, fb_k = needs_fallback.nonzero(as_tuple=True)
-                scores[fb_b, :, fb_k] = p_tgts[fb_b, :, fb_k]
-            alloc_counts = self._allocate_block_counts(counts.float().mean(dim=0))
-            if alloc_counts is None:
-                K = max(self.ntgt_min_per_block, min(K_max_cap, int(counts.max().item())))
-                target_block_counts = torch.full(
-                    (M,), K, device=scores.device, dtype=torch.long
+                ctx_idx, ctx_valid = self._pad_role_indices(winners, role_id=0, width=nctx)
+
+                tgt_idx_list = []
+                tgt_valid_list = []
+                for i in range(M):
+                    idx_i, valid_i = self._pad_role_indices(
+                        winners, role_id=i + 1, width=K
+                    )
+                    tgt_idx_list.append(idx_i)
+                    tgt_valid_list.append(valid_i)
+
+                tgt_idx = torch.stack(tgt_idx_list, dim=1)          # (B, M, K)
+                target_valid = torch.stack(tgt_valid_list, dim=1)    # (B, M, K)
+                target_block_counts = None
+                predictor_seq_len_max = int(
+                    (nctx_per_sample + ntgt_total_per_sample).max().item()
                 )
             else:
-                target_block_counts = alloc_counts
-                K = int(target_block_counts.max().item())
-
-            sorted_idx = scores.argsort(dim=1, descending=True)  # (B, N, M)
-            tgt_idx_list = []
-            tgt_flat_parts = []
-            for i in range(M):
-                k_i = int(target_block_counts[i].item())
-                idx_i = sorted_idx[:, :k_i, i]  # (B, k_i)
-                tgt_flat_parts.append(idx_i)
-                if k_i < K:
-                    pad_val = idx_i[:, -1:] if k_i > 0 else torch.zeros(
-                        B, 1, device=idx_i.device, dtype=idx_i.dtype
+            if not self.winners_mode:
+                # --- Vectorized target block indices ---
+                # Build (B, N, M) score tensor: 1.0 where patch won block k, else 0.0.
+                # argsort descending puts winners first; remaining slots fill with
+                # non-winning patches in stable index order (replaces cycling pad).
+                K_max_cap = self.num_patches // 2
+                if self.max_tgt_per_block > 0:
+                    K_max_cap = min(
+                        K_max_cap,
+                        max(self.ntgt_min_per_block, self.max_tgt_per_block),
                     )
-                    idx_i = torch.cat([idx_i, pad_val.expand(-1, K - k_i)], dim=1)
-                tgt_idx_list.append(idx_i)
-            tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
-            tgt_flat = torch.cat(tgt_flat_parts, dim=1)
+                all_masks = (
+                    winners.unsqueeze(-1) == torch.arange(1, M + 1, device=winners.device)
+                )  # (B, N, M)
+                scores = all_masks.float()  # (B, N, M)
 
-            # --- Vectorized context indices ---
-            ctx_scores = (winners == 0).float()  # (B, N)
-            ctx_counts = ctx_scores.sum(-1)       # (B,)
-            needs_ctx_fallback = ctx_counts < self.nctx_min
-            if needs_ctx_fallback.any():
-                # For fallback samples: use p_ctx with target positions zeroed out
-                p_ctx_fb = p_ctx[needs_ctx_fallback].clone()              # (n_fb, N)
-                p_ctx_fb.scatter_(1, tgt_flat[needs_ctx_fallback], 0.0)
-                ctx_scores[needs_ctx_fallback] = p_ctx_fb
+                counts = scores.sum(1)  # (B, M) — winner count per block per sample
+                needs_fallback = counts < self.ntgt_min_per_block  # (B, M)
+                if needs_fallback.any():
+                    # Replace scores with soft probabilities for under-populated blocks
+                    fb_b, fb_k = needs_fallback.nonzero(as_tuple=True)
+                    scores[fb_b, :, fb_k] = p_tgts[fb_b, :, fb_k]
+                alloc_counts = self._allocate_block_counts(counts.float().mean(dim=0))
+                if alloc_counts is None:
+                    K = max(self.ntgt_min_per_block, min(K_max_cap, int(counts.max().item())))
+                    target_block_counts = torch.full(
+                        (M,), K, device=scores.device, dtype=torch.long
+                    )
+                else:
+                    target_block_counts = alloc_counts
+                    K = int(target_block_counts.max().item())
 
-            nctx = max(self.nctx_min, min(K_max_cap, int(ctx_counts.max().item())))
-            ctx_idx = ctx_scores.argsort(dim=-1, descending=True)[:, :nctx]  # (B, nctx)
+                sorted_idx = scores.argsort(dim=1, descending=True)  # (B, N, M)
+                tgt_idx_list = []
+                tgt_flat_parts = []
+                for i in range(M):
+                    k_i = int(target_block_counts[i].item())
+                    idx_i = sorted_idx[:, :k_i, i]  # (B, k_i)
+                    tgt_flat_parts.append(idx_i)
+                    if k_i < K:
+                        pad_val = idx_i[:, -1:] if k_i > 0 else torch.zeros(
+                            B, 1, device=idx_i.device, dtype=idx_i.dtype
+                        )
+                        idx_i = torch.cat([idx_i, pad_val.expand(-1, K - k_i)], dim=1)
+                    tgt_idx_list.append(idx_i)
+                tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
+                tgt_flat = torch.cat(tgt_flat_parts, dim=1)
+
+                # --- Vectorized context indices ---
+                ctx_scores = (winners == 0).float()  # (B, N)
+                ctx_counts = ctx_scores.sum(-1)       # (B,)
+                needs_ctx_fallback = ctx_counts < self.nctx_min
+                if needs_ctx_fallback.any():
+                    # For fallback samples: use p_ctx with target positions zeroed out
+                    p_ctx_fb = p_ctx[needs_ctx_fallback].clone()              # (n_fb, N)
+                    p_ctx_fb.scatter_(1, tgt_flat[needs_ctx_fallback], 0.0)
+                    ctx_scores[needs_ctx_fallback] = p_ctx_fb
+
+                nctx = max(self.nctx_min, min(K_max_cap, int(ctx_counts.max().item())))
+                ctx_idx = ctx_scores.argsort(dim=-1, descending=True)[:, :nctx]  # (B, nctx)
         else:
             # topk (default): fixed K per block from soft mass
             per_block_mass = p_tgts.sum(dim=1).mean(dim=0)  # (M,)
@@ -826,10 +876,12 @@ class MINWayMasker(LatentMasker):
             "ema_full":     ema_full,
             "n_active_tgt": n_active,
             "global_step":  getattr(self, "_global_step", 0),
-            "target_block_counts": target_block_counts,
             "max_total_tgt": self.max_total_tgt,
             "max_tgt_per_block": self.max_tgt_per_block,
+            "winners_mode": self.winners_mode,
         }
+        if target_block_counts is not None:
+            aux["target_block_counts"] = target_block_counts
         if self._k_enabled:
             aux["k"] = self._current_k.item()
         if winners is not None:
@@ -838,10 +890,14 @@ class MINWayMasker(LatentMasker):
             aux["target_counts"] = target_counts.detach()
             aux["nctx_per_sample"] = nctx_per_sample.detach()
             aux["ntgt_total_per_sample"] = ntgt_total_per_sample.detach()
+        if self.winners_mode:
+            aux["predictor_seq_len_max"] = float(predictor_seq_len_max)
 
         return MaskOutput(
             context_idx=ctx_idx,       # (B, Nctx)
             target_idx=tgt_idx,        # (B, M, K)
+            context_valid=ctx_valid,
+            target_valid=target_valid,
             context_soft=p_ctx,        # (B, N)
             target_soft=p_tgts.sum(-1),  # (B, N) — total target mass
             aux=aux,
