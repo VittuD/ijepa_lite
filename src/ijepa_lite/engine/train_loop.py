@@ -299,6 +299,13 @@ def train(
                     extra["train/grad_norm"] = gnorm
 
                 if is_rank0():
+                    for k, v in out.get("winners_probe", {}).items():
+                        if str(k).startswith("_hist/"):
+                            clean_key = str(k)[len("_hist/"):]
+                            extra[f"_hist/winners_probe/{clean_key}"] = v
+                        else:
+                            extra[f"winners_probe/{k}"] = float(v)
+
                     extra.update(
                         ema_param_metrics(core.target_encoder, core.context_encoder)
                     )

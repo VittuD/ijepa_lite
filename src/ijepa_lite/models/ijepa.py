@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from ijepa_lite.losses.context_loss import context_loss
 from ijepa_lite.masking.base import CollateMasker, LatentMasker, MaskOutput
 from ijepa_lite.masking.compressor import TokenCompressor
-from ijepa_lite.masking.metrics import mask_diagnostics
+from ijepa_lite.masking.metrics import mask_diagnostics, winners_fragmentation_probe
 from ijepa_lite.models.ema import ema_update
 
 
@@ -275,6 +275,7 @@ class IJEPAModel(nn.Module):
             full=compute_mask_metrics,
             patch_loss=patch_loss,
         )
+        winners_probe = winners_fragmentation_probe(mask_output) if compute_mask_metrics else {}
 
         # ------------------------------------------------------------------
         # Output
@@ -286,6 +287,7 @@ class IJEPAModel(nn.Module):
             "target": tgt_tokens.detach(),
             "patch_loss": patch_loss.detach(),   # (B, K) — for diagnostics / curriculum
             "mask_stats": mask_stats,
+            "winners_probe": winners_probe,
             "ctx_loss": ctx_loss_val,
         }
         if compute_agreement:

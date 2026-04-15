@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import math
 from typing import Optional
 
@@ -397,3 +398,69 @@ def mask_diagnostics(
     stats["mask/topk_mass_ratio"] = float(topk_mass.item()) / uniform_baseline
 
     return stats
+
+
+@torch.no_grad()
+def winners_fragmentation_probe(mask_output: MaskOutput) -> dict:
+    """
+    Probe exact winners-induced batching fragmentation for future ragged execution.
+
+    Returns local-batch summaries only. The training loop logs the rank-0 local
+    probe under a dedicated namespace.
+    """
+    aux = mask_output.aux
+    role_counts = aux.get("role_counts")
+    target_counts = aux.get("target_counts")
+    nctx_per_sample = aux.get("nctx_per_sample")
+    ntgt_total_per_sample = aux.get("ntgt_total_per_sample")
+
+    if (
+        role_counts is None
+        or target_counts is None
+        or nctx_per_sample is None
+        or ntgt_total_per_sample is None
+    ):
+        return {}
+
+    target_counts = target_counts.detach().cpu()
+    nctx_per_sample = nctx_per_sample.detach().cpu()
+    ntgt_total_per_sample = ntgt_total_per_sample.detach().cpu()
+    batch_size = int(target_counts.shape[0])
+    if batch_size <= 0:
+        return {}
+
+    def _summarize_buckets(keys: list[tuple], prefix: str) -> dict:
+        bucket_sizes = list(Counter(keys).values())
+        bucket_sizes_t = torch.tensor(bucket_sizes, dtype=torch.float32)
+        modal = float(bucket_sizes_t.max().item()) / float(batch_size)
+        small = float(bucket_sizes_t[bucket_sizes_t <= 2].sum().item()) / float(batch_size)
+        return {
+            f"{prefix}_num_buckets": float(len(bucket_sizes)),
+            f"{prefix}_modal_bucket_frac": modal,
+            f"{prefix}_small_bucket_frac": small,
+            f"_hist/{prefix}_bucket_sizes": bucket_sizes_t.numpy(),
+        }
+
+    nctx_list = [int(x) for x in nctx_per_sample.tolist()]
+    ntgt_list = [int(x) for x in ntgt_total_per_sample.tolist()]
+    target_rows = [[int(v) for v in row] for row in target_counts.tolist()]
+
+    probe = {
+        "distinct_nctx": float(len(set(nctx_list))),
+        "distinct_ntgt_total": float(len(set(ntgt_list))),
+    }
+
+    for i in range(target_counts.shape[1]):
+        probe[f"distinct_tgt_{i}"] = float(len(set(int(v) for v in target_counts[:, i].tolist())))
+
+    joint_keys = list(zip(nctx_list, ntgt_list))
+    probe.update(_summarize_buckets(joint_keys, "joint"))
+
+    fullsig_keys = [tuple([nctx_list[i], *target_rows[i]]) for i in range(batch_size)]
+    probe.update(_summarize_buckets(fullsig_keys, "separate_fullsig"))
+
+    for i in range(target_counts.shape[1]):
+        block_keys = [(nctx_list[b], target_rows[b][i]) for b in range(batch_size)]
+        probe.update(_summarize_buckets(block_keys, f"separate_block_{i}"))
+
+    return probe
