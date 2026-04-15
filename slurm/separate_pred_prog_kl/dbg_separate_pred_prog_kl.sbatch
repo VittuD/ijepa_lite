@@ -59,7 +59,9 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       +masking.latent.terms.nway_progressive_kl.direction=forward \
       +model.predict_blocks_jointly=false \
       data.root=$FAST/datasets/ \
-      data.batch_size=512 \
+      data.batch_size=2048 \
       train.epochs=1000 \
       train.viz_enabled=true \
+      train.log_every=1 \
+      train.eval_every_epochs=10 \
       logger.mode=offline
