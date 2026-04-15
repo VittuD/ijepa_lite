@@ -769,7 +769,6 @@ class MINWayMasker(LatentMasker):
                     (nctx_per_sample + ntgt_total_per_sample).max().item()
                 )
             else:
-            if not self.winners_mode:
                 # --- Vectorized target block indices ---
                 # Build (B, N, M) score tensor: 1.0 where patch won block k, else 0.0.
                 # argsort descending puts winners first; remaining slots fill with
