@@ -8,7 +8,7 @@ keep_all_checkpoints: true
 viz_enabled: true
 
 inline_eval:
-  on_start: true
+  on_start: false
   dataset: stl10
   data_root: ${oc.env:FAST,/scratch}/datasets/
   train_split: train
