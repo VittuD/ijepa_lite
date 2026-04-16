@@ -382,22 +382,33 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
 # ------------------------------------------------------------------
 
 def build_pretrain_loader(cfg):
+    _startup_debug("pretrain_transform_start")
     tfm = build_pretrain_transform(cfg)
+    _startup_debug("pretrain_transform_done")
 
     # CollateMasker is None when a LatentMasker is configured.
     # In that case IJEPACollate is dumb (images only) and masking
     # happens inside IJEPAModel.forward on GPU.
+    _startup_debug("collate_masker_build_start")
     masker = _build_collate_masker(cfg)
+    _startup_debug("collate_masker_build_done")
 
     pretrain_split = str(getattr(cfg.data, "pretrain_split", "train"))
+    _startup_debug(f"dataset_build_start split={pretrain_split}")
     ds = build_dataset(cfg.data, split=pretrain_split, transform=tfm)
+    _startup_debug(f"dataset_build_done len={len(ds)}")
 
+    _startup_debug("sampler_build_start")
     sampler = _build_sampler(ds, shuffle=True, drop_last=True)
+    _startup_debug("sampler_build_done")
 
+    _startup_debug("collate_build_start")
     collate = IJEPACollate(masker=masker)
+    _startup_debug("collate_build_done")
 
     from torch.utils.data import DataLoader
 
+    _startup_debug("dataloader_construct_start")
     loader = DataLoader(
         ds,
         batch_size=int(cfg.data.batch_size),
@@ -419,6 +430,7 @@ def build_pretrain_loader(cfg):
         collate_fn=collate,
         drop_last=True,
     )
+    _startup_debug("dataloader_construct_done")
     return loader
 
 

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from datasets import load_dataset
 from torch.utils.data import ConcatDataset, Dataset
 from torchvision import datasets as tv_datasets
 
-from ijepa_lite.utils.dist import barrier, is_rank0
+from ijepa_lite.utils.dist import barrier, get_rank, is_rank0
+
+
+def _dataset_debug(message: str) -> None:
+    if os.environ.get("IJEPA_STARTUP_DEBUG", "0").lower() not in ("1", "true", "yes"):
+        return
+    print(f"[dataset-debug][rank{get_rank()}] {message}", flush=True)
 
 
 class HFImageNet128(Dataset):
@@ -37,6 +44,7 @@ def _maybe_download_dataset(name: str, root: str, split: str, transform) -> None
     """
     Ensure dataset files exist on disk (rank0 only).
     """
+    _dataset_debug(f"download_check_start name={name} split={split} root={root}")
     if name == "cifar10":
         tv_datasets.CIFAR10(
             root=root,
@@ -44,6 +52,7 @@ def _maybe_download_dataset(name: str, root: str, split: str, transform) -> None
             download=True,
             transform=transform,
         )
+        _dataset_debug("download_check_done")
         return
 
     if name == "cifar100":
@@ -53,6 +62,7 @@ def _maybe_download_dataset(name: str, root: str, split: str, transform) -> None
             download=True,
             transform=transform,
         )
+        _dataset_debug("download_check_done")
         return
 
     if name == "stl10":
@@ -65,20 +75,25 @@ def _maybe_download_dataset(name: str, root: str, split: str, transform) -> None
             tv_datasets.STL10(
                 root=root, split="unlabeled", download=True, transform=transform
             )
+            _dataset_debug("download_check_done")
             return
         tv_datasets.STL10(root=root, split=split, download=True, transform=transform)
+        _dataset_debug("download_check_done")
         return
 
     # imagenet: no download path (user should provide directory)
     if name == "imagenet":
+        _dataset_debug("download_check_done")
         return
 
     if name == "imagenet_128":
         # HF dataset downloads on demand in __init__
+        _dataset_debug("download_check_done")
         return
 
     if name == "food101":
         tv_datasets.Food101(root=root, split=split, download=True, transform=transform)
+        _dataset_debug("download_check_done")
         return
 
     raise ValueError(f"Unknown dataset name={name}")
@@ -88,6 +103,9 @@ def build_dataset(cfg, split: str, transform):
     name = str(cfg.name)
     root = str(cfg.root)
     download = bool(getattr(cfg, "download", True))
+    _dataset_debug(
+        f"build_dataset_start name={name} split={split} download={download} root={root}"
+    )
 
     specs = {
         "cifar10": (
@@ -147,5 +165,10 @@ def build_dataset(cfg, split: str, transform):
     if download and is_rank0():
         _maybe_download_dataset(name=name, root=root, split=split, transform=transform)
 
+    _dataset_debug("barrier_before_dataset_builder")
     barrier()
-    return builder(root, split, transform)
+    _dataset_debug("barrier_after_dataset_builder")
+    _dataset_debug("dataset_builder_start")
+    ds = builder(root, split, transform)
+    _dataset_debug(f"dataset_builder_done len={len(ds)}")
+    return ds
