@@ -765,9 +765,16 @@ class MINWayMasker(LatentMasker):
                 tgt_idx = torch.stack(tgt_idx_list, dim=1)          # (B, M, K)
                 target_valid = torch.stack(tgt_valid_list, dim=1)    # (B, M, K)
                 target_block_counts = None
-                predictor_seq_len_max = int(
+                predictor_seq_len_max_joint = int(
                     (nctx_per_sample + ntgt_total_per_sample).max().item()
                 )
+                predictor_seq_len_max_separate = int(
+                    (
+                        nctx_per_sample
+                        + target_counts.max(dim=-1).values
+                    ).max().item()
+                )
+                predictor_seq_len_max = predictor_seq_len_max_joint
             else:
                 # --- Vectorized target block indices ---
                 # Build (B, N, M) score tensor: 1.0 where patch won block k, else 0.0.
@@ -891,6 +898,8 @@ class MINWayMasker(LatentMasker):
             aux["ntgt_total_per_sample"] = ntgt_total_per_sample.detach()
         if self.winners_mode:
             aux["predictor_seq_len_max"] = float(predictor_seq_len_max)
+            aux["predictor_seq_len_max_joint"] = float(predictor_seq_len_max_joint)
+            aux["predictor_seq_len_max_separate"] = float(predictor_seq_len_max_separate)
 
         return MaskOutput(
             context_idx=ctx_idx,       # (B, Nctx)

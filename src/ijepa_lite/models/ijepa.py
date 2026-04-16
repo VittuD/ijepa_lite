@@ -98,10 +98,6 @@ class IJEPAModel(nn.Module):
         self.ctx_warmup_end = int(ctx_loss_warmup_end)
         self.grid_size = int(grid_size)
 
-        if self.winners_mode and not self.predict_blocks_jointly:
-            raise ValueError(
-                "IJEPAModel winners_mode currently requires predict_blocks_jointly=true."
-            )
         if self.winners_mode and self.ctx_loss_enabled:
             raise ValueError(
                 "IJEPAModel winners_mode does not support ctx_loss. "
@@ -176,6 +172,14 @@ class IJEPAModel(nn.Module):
         ctx_valid = mask_output.context_valid
         tgt_valid = mask_output.target_valid
         target_block_counts = mask_output.aux.get("target_block_counts")
+        if self.winners_mode:
+            seq_key = (
+                "predictor_seq_len_max_joint"
+                if self.predict_blocks_jointly
+                else "predictor_seq_len_max_separate"
+            )
+            if seq_key in mask_output.aux:
+                mask_output.aux["predictor_seq_len_max"] = mask_output.aux[seq_key]
 
         # ------------------------------------------------------------------
         # Step 2: Context encoder (masked, gradients flow)
@@ -510,34 +514,64 @@ class IJEPAModel(nn.Module):
             preds_list = []
             tgts_list = []
             ploss_list = []
+            valid_list = []
+            valid_pad_list = []
             max_k = k
             for i in range(m):
                 k_i = counts[i] if counts is not None else k
                 if k_i <= 0:
                     continue
                 block_idx = tgt_idx[:, i, :k_i]  # (B, K_i)
+                if target_valid is not None:
+                    block_valid = target_valid[:, i, :k_i].to(dtype=torch.bool)
+                else:
+                    block_valid = torch.ones(
+                        b, k_i, device=block_idx.device, dtype=torch.bool
+                    )
                 block_tgt = tgt_tokens_all.gather(
                     1, block_idx.unsqueeze(-1).expand(-1, -1, d)
                 )  # (B, K_i, D)
                 block_pred = self.predictor(
-                    ctx_tokens, ctx_idx=ctx_idx, tgt_idx=block_idx, ctx_valid=ctx_valid
+                    ctx_tokens,
+                    ctx_idx=ctx_idx,
+                    tgt_idx=block_idx,
+                    ctx_valid=ctx_valid,
+                    tgt_valid=block_valid,
                 )  # (B, K_i, D)
                 block_ploss = self.loss_fn(block_pred, block_tgt, reduction="none")  # (B, K_i)
+                block_ploss = torch.where(
+                    block_valid,
+                    block_ploss,
+                    block_ploss.new_zeros(()),
+                )
 
                 pred_pad = block_pred.new_zeros((b, max_k, d))
                 tgt_pad = block_tgt.new_zeros((b, max_k, d))
-                pred_pad[:, :k_i] = block_pred
-                tgt_pad[:, :k_i] = block_tgt
+                valid_pad = torch.zeros(
+                    b, max_k, device=block_idx.device, dtype=torch.bool
+                )
+                block_mask = block_valid.unsqueeze(-1).to(dtype=block_pred.dtype)
+                pred_pad[:, :k_i] = block_pred * block_mask
+                tgt_pad[:, :k_i] = block_tgt * block_mask
+                valid_pad[:, :k_i] = block_valid
                 preds_list.append(pred_pad)
                 tgts_list.append(tgt_pad)
                 ploss_list.append(block_ploss)
+                valid_list.append(block_valid)
+                valid_pad_list.append(valid_pad)
 
             pred = torch.stack(preds_list, dim=1)        # (B, M, K, D)
             tgt_tokens = torch.stack(tgts_list, dim=1)   # (B, M, K, D)
             patch_loss_cat = torch.cat(ploss_list, dim=1) # (B, M*K)
-            loss = patch_loss_cat.mean()
+            pred_valid = None
+            if target_valid is not None:
+                valid_cat = torch.cat(valid_list, dim=1)
+                loss, patch_loss_cat = self._masked_token_mean(patch_loss_cat, valid_cat)
+                pred_valid = torch.stack(valid_pad_list, dim=1)  # (B, M, K)
+            else:
+                loss = patch_loss_cat.mean()
             # ctx_loss not supported with separate prediction
-            return loss, pred, tgt_tokens, patch_loss_cat, None, None
+            return loss, pred, tgt_tokens, patch_loss_cat, None, pred_valid
 
         # -- Joint prediction (default): all blocks concatenated ---------------
         tgt_idx_cat, tgt_valid_cat = self._flatten_multi_block_targets(
