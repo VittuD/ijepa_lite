@@ -5,6 +5,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from ijepa_lite.losses.context_loss import context_loss
 from ijepa_lite.masking.base import CollateMasker, LatentMasker, MaskOutput
@@ -531,13 +532,31 @@ class IJEPAModel(nn.Module):
                 block_tgt = tgt_tokens_all.gather(
                     1, block_idx.unsqueeze(-1).expand(-1, -1, d)
                 )  # (B, K_i, D)
-                block_pred = self.predictor(
-                    ctx_tokens,
-                    ctx_idx=ctx_idx,
-                    tgt_idx=block_idx,
-                    ctx_valid=ctx_valid,
-                    tgt_valid=block_valid,
-                )  # (B, K_i, D)
+                if target_valid is not None:
+                    # Winners separate mode keeps M predictor graphs alive for
+                    # one backward. Checkpoint each block predictor to avoid
+                    # retaining its attention activations across the loop.
+                    def _predict_block(ctx: torch.Tensor) -> torch.Tensor:
+                        return self.predictor(
+                            ctx,
+                            ctx_idx=ctx_idx,
+                            tgt_idx=block_idx,
+                            ctx_valid=ctx_valid,
+                            tgt_valid=block_valid,
+                        )
+
+                    block_pred = checkpoint(
+                        _predict_block,
+                        ctx_tokens,
+                        use_reentrant=False,
+                    )
+                else:
+                    block_pred = self.predictor(
+                        ctx_tokens,
+                        ctx_idx=ctx_idx,
+                        tgt_idx=block_idx,
+                        ctx_valid=ctx_valid,
+                    )  # (B, K_i, D)
                 block_ploss = self.loss_fn(block_pred, block_tgt, reduction="none")  # (B, K_i)
                 block_ploss = torch.where(
                     block_valid,

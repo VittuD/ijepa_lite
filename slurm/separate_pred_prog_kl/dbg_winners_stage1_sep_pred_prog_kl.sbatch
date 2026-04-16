@@ -38,7 +38,6 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
-export IJEPA_STARTUP_DEBUG=1
 
 nvidia-smi -L
 

@@ -44,7 +44,13 @@ def _build_src_key_padding_mask(
                 f"(B, Ntgt)=({batch_size}, {ntgt})."
             )
 
-    src_key_padding_mask = ~torch.cat([ctx_valid, tgt_valid], dim=1)
+    valid = torch.cat([ctx_valid, tgt_valid], dim=1)
+    empty_rows = ~valid.any(dim=1)
+    if bool(empty_rows.any().item()):
+        valid = valid.clone()
+        valid[empty_rows, 0] = True
+
+    src_key_padding_mask = ~valid
     if not bool(src_key_padding_mask.any().item()):
         return None
     return src_key_padding_mask
