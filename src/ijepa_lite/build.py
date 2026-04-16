@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -28,6 +29,12 @@ from ijepa_lite.models.predictor import Predictor
 from ijepa_lite.models.vit_tokens import build_torchvision_vit_tokens
 from ijepa_lite.utils.dist import get_rank, get_world_size, is_distributed
 from ijepa_lite.utils.seed import seed_worker
+
+
+def _startup_debug(message: str) -> None:
+    if os.environ.get("IJEPA_STARTUP_DEBUG", "0").lower() not in ("1", "true", "yes"):
+        return
+    print(f"[startup-debug][rank{get_rank()}] {message}", flush=True)
 
 
 # ------------------------------------------------------------------
@@ -651,21 +658,34 @@ def build_linear_probe_loaders(cfg):
 
 def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
     task = str(cfg.task.name)
+    _startup_debug(f"build_for_task_start task={task}")
     callbacks = build_callbacks(cfg)
+    _startup_debug("callbacks_built")
 
     if task == "pretrain":
+        _startup_debug("model_build_start")
         model = build_pretrain_model(cfg).to(device)
+        _startup_debug("model_build_done")
 
         if bool(getattr(cfg, "compile", False)) and hasattr(torch, "compile"):
+            _startup_debug("torch_compile_start")
             model = torch.compile(model, dynamic=True)
+            _startup_debug("torch_compile_done")
 
+        _startup_debug("ddp_wrap_start")
         model = maybe_wrap_ddp(cfg, model, device)
+        _startup_debug("ddp_wrap_done")
 
+        _startup_debug("loader_build_start")
         loader = build_pretrain_loader(cfg)
+        _startup_debug("loader_build_done")
+        _startup_debug("optim_build_start")
         optim, masker_optim, sched, masker_sched, wd_start, wd_end, masker_wd_start, masker_wd_end = build_pretrain_optim_sched(cfg, model)
+        _startup_debug("optim_build_done")
 
         resumed_state: dict | None = None
         if cfg.resume:
+            _startup_debug("resume_load_start")
             resumed_state = (
                 load_checkpoint_if_available(
                     str(cfg.resume), model=model, optimizer=optim, scheduler=sched,
@@ -673,7 +693,9 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
                 )
                 or None
             )
+            _startup_debug("resume_load_done")
 
+        _startup_debug("build_for_task_done")
         return {
             "model": model,
             "loader": loader,

@@ -15,7 +15,7 @@
 # Winners-mode debug run:
 # - explicitly opt into masking.latent.winners_mode=true
 # - keep progressive-KL / gumbel masking enabled
-# - use the joint-prediction path required by winners-mode guardrails
+# - use the separate-prediction winners path
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -38,6 +38,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
+export IJEPA_STARTUP_DEBUG=1
 
 nvidia-smi -L
 
