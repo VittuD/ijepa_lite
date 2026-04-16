@@ -511,11 +511,11 @@ class IJEPAModel(nn.Module):
 
         # -- Separate prediction: each block predicted independently -----------
         if not self.predict_blocks_jointly:
+            keep_logging_tensors = target_valid is None
             preds_list = []
             tgts_list = []
             ploss_list = []
             valid_list = []
-            valid_pad_list = []
             max_k = k
             for i in range(m):
                 k_i = counts[i] if counts is not None else k
@@ -545,30 +545,30 @@ class IJEPAModel(nn.Module):
                     block_ploss.new_zeros(()),
                 )
 
-                pred_pad = block_pred.new_zeros((b, max_k, d))
-                tgt_pad = block_tgt.new_zeros((b, max_k, d))
-                valid_pad = torch.zeros(
-                    b, max_k, device=block_idx.device, dtype=torch.bool
-                )
-                block_mask = block_valid.unsqueeze(-1).to(dtype=block_pred.dtype)
-                pred_pad[:, :k_i] = block_pred * block_mask
-                tgt_pad[:, :k_i] = block_tgt * block_mask
-                valid_pad[:, :k_i] = block_valid
-                preds_list.append(pred_pad)
-                tgts_list.append(tgt_pad)
+                if keep_logging_tensors:
+                    pred_pad = block_pred.new_zeros((b, max_k, d))
+                    tgt_pad = block_tgt.new_zeros((b, max_k, d))
+                    pred_pad[:, :k_i] = block_pred
+                    tgt_pad[:, :k_i] = block_tgt
+                    preds_list.append(pred_pad)
+                    tgts_list.append(tgt_pad)
                 ploss_list.append(block_ploss)
                 valid_list.append(block_valid)
-                valid_pad_list.append(valid_pad)
 
-            pred = torch.stack(preds_list, dim=1)        # (B, M, K, D)
-            tgt_tokens = torch.stack(tgts_list, dim=1)   # (B, M, K, D)
             patch_loss_cat = torch.cat(ploss_list, dim=1) # (B, M*K)
             pred_valid = None
             if target_valid is not None:
                 valid_cat = torch.cat(valid_list, dim=1)
                 loss, patch_loss_cat = self._masked_token_mean(patch_loss_cat, valid_cat)
-                pred_valid = torch.stack(valid_pad_list, dim=1)  # (B, M, K)
+                # The separate winners path can OOM at local batch 2048 if it
+                # materializes padded (B, M, K, D) logging tensors in addition
+                # to the M predictor graphs.  Reconstruction uses patch_loss_cat;
+                # token metrics are intentionally suppressed for this path.
+                pred = tgt_tokens_all.new_zeros((0, d))
+                tgt_tokens = tgt_tokens_all.new_zeros((0, d))
             else:
+                pred = torch.stack(preds_list, dim=1)        # (B, M, K, D)
+                tgt_tokens = torch.stack(tgts_list, dim=1)   # (B, M, K, D)
                 loss = patch_loss_cat.mean()
             # ctx_loss not supported with separate prediction
             return loss, pred, tgt_tokens, patch_loss_cat, None, pred_valid
