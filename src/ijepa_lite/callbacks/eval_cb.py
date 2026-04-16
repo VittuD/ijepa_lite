@@ -108,6 +108,18 @@ class InlineEvalCallback(Callback):
         print(f"[InlineEval] Enabled: every {self._eval_every} epochs, "
               f"dataset={dataset_name}, num_classes={self._num_classes}")
 
+        if bool(getattr(icfg, "on_start", True)):
+            metrics = self._evaluate_model(model, icfg)
+            epoch = int(state.get("epoch", 0))
+            metrics["train/epoch"] = float(epoch)
+            metrics["inline_eval/on_start"] = 1.0
+            state["_inline_eval_on_start_metrics"] = metrics
+            print(
+                f"[InlineEval] startup epoch={epoch}  "
+                f"train_acc1={metrics['inline_eval/train_acc1']:.4f}  "
+                f"val_acc1={metrics['inline_eval/val_acc1']:.4f}"
+            )
+
     # ------------------------------------------------------------------
     # Epoch end — run probe
     # ------------------------------------------------------------------
@@ -120,14 +132,30 @@ class InlineEvalCallback(Callback):
         if (epoch + 1) % self._eval_every != 0:
             return
 
-        icfg = self._cfg_inline
-
-        # Extract target encoder from the live model (EMA, already frozen).
         bundle = state.get("_ckpt_bundle")
         if bundle is None:
             return
         model = bundle["model"]
-        encoder = unwrap_model(model).target_encoder
+        eval_metrics = self._evaluate_model(model, self._cfg_inline)
+        metrics.update(eval_metrics)
+
+        print(
+            f"[InlineEval] epoch={epoch}  "
+            f"train_acc1={eval_metrics['inline_eval/train_acc1']:.4f}  "
+            f"val_acc1={eval_metrics['inline_eval/val_acc1']:.4f}"
+        )
+
+        # Restore training mode
+        model.train()
+
+    def _evaluate_model(
+        self,
+        model: Any,
+        icfg: Any,
+    ) -> Dict[str, float]:
+        # Extract target encoder from the live model (EMA, already frozen).
+        core = unwrap_model(model)
+        encoder = core.target_encoder
 
         # Build a fresh head
         from ijepa_lite.engine.eval_linear import _build_head
@@ -141,16 +169,12 @@ class InlineEvalCallback(Callback):
         head_cfg = OmegaConf.create(head_cfg_dict)
         head = _build_head(self._embed_dim, self._num_classes, head_cfg).to(self._device)
 
-        # Run the probe
         train_acc, val_acc = self._run_probe(encoder, head, icfg)
-
-        metrics["inline_eval/train_acc1"] = train_acc
-        metrics["inline_eval/val_acc1"] = val_acc
-
-        print(f"[InlineEval] epoch={epoch}  train_acc1={train_acc:.4f}  val_acc1={val_acc:.4f}")
-
-        # Restore training mode
         model.train()
+        return {
+            "inline_eval/train_acc1": train_acc,
+            "inline_eval/val_acc1": val_acc,
+        }
 
     # ------------------------------------------------------------------
     # Self-contained probe loop

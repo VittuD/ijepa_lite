@@ -89,6 +89,14 @@ def train(
 
     core = unwrap_model(model)
     callbacks.on_run_start(cfg=cfg, state=state, model=core)
+    if is_rank0():
+        startup_eval_metrics = state.pop("_inline_eval_on_start_metrics", None)
+        if startup_eval_metrics:
+            callbacks.on_step_end(
+                cfg=cfg,
+                state=state,
+                metrics=startup_eval_metrics,
+            )
     # Rank-0 does more work in on_run_start (wandb.init, dataset loads, etc.).
     # Without this barrier the other ranks can reach loss.backward() → DDP
     # all_reduce before rank 0 has left on_run_start, causing a collective hang.
