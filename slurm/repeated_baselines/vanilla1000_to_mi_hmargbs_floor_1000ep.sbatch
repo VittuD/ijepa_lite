@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-mi-hmargbs-vanilla-resume
+#SBATCH --job-name=ijepa-vanilla1000-to-mi-hmargbs
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -7,18 +7,18 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=06:30:00
+#SBATCH --time=12:00:00
 #SBATCH --output=sbatch_logs/repeated_baselines/%x_%j.out
 #SBATCH --error=sbatch_logs/repeated_baselines/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Initialize the vanilla random-masker multiblock baseline from the
-# mi_HmargBS_floor_learned epoch_00499 checkpoint, then train for 500 epochs.
+# Initialize mi_HmargBS_floor_learned from the vanilla random-masker baseline
+# at epoch_00999, then train 1000 fresh epochs with the MI HmargBS + floor
+# objective.
 #
-# This uses resume_weights_only=true + resume_strict=false so only compatible
-# encoder / predictor / target-encoder weights are loaded.  MI-only masker and
-# compressor checkpoint keys are ignored, and optimizer/scheduler state starts
-# fresh for this vanilla continuation.
+# This uses resume_weights_only=true + resume_strict=false so compatible
+# encoder / predictor / target-encoder weights are loaded from the vanilla
+# checkpoint, while MI-only masker/compressor and optimizer state start fresh.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -44,7 +44,7 @@ nvidia-smi -L
 mkdir -p sbatch_logs/repeated_baselines
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
-CKPT="${REPO_ROOT}/outputs/2026-04-14/15-00-51_mi_HmargBS_floor_learned/rank0/checkpoints/epoch_00499.pt"
+CKPT="${REPO_ROOT}/outputs/2026-04-14/15-00-53_vanilla_baseline_multiblock_stl10/rank0/checkpoints/epoch_00999.pt"
 
 if [[ ! -f "$CKPT" ]]; then
   echo "Checkpoint not found: $CKPT" >&2
@@ -52,20 +52,24 @@ if [[ ! -f "$CKPT" ]]; then
   exit 1
 fi
 
-EXP_NAME="mi_HmargBS_floor_learned_vanilla_resume500"
+EXP_NAME="vanilla1000_to_mi_HmargBS_floor_1000ep"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
     -m ijepa_lite.run \
-      experiment=stl10_vits_ps8_multiblock \
+      experiment=stl10_vits_ps8_mi \
       exp_name="$EXP_NAME" \
       resume="$CKPT" \
       resume_weights_only=true \
       resume_strict=false \
+      masking.latent.terms.H_cond.weight='[0.0,0.0]' \
+      masking.latent.terms.neg_H_marg.weight='[1.0,1.0]' \
+      masking.latent.terms.neg_surprise.weight='[0.5,0.5]' \
+      masking.latent.terms.floor_penalty.weight='[5.0,5.0]' \
       model.pos_embed_kind=learned \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
-      train.epochs=500 \
+      train.epochs=1000 \
       train.viz_enabled=true \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
