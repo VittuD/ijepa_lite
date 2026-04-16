@@ -698,10 +698,17 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
         resumed_state: dict | None = None
         if cfg.resume:
             _startup_debug("resume_load_start")
+            resume_weights_only = bool(getattr(cfg, "resume_weights_only", False))
             resumed_state = (
                 load_checkpoint_if_available(
-                    str(cfg.resume), model=model, optimizer=optim, scheduler=sched,
-                    masker_optimizer=masker_optim, masker_scheduler=masker_sched,
+                    str(cfg.resume),
+                    model=model,
+                    optimizer=None if resume_weights_only else optim,
+                    scheduler=None if resume_weights_only else sched,
+                    masker_optimizer=None if resume_weights_only else masker_optim,
+                    masker_scheduler=None if resume_weights_only else masker_sched,
+                    strict=bool(getattr(cfg, "resume_strict", True)),
+                    load_training_state=not resume_weights_only,
                 )
                 or None
             )

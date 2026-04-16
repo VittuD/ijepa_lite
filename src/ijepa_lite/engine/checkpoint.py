@@ -42,6 +42,8 @@ def load_checkpoint_if_available(
     scaler: Optional[torch.amp.GradScaler] = None,
     masker_optimizer: Optional[torch.optim.Optimizer] = None,
     masker_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    strict: bool = True,
+    load_training_state: bool = True,
 ) -> dict:
     """
     Returns the saved state dict (contains global_step, epoch, etc.)
@@ -57,7 +59,17 @@ def load_checkpoint_if_available(
 
     payload = torch.load(path, map_location="cpu", weights_only=True)
     core = unwrap_model(model)
-    core.load_state_dict(payload["model"], strict=True)
+    model_state = payload["model"]
+    if strict:
+        core.load_state_dict(model_state, strict=True)
+    else:
+        current_state = core.state_dict()
+        compatible_state = {
+            k: v
+            for k, v in model_state.items()
+            if k in current_state and tuple(current_state[k].shape) == tuple(v.shape)
+        }
+        core.load_state_dict(compatible_state, strict=False)
 
     if optimizer is not None and payload.get("optimizer") is not None:
         optimizer.load_state_dict(payload["optimizer"])
@@ -69,6 +81,9 @@ def load_checkpoint_if_available(
         masker_optimizer.load_state_dict(payload["masker_optimizer"])
     if masker_scheduler is not None and payload.get("masker_scheduler") is not None:
         masker_scheduler.load_state_dict(payload["masker_scheduler"])
+
+    if not load_training_state:
+        return {}
 
     restored = dict(payload.get("state", {}) or {})
     restored["ema_start"] = payload.get("ema_start", None)

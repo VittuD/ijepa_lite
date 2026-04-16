@@ -11,6 +11,8 @@ seed: 0
 device: cuda
 compile: false
 resume: null
+resume_strict: true
+resume_weights_only: false
 
 distributed:
   backend: nccl
