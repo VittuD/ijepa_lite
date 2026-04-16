@@ -617,13 +617,15 @@ def apply_predictor_pass_overlay(
 def make_labeled_strip(
     panels: list[tuple[str, np.ndarray]],
     label_h: int = 18,
+    gutter_px: int = 3,
 ) -> Image.Image:
     """Horizontal strip with a compact label above each panel."""
     if not panels:
         raise ValueError("Expected at least one panel.")
 
     h, w = panels[0][1].shape[:2]
-    strip = Image.new("RGB", (len(panels) * w, h + label_h), (20, 20, 20))
+    total_w = len(panels) * w + max(0, len(panels) - 1) * gutter_px
+    strip = Image.new("RGB", (total_w, h + label_h), (20, 20, 20))
     draw = ImageDraw.Draw(strip)
     try:
         from PIL import ImageFont
@@ -632,7 +634,7 @@ def make_labeled_strip(
         font = None
 
     for i, (label, arr) in enumerate(panels):
-        x0 = i * w
+        x0 = i * (w + gutter_px)
         draw.text((x0 + 4, 3), label, fill=(230, 230, 230), font=font)
         strip.paste(Image.fromarray(arr), (x0, label_h))
     return strip
