@@ -509,24 +509,35 @@ def apply_multiblock_overlay(
     target_idx_3d: np.ndarray,
     patch_size: int,
     image_size: int,
+    context_valid: Optional[np.ndarray] = None,
+    target_valid_3d: Optional[np.ndarray] = None,
     alpha: float = ALPHA_ASSIGN,
 ) -> np.ndarray:
     """Per-block colored overlay: ctx=blue, each target block k→distinct color, ignored=grey.
 
     Parameters
     ----------
-    context_idx  : (Nctx,) int array of context patch flat indices
-    target_idx_3d: (M, K) int array of target block patch flat indices
+    context_idx     : (Nctx,) int array of context patch flat indices
+    target_idx_3d   : (M, K) int array of target block patch flat indices
+    context_valid   : optional (Nctx,) bool array; False entries are padding
+    target_valid_3d : optional (M, K) bool array; False entries are padding
     """
     N = (image_size // patch_size) ** 2
     gh = gw = image_size // patch_size
 
     # Build role map: -1=ignored, 0=ctx, 1..M=target block k
     role = np.full(N, -1, dtype=np.int32)
-    role[context_idx] = 0
+    if context_valid is not None:
+        context_idx = context_idx[context_valid.astype(bool)]
+    if context_idx.size > 0:
+        role[context_idx] = 0
     M = target_idx_3d.shape[0]
     for k in range(M):
-        role[target_idx_3d[k]] = k + 1
+        idx_k = target_idx_3d[k]
+        if target_valid_3d is not None:
+            idx_k = idx_k[target_valid_3d[k].astype(bool)]
+        if idx_k.size > 0:
+            role[idx_k] = k + 1
 
     role_map = role.reshape(gh, gw)
     out = orig_np.copy().astype(float)
@@ -546,6 +557,85 @@ def apply_multiblock_overlay(
             out[y0:y1, x0:x1] = (1.0 - alpha) * orig_patch + alpha * col
 
     return out.clip(0, 255).astype(np.uint8)
+
+
+def apply_predictor_pass_overlay(
+    orig_np: np.ndarray,
+    context_idx: np.ndarray,
+    target_idx: np.ndarray,
+    patch_size: int,
+    image_size: int,
+    block_id: int,
+    context_valid: Optional[np.ndarray] = None,
+    target_valid: Optional[np.ndarray] = None,
+    alpha: float = ALPHA_ASSIGN,
+) -> np.ndarray:
+    """Overlay the exact valid positions fed to one separate predictor pass.
+
+    Blue patches are context tokens.  The block-colored patches are target
+    queries for this pass.  Grey patches are not part of this predictor call.
+    Invalid padded slots are filtered by the validity masks before drawing.
+    """
+    N = (image_size // patch_size) ** 2
+    gh = gw = image_size // patch_size
+
+    if context_valid is not None:
+        context_idx = context_idx[context_valid.astype(bool)]
+    if target_valid is not None:
+        target_idx = target_idx[target_valid.astype(bool)]
+
+    role = np.full(N, -1, dtype=np.int32)
+    if context_idx.size > 0:
+        role[context_idx] = 0
+    if target_idx.size > 0:
+        role[target_idx] = 1
+
+    role_map = role.reshape(gh, gw)
+    out = orig_np.copy().astype(float)
+    tgt_color = np.array(_BLOCK_COLORS[block_id % len(_BLOCK_COLORS)], dtype=float)
+
+    for i in range(gh):
+        for j in range(gw):
+            r = role_map[i, j]
+            if r == 0:
+                col = np.array(CTX_RGB, dtype=float)
+                a = alpha
+            elif r == 1:
+                col = tgt_color
+                a = alpha
+            else:
+                col = np.array(GREY, dtype=float)
+                a = 0.25
+            y0, y1 = i * patch_size, (i + 1) * patch_size
+            x0, x1 = j * patch_size, (j + 1) * patch_size
+            orig_patch = orig_np[y0:y1, x0:x1].astype(float)
+            out[y0:y1, x0:x1] = (1.0 - a) * orig_patch + a * col
+
+    return out.clip(0, 255).astype(np.uint8)
+
+
+def make_labeled_strip(
+    panels: list[tuple[str, np.ndarray]],
+    label_h: int = 18,
+) -> Image.Image:
+    """Horizontal strip with a compact label above each panel."""
+    if not panels:
+        raise ValueError("Expected at least one panel.")
+
+    h, w = panels[0][1].shape[:2]
+    strip = Image.new("RGB", (len(panels) * w, h + label_h), (20, 20, 20))
+    draw = ImageDraw.Draw(strip)
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    for i, (label, arr) in enumerate(panels):
+        x0 = i * w
+        draw.text((x0 + 4, 3), label, fill=(230, 230, 230), font=font)
+        strip.paste(Image.fromarray(arr), (x0, label_h))
+    return strip
 
 
 @torch.no_grad()
@@ -973,6 +1063,7 @@ def visualize_split(
     image_size: int,
     batch_size: int = BATCH_SIZE,
     k_tgt: Optional[int] = None,
+    predict_blocks_jointly: bool = True,
 ) -> tuple:
     """
     Run masker on ``n`` images from ``dataset`` and produce visualization grids.
@@ -1014,6 +1105,7 @@ def visualize_split(
     gh = gw = image_size // patch_size
 
     cells = []
+    predictor_cells = []
     all_p_tgt = []
     class_img_n: dict = {}
 
@@ -1059,6 +1151,8 @@ def visualize_split(
 
         ctx_idx = mask_out.context_idx
         tgt_idx = mask_out.target_idx
+        ctx_valid = mask_out.context_valid
+        tgt_valid = mask_out.target_valid
         p_tgt = mask_out.target_soft
         p_ctx = mask_out.context_soft
         p_ign = mask_out.aux.get("p_ign")
@@ -1083,11 +1177,25 @@ def visualize_split(
         if p_tgt is not None:
             all_p_tgt.append(p_tgt.cpu())
 
-        ctx_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
         tgt_flat = tgt_idx.reshape(B, -1) if tgt_idx.dim() == 3 else tgt_idx
+        tgt_valid_flat = (
+            tgt_valid.reshape(B, -1).to(device=device, dtype=torch.bool)
+            if tgt_valid is not None else None
+        )
+        ctx_valid_b = (
+            ctx_valid.to(device=device, dtype=torch.bool)
+            if ctx_valid is not None else None
+        )
+        ctx_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
         tgt_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
-        ctx_mask.scatter_(1, ctx_idx, True)
-        tgt_mask.scatter_(1, tgt_flat, True)
+        if ctx_valid_b is None:
+            ctx_mask.scatter_(1, ctx_idx, True)
+        else:
+            ctx_mask.scatter_(1, ctx_idx.masked_fill(~ctx_valid_b, 0), ctx_valid_b)
+        if tgt_valid_flat is None:
+            tgt_mask.scatter_(1, tgt_flat, True)
+        else:
+            tgt_mask.scatter_(1, tgt_flat.masked_fill(~tgt_valid_flat, 0), tgt_valid_flat)
 
         for bi in range(B):
             lbl = labels_batch[bi]
@@ -1108,8 +1216,52 @@ def visualize_split(
                     orig_np,
                     ctx_idx[bi].cpu().numpy(),
                     tgt_idx[bi].cpu().numpy(),  # (M, K)
-                    patch_size, image_size,
+                    patch_size=patch_size,
+                    image_size=image_size,
+                    context_valid=(
+                        ctx_valid[bi].detach().cpu().numpy()
+                        if ctx_valid is not None else None
+                    ),
+                    target_valid_3d=(
+                        tgt_valid[bi].detach().cpu().numpy()
+                        if tgt_valid is not None else None
+                    ),
                 )
+
+                panels = [("image", orig_np), ("soft roles", mid_np)]
+                ctx_idx_np = ctx_idx[bi].detach().cpu().numpy()
+                ctx_valid_np = (
+                    ctx_valid[bi].detach().cpu().numpy()
+                    if ctx_valid is not None else None
+                )
+                tgt_idx_np = tgt_idx[bi].detach().cpu().numpy()
+                tgt_valid_np = (
+                    tgt_valid[bi].detach().cpu().numpy()
+                    if tgt_valid is not None else None
+                )
+                for block_i in range(nway_M):
+                    block_valid = (
+                        tgt_valid_np[block_i]
+                        if tgt_valid_np is not None else None
+                    )
+                    n_block = (
+                        int(block_valid.astype(bool).sum())
+                        if block_valid is not None
+                        else int(tgt_idx_np.shape[1])
+                    )
+                    prefix = "pass" if not predict_blocks_jointly else "block"
+                    block_np = apply_predictor_pass_overlay(
+                        orig_np,
+                        ctx_idx_np,
+                        tgt_idx_np[block_i],
+                        patch_size,
+                        image_size,
+                        block_id=block_i,
+                        context_valid=ctx_valid_np,
+                        target_valid=block_valid,
+                    )
+                    panels.append((f"{prefix} {block_i + 1} n={n_block}", block_np))
+                predictor_cells.append(make_labeled_strip(panels))
 
                 # Accumulate per-role sums
                 role_keys = ["ctx"] + [f"tgt_{k}" for k in range(nway_M)] + ["ign"]
@@ -1194,10 +1346,31 @@ def visualize_split(
 
         fname = out_dir / f"{dataset_name}_{split}.png"
         grid.save(fname)
-        nctx = int(mask_out.context_idx.shape[1])
-        ntgt = int(mask_out.target_idx.shape[1])
-        print(f"  Saved -> {fname}   [{len(cells)} images, nctx={nctx} ntgt={ntgt} "
-              f"K/N={ntgt}/{N}={ntgt/N:.2f}]")
+        if mask_out.context_valid is not None:
+            nctx = float(mask_out.context_valid.float().sum(dim=1).mean().item())
+        else:
+            nctx = float(mask_out.context_idx.shape[1])
+        if mask_out.target_valid is not None:
+            ntgt = float(mask_out.target_valid.float().reshape(B, -1).sum(dim=1).mean().item())
+        elif mask_out.target_idx.dim() == 3:
+            ntgt = float(mask_out.target_idx.shape[1] * mask_out.target_idx.shape[2])
+        else:
+            ntgt = float(mask_out.target_idx.shape[1])
+        print(f"  Saved -> {fname}   [{len(cells)} images, nctx={nctx:.1f} ntgt={ntgt:.1f} "
+              f"K/N={ntgt:.1f}/{N}={ntgt/N:.2f}]")
+
+    if predictor_cells:
+        cell_w, cell_h = predictor_cells[0].size
+        n_rows = (len(predictor_cells) + grid_cols - 1) // grid_cols
+        grid = Image.new("RGB", (grid_cols * cell_w, n_rows * cell_h), (30, 30, 30))
+        for k, cell in enumerate(predictor_cells):
+            r, c = divmod(k, grid_cols)
+            grid.paste(cell, (c * cell_w, r * cell_h))
+
+        fname = out_dir / f"{dataset_name}_{split}_predictor_inputs.png"
+        grid.save(fname)
+        mode = "joint block groups" if predict_blocks_jointly else "separate passes"
+        print(f"  Saved -> {fname}   [{len(predictor_cells)} images, {mode}]")
 
     if masker_type == "nway":
         return role_sums, class_role_sums, class_img_n, "nway"

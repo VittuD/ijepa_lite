@@ -173,6 +173,7 @@ class VizCallback(Callback):
         core = unwrap_model(model)
         encoder = core.target_encoder
         masker = core.latent_masker
+        predict_blocks_jointly = bool(getattr(core, "predict_blocks_jointly", True))
 
         if masker is None:
             return
@@ -194,6 +195,7 @@ class VizCallback(Callback):
             patch_size=self._patch_size,
             image_size=self._image_size,
             k_tgt=k_tgt,
+            predict_blocks_jointly=predict_blocks_jointly,
         )
 
         if viz_type == "nway":
