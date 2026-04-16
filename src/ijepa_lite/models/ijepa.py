@@ -13,6 +13,11 @@ from ijepa_lite.masking.compressor import TokenCompressor
 from ijepa_lite.masking.metrics import mask_diagnostics, winners_fragmentation_probe
 from ijepa_lite.models.ema import ema_update
 from ijepa_lite.utils.dist import all_reduce_sum, get_world_size, is_distributed
+from ijepa_lite.utils.metrics import (
+    finalize_token_metric_sums,
+    merge_token_metric_sums,
+    token_metric_sums,
+)
 
 
 class IJEPAModel(nn.Module):
@@ -218,19 +223,37 @@ class IJEPAModel(nn.Module):
         # Step 4: Predictor + loss (single-block or multi-block)
         # ------------------------------------------------------------------
         pred_valid: Optional[torch.Tensor] = None
+        stream_token_metrics: Optional[Dict[str, float]] = None
         if tgt_idx.dim() == 2:
-            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx, pred_valid = (
+            (
+                reconstruction_loss,
+                pred,
+                tgt_tokens,
+                patch_loss,
+                pred_ctx,
+                pred_valid,
+                stream_token_metrics,
+            ) = (
                 self._forward_single_block(
                     ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d
                 )
             )
         elif tgt_idx.dim() == 3:
-            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx, pred_valid = (
+            (
+                reconstruction_loss,
+                pred,
+                tgt_tokens,
+                patch_loss,
+                pred_ctx,
+                pred_valid,
+                stream_token_metrics,
+            ) = (
                 self._forward_multi_block(
                     ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d,
                     ctx_valid=ctx_valid,
                     target_valid=tgt_valid,
                     target_block_counts=target_block_counts,
+                    compute_token_metrics=compute_agreement,
                 )
             )
         else:
@@ -315,6 +338,8 @@ class IJEPAModel(nn.Module):
         }
         if pred_valid is not None:
             out["pred_valid"] = pred_valid.detach()
+        if stream_token_metrics is not None:
+            out["stream_token_metrics"] = stream_token_metrics
         if compute_agreement:
             out["ctx_tokens_all"] = ctx_tokens_all
             out["tgt_tokens_all"] = tgt_at_ctx
@@ -428,7 +453,7 @@ class IJEPAModel(nn.Module):
 
         patch_loss = self.loss_fn(pred, tgt_tokens, reduction="none")  # (B, Ntgt)
         loss = patch_loss.mean()
-        return loss, pred, tgt_tokens, patch_loss, pred_ctx, None
+        return loss, pred, tgt_tokens, patch_loss, pred_ctx, None, None
 
     def _masked_token_mean(
         self,
@@ -503,6 +528,7 @@ class IJEPAModel(nn.Module):
         ctx_valid: torch.Tensor | None = None,
         target_valid: torch.Tensor | None = None,
         target_block_counts: torch.Tensor | None = None,
+        compute_token_metrics: bool = False,
     ):
         m = tgt_idx.shape[1]
         k = tgt_idx.shape[2]
@@ -517,6 +543,7 @@ class IJEPAModel(nn.Module):
             tgts_list = []
             ploss_list = []
             valid_list = []
+            stream_sums = None
             max_k = k
             for i in range(m):
                 k_i = counts[i] if counts is not None else k
@@ -563,6 +590,11 @@ class IJEPAModel(nn.Module):
                     block_ploss,
                     block_ploss.new_zeros(()),
                 )
+                if target_valid is not None and compute_token_metrics:
+                    stream_sums = merge_token_metric_sums(
+                        stream_sums,
+                        token_metric_sums(block_pred, block_tgt, block_valid),
+                    )
 
                 if keep_logging_tensors:
                     pred_pad = block_pred.new_zeros((b, max_k, d))
@@ -581,16 +613,23 @@ class IJEPAModel(nn.Module):
                 loss, patch_loss_cat = self._masked_token_mean(patch_loss_cat, valid_cat)
                 # The separate winners path can OOM at local batch 2048 if it
                 # materializes padded (B, M, K, D) logging tensors in addition
-                # to the M predictor graphs.  Reconstruction uses patch_loss_cat;
-                # token metrics are intentionally suppressed for this path.
+                # to the M predictor graphs. Reconstruction uses patch_loss_cat;
+                # token metrics are streamed block-by-block when requested.
                 pred = tgt_tokens_all.new_zeros((0, d))
                 tgt_tokens = tgt_tokens_all.new_zeros((0, d))
+                stream_token_metrics = None
+                if compute_token_metrics:
+                    stream_token_metrics = finalize_token_metric_sums(
+                        stream_sums,
+                        distributed=True,
+                    )
             else:
                 pred = torch.stack(preds_list, dim=1)        # (B, M, K, D)
                 tgt_tokens = torch.stack(tgts_list, dim=1)   # (B, M, K, D)
                 loss = patch_loss_cat.mean()
+                stream_token_metrics = None
             # ctx_loss not supported with separate prediction
-            return loss, pred, tgt_tokens, patch_loss_cat, None, pred_valid
+            return loss, pred, tgt_tokens, patch_loss_cat, None, pred_valid, stream_token_metrics
 
         # -- Joint prediction (default): all blocks concatenated ---------------
         tgt_idx_cat, tgt_valid_cat = self._flatten_multi_block_targets(
@@ -633,4 +672,4 @@ class IJEPAModel(nn.Module):
                 pred[:, i, :k_i] = pred_cat[:, offset: offset + k_i]
                 tgt_tokens[:, i, :k_i] = tgt_tokens_cat[:, offset: offset + k_i]
                 offset += k_i
-        return loss, pred, tgt_tokens, patch_loss_cat, pred_ctx, tgt_valid_cat
+        return loss, pred, tgt_tokens, patch_loss_cat, pred_ctx, tgt_valid_cat, None

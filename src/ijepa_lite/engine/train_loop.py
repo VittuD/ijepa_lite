@@ -279,11 +279,14 @@ def train(
                 else:
                     masker_lr = lr
 
-                extra = token_metrics(
-                    out["pred"],
-                    out["target"],
-                    valid=out.get("pred_valid"),
-                )
+                if out.get("stream_token_metrics") is not None:
+                    extra = dict(out["stream_token_metrics"])
+                else:
+                    extra = token_metrics(
+                        out["pred"],
+                        out["target"],
+                        valid=out.get("pred_valid"),
+                    )
 
                 if out.get("ctx_tokens_all") is not None:
                     extra.update(

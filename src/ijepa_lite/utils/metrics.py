@@ -5,6 +5,24 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
+from ijepa_lite.utils.dist import all_reduce_sum
+
+
+_TOKEN_METRIC_KEYS = (
+    "train/pred_tgt_cos_sim",
+    "train/mse_raw",
+    "train/pred_norm",
+    "train/tgt_norm",
+    "train/pred_std",
+    "train/tgt_std",
+    "train/pred_var",
+    "train/tgt_var",
+)
+
+
+def zero_token_metrics() -> Dict[str, float]:
+    return {k: 0.0 for k in _TOKEN_METRIC_KEYS}
+
 
 def _flatten_valid_tokens(
     x: torch.Tensor,
@@ -55,6 +73,130 @@ def _masked_spatial_std(
 
 
 @torch.no_grad()
+def token_metric_sums(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    valid: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """
+    Streaming-friendly sufficient statistics for token_metrics().
+
+    This avoids materializing a large padded (B, M, K, D) diagnostic tensor in
+    separate winners mode.  Callers can accumulate the returned tensors across
+    blocks, then pass the result to finalize_token_metric_sums().
+    """
+    if tuple(valid.shape) != tuple(pred.shape[:-1]):
+        raise ValueError(
+            f"valid shape {tuple(valid.shape)} does not match token tensor shape "
+            f"{tuple(pred.shape[:-1])}."
+        )
+    if pred.shape != target.shape:
+        raise ValueError(
+            f"pred shape {tuple(pred.shape)} does not match "
+            f"target shape {tuple(target.shape)}."
+        )
+
+    valid_f = valid.to(device=pred.device, dtype=torch.float32)
+    mask = valid_f.to(dtype=torch.bool).unsqueeze(-1)
+    mask_f = valid_f.unsqueeze(-1)
+    pred_f = torch.where(
+        mask,
+        pred.detach().float(),
+        torch.zeros_like(pred, dtype=torch.float32),
+    )
+    target_f = torch.where(
+        mask,
+        target.detach().float(),
+        torch.zeros_like(target, dtype=torch.float32),
+    )
+    count = mask_f.sum()
+
+    cos = F.cosine_similarity(
+        F.normalize(pred_f, dim=-1), F.normalize(target_f, dim=-1), dim=-1
+    )
+    diff = pred_f - target_f
+    return {
+        "count": count,
+        "cos_sum": (cos * valid_f).sum(),
+        "mse_sum": diff.pow(2).sum(),
+        "pred_norm_sum": pred_f.norm(dim=-1).sum(),
+        "tgt_norm_sum": target_f.norm(dim=-1).sum(),
+        "pred_sum": pred_f.sum(dim=tuple(range(pred_f.dim() - 1))),
+        "pred_sumsq": pred_f.pow(2).sum(dim=tuple(range(pred_f.dim() - 1))),
+        "tgt_sum": target_f.sum(dim=tuple(range(target_f.dim() - 1))),
+        "tgt_sumsq": target_f.pow(2).sum(dim=tuple(range(target_f.dim() - 1))),
+    }
+
+
+def merge_token_metric_sums(
+    acc: dict[str, torch.Tensor] | None,
+    update: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    if acc is None:
+        return {k: v.clone() for k, v in update.items()}
+    for k, v in update.items():
+        acc[k] = acc[k] + v
+    return acc
+
+
+@torch.no_grad()
+def finalize_token_metric_sums(
+    sums: dict[str, torch.Tensor] | None,
+    *,
+    distributed: bool = True,
+) -> Dict[str, float]:
+    if not sums:
+        return zero_token_metrics()
+
+    scalar_keys = (
+        "count",
+        "cos_sum",
+        "mse_sum",
+        "pred_norm_sum",
+        "tgt_norm_sum",
+    )
+    vector_keys = ("pred_sum", "pred_sumsq", "tgt_sum", "tgt_sumsq")
+    packed = torch.cat(
+        [sums[k].reshape(-1) for k in scalar_keys + vector_keys],
+        dim=0,
+    )
+    if distributed:
+        packed = all_reduce_sum(packed)
+
+    reduced = {}
+    offset = 0
+    for k in scalar_keys:
+        reduced[k] = packed[offset]
+        offset += 1
+    d = sums["pred_sum"].numel()
+    for k in vector_keys:
+        reduced[k] = packed[offset: offset + d]
+        offset += d
+
+    count = reduced["count"].clamp(min=1.0)
+    if float(reduced["count"].item()) <= 0.0:
+        return zero_token_metrics()
+
+    pred_mean = reduced["pred_sum"] / count
+    tgt_mean = reduced["tgt_sum"] / count
+    pred_var_d = (reduced["pred_sumsq"] / count - pred_mean.pow(2)).clamp(min=0.0)
+    tgt_var_d = (reduced["tgt_sumsq"] / count - tgt_mean.pow(2)).clamp(min=0.0)
+
+    return {
+        "train/pred_tgt_cos_sim": float((reduced["cos_sum"] / count).item()),
+        "train/mse_raw": float(
+            (reduced["mse_sum"] / (count * pred_mean.numel())).item()
+        ),
+        "train/pred_norm": float((reduced["pred_norm_sum"] / count).item()),
+        "train/tgt_norm": float((reduced["tgt_norm_sum"] / count).item()),
+        "train/pred_std": float(pred_var_d.sqrt().mean().item()),
+        "train/tgt_std": float(tgt_var_d.sqrt().mean().item()),
+        "train/pred_var": float(pred_var_d.mean().item()),
+        "train/tgt_var": float(tgt_var_d.mean().item()),
+    }
+
+
+@torch.no_grad()
 def token_metrics(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -75,16 +217,7 @@ def token_metrics(
     p = _flatten_valid_tokens(pred, valid)
     t = _flatten_valid_tokens(target, valid)
     if p.numel() == 0 or t.numel() == 0:
-        return {
-            "train/pred_tgt_cos_sim": 0.0,
-            "train/mse_raw": 0.0,
-            "train/pred_norm": 0.0,
-            "train/tgt_norm": 0.0,
-            "train/pred_std": 0.0,
-            "train/tgt_std": 0.0,
-            "train/pred_var": 0.0,
-            "train/tgt_var": 0.0,
-        }
+        return zero_token_metrics()
 
     cos = F.cosine_similarity(
         F.normalize(p, dim=-1), F.normalize(t, dim=-1), dim=-1
