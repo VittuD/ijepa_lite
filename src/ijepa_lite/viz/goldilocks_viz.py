@@ -638,6 +638,32 @@ def make_labeled_strip(
     return strip
 
 
+def count_duplicate_valid_assignments(
+    context_idx: np.ndarray,
+    target_idx_3d: np.ndarray,
+    context_valid: Optional[np.ndarray] = None,
+    target_valid_3d: Optional[np.ndarray] = None,
+) -> int:
+    """Count duplicate hard patch assignments after removing padded slots."""
+    parts = []
+    if context_valid is not None:
+        context_idx = context_idx[context_valid.astype(bool)]
+    if context_idx.size > 0:
+        parts.append(context_idx.reshape(-1))
+
+    for k in range(target_idx_3d.shape[0]):
+        idx_k = target_idx_3d[k]
+        if target_valid_3d is not None:
+            idx_k = idx_k[target_valid_3d[k].astype(bool)]
+        if idx_k.size > 0:
+            parts.append(idx_k.reshape(-1))
+
+    if not parts:
+        return 0
+    flat = np.concatenate(parts)
+    return int(flat.size - np.unique(flat).size)
+
+
 @torch.no_grad()
 def visualize_split_multiblock(
     dataset_name: str,
@@ -1106,6 +1132,8 @@ def visualize_split(
 
     cells = []
     predictor_cells = []
+    duplicate_hard_assignments = 0
+    duplicate_examples = 0
     all_p_tgt = []
     class_img_n: dict = {}
 
@@ -1239,6 +1267,15 @@ def visualize_split(
                     tgt_valid[bi].detach().cpu().numpy()
                     if tgt_valid is not None else None
                 )
+                n_duplicates = count_duplicate_valid_assignments(
+                    ctx_idx_np,
+                    tgt_idx_np,
+                    context_valid=ctx_valid_np,
+                    target_valid_3d=tgt_valid_np,
+                )
+                if n_duplicates > 0:
+                    duplicate_hard_assignments += n_duplicates
+                    duplicate_examples += 1
                 for block_i in range(nway_M):
                     block_valid = (
                         tgt_valid_np[block_i]
@@ -1261,6 +1298,7 @@ def visualize_split(
                         target_valid=block_valid,
                     )
                     panels.append((f"{prefix} {block_i + 1} n={n_block}", block_np))
+                panels.append(("hard roles", assign_np))
                 predictor_cells.append(make_labeled_strip(panels))
 
                 # Accumulate per-role sums
@@ -1334,6 +1372,12 @@ def visualize_split(
               f"(-> 0 = uniform marginal = no positional bias)")
         print(f"  p_tgt_score_std    = {p_tgt_score_std:.4f}  "
               f"(null={null_score_std:.4f}; well above -> content-adaptive)")
+
+    if duplicate_examples > 0:
+        print(
+            "  WARNING: duplicate valid hard assignments detected in "
+            f"{duplicate_examples} images ({duplicate_hard_assignments} duplicates)."
+        )
 
     # Assemble image grid
     if cells:
