@@ -156,23 +156,13 @@ def mask_diagnostics(
     # ------------------------------------------------------------------
     aux = mask_output.aux
 
-    # Winners-first Stage 1 metrics: exact hard-role counts averaged across the batch
-    # from the raw winner partition, kept separate from the legacy dense-slot stats above.
     role_counts = aux.get("role_counts")
-    target_counts = aux.get("target_counts")
-    if role_counts is not None and target_counts is not None:
-        role_counts_f = role_counts.float()
-        target_counts_f = target_counts.float()
-        stats["mask/winners_nctx"] = float(role_counts_f[:, 0].mean().item())
-        stats["mask/winners_ntgt"] = float(target_counts_f.sum(dim=1).mean().item())
-        stats["mask/winners_nign"] = float(role_counts_f[:, -1].mean().item())
-        for i in range(target_counts_f.shape[1]):
-            stats[f"mask/winners_tgt_{i}"] = float(target_counts_f[:, i].mean().item())
-
-    if "max_total_tgt" in aux:
-        stats["mask/max_total_tgt"] = float(aux["max_total_tgt"])
-    if "max_tgt_per_block" in aux:
-        stats["mask/max_tgt_per_block"] = float(aux["max_tgt_per_block"])
+    max_total_tgt = float(aux.get("max_total_tgt", 0))
+    max_tgt_per_block = float(aux.get("max_tgt_per_block", 0))
+    if max_total_tgt > 0:
+        stats["mask/max_total_tgt"] = max_total_tgt
+    if max_tgt_per_block > 0:
+        stats["mask/max_tgt_per_block"] = max_tgt_per_block
     if "predictor_seq_len_max" in aux:
         stats["mask/predictor_seq_len_max"] = float(aux["predictor_seq_len_max"])
 
