@@ -3,9 +3,8 @@
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
-#SBATCH --nodes=4
-#SBATCH --ntasks-per-node=1
-#SBATCH --ntasks=4
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=24:00:00
@@ -43,20 +42,10 @@ echo "DATA_ROOT=$DATA_ROOT"
 ls -ld "$DATA_ROOT" "$DATA_ROOT/train" "$DATA_ROOT/val"
 nvidia-smi -L
 
-MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-MASTER_PORT=29500
-export MASTER_ADDR MASTER_PORT
+EXP_NAME="in1k_96_vits_ps8_vanilla_multiblock_300ep"
 
-export EXP_NAME="in1k_96_vits_ps8_vanilla_multiblock_300ep"
-
-srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  bash -c '
-  python -m torch.distributed.run \
-    --nnodes=$SLURM_NNODES \
-    --nproc_per_node=4 \
-    --node_rank=$SLURM_NODEID \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+  python -m torch.distributed.run --standalone --nproc_per_node=4 \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_multiblock \
       exp_name="$EXP_NAME" \
@@ -71,4 +60,3 @@ srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 --cpus-per-task=$SLURM_CPUS_PER_
       train.eval_every_epochs=0 \
       train.viz_enabled=false \
       logger.mode=offline
-'
