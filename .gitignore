@@ -1,9 +1,17 @@
 .vscode/
 
+# Ignore local agent/project metadata
+.codex
+.claude/
+CLAUDE.md
+
 # Ignore pycaches
 __pycache__/
 *.pyc
 src/ijepa_lite.egg-info/
+
+# Ignore local upstream checkout/submodule link
+ijepa/
 
 # Ignore datasets
 datasets/
