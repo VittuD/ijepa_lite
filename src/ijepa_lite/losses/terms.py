@@ -88,6 +88,38 @@ class NegSurpriseTerm(MaskerTerm):
 
 
 # ------------------------------------------------------------------
+# −cosine surprise — scale-invariant context/target dissimilarity
+# ------------------------------------------------------------------
+
+class NegCosSurpriseTerm(MaskerTerm):
+    name = "neg_cos_surprise"
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        # Same collapse-safe context centroid as raw BS, but score with cosine
+        # distance so global feature-scale changes do not dominate the term.
+        image_mean = ema_full.mean(dim=1)                                    # (B, D)
+        p_ctx_sum = p_ctx.sum(dim=1, keepdim=True)                           # (B, 1)
+        ctx_weighted = (p_ctx.unsqueeze(-1) * ema_full).sum(dim=1)           # (B, D)
+        virtual_w = (1.0 - p_ctx_sum).clamp(min=0.0)                        # (B, 1)
+        ctx_centroid = (ctx_weighted + virtual_w * image_mean) \
+                       / (p_ctx_sum + virtual_w).clamp(min=1e-6)             # (B, D)
+
+        cos = F.cosine_similarity(
+            ema_full,
+            ctx_centroid.unsqueeze(1),
+            dim=-1,
+            eps=1e-8,
+        )                                                                    # (B, N)
+        cos_surprise_all = 1.0 - cos
+        p_tgt_sum = p_tgt.sum(dim=-1).clamp(min=1.0)                         # (B,)
+        cos_surprise = ((p_tgt * cos_surprise_all).sum(-1) / p_tgt_sum).mean()
+
+        return -cos_surprise, {
+            "cos_surprise_mean": float(cos_surprise.detach().item()),
+        }
+
+
+# ------------------------------------------------------------------
 # −centroid distance — ||μ_ctx − μ_tgt||² (minimise → maximise)
 #
 # Same as neg_surprise but without the within-target variance term.
@@ -560,6 +592,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "H_cond": HCondTerm,
     "neg_H_marg": NegHMargTerm,
     "neg_surprise": NegSurpriseTerm,
+    "neg_cos_surprise": NegCosSurpriseTerm,
     "neg_centroid_dist": NegCentroidDistTerm,
     "floor_penalty": FloorPenaltyTerm,
     "ignore_tax": IgnoreTaxTerm,
