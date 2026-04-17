@@ -49,8 +49,9 @@ export MASTER_ADDR MASTER_PORT
 
 export EXP_NAME="in1k_96_vits_ps8_vanilla_multiblock_300ep"
 
-srun bash -c '
-  torchrun \
+srun --ntasks=$SLURM_NNODES --ntasks-per-node=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
+  bash -c '
+  python -m torch.distributed.run \
     --nnodes=$SLURM_NNODES \
     --nproc_per_node=4 \
     --node_rank=$SLURM_NODEID \
@@ -65,6 +66,7 @@ srun bash -c '
       data.train_split=train \
       data.val_split=val \
       data.download=false \
+      data.batch_size=2048 \
       train.epochs=300 \
       train.eval_every_epochs=0 \
       train.viz_enabled=false \
