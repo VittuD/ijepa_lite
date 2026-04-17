@@ -160,6 +160,8 @@ def mask_diagnostics(
     # Surprise and ignore-tax metrics — always log when present
     if "surprise_mean" in aux:
         stats["mask/surprise_mean"] = float(aux["surprise_mean"])
+    if "cos_surprise_mean" in aux:
+        stats["mask/cos_surprise_mean"] = float(aux["cos_surprise_mean"])
 
     if "ign_rate" in aux:
         stats["mask/ign_rate"] = float(aux["ign_rate"])
