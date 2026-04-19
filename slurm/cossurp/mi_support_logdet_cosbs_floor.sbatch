@@ -2,7 +2,7 @@
 #SBATCH --job-name=ijepa-mi-support-logdet-cosbs-floor
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
