@@ -447,6 +447,99 @@ class NegSupportLogDetDiversityTerm(_BaseLogDetDiversityTerm):
         return -score, logs
 
 
+class NegSignedSupportLogDetTerm(_BaseLogDetDiversityTerm):
+    name = "neg_signed_support_logdet"
+    log_prefix = "signed_support_logdet"
+    variant_id = 3
+    uses_support_multiplier = True
+
+    def __init__(
+        self,
+        diverse_role_indices: list[int] | tuple[int, ...] = (0, 1),
+        compact_role_indices: list[int] | tuple[int, ...] = (2,),
+        compact_weight: float = 1.0,
+        support_power: float = 0.5,
+        **kw,
+    ):
+        diverse = tuple(int(i) for i in diverse_role_indices)
+        compact = tuple(int(i) for i in compact_role_indices)
+        if len(set(diverse)) != len(diverse):
+            raise ValueError(
+                "neg_signed_support_logdet.diverse_role_indices contains duplicates"
+            )
+        if len(set(compact)) != len(compact):
+            raise ValueError(
+                "neg_signed_support_logdet.compact_role_indices contains duplicates"
+            )
+        if len(diverse) == 0 and len(compact) == 0:
+            raise ValueError(
+                "neg_signed_support_logdet needs at least one diverse or compact role"
+            )
+        overlap = sorted(set(diverse).intersection(compact))
+        if overlap:
+            raise ValueError(
+                "neg_signed_support_logdet roles cannot be both diverse and compact: "
+                f"{overlap}"
+            )
+
+        role_indices = diverse + compact
+        super().__init__(role_indices=role_indices, **kw)
+        self.diverse_role_indices = diverse
+        self.compact_role_indices = compact
+        self.compact_weight = float(compact_weight)
+        if self.compact_weight < 0.0:
+            raise ValueError("neg_signed_support_logdet.compact_weight must be >= 0")
+        self.support_power = float(support_power)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        logdet, mass, ess, trace, support = self._compute_role_stats(
+            p_ctx=p_ctx, p_tgt=p_tgt, p_ign=p_ign, ema_full=ema_full, **kw,
+        )
+        support_factor = support.clamp(min=self.eps).pow(self.support_power)
+        role_score = support_factor * logdet
+
+        role_to_pos = {role: pos for pos, role in enumerate(self.role_indices)}
+        diverse_pos = [role_to_pos[r] for r in self.diverse_role_indices]
+        compact_pos = [role_to_pos[r] for r in self.compact_role_indices]
+
+        zero = role_score.new_zeros(())
+        diverse_score = role_score[..., diverse_pos].mean() if diverse_pos else zero
+        compact_score = role_score[..., compact_pos].mean() if compact_pos else zero
+        score = diverse_score - self.compact_weight * compact_score
+
+        logs = self._build_logs(
+            score=score,
+            logdet=logdet,
+            mass=mass,
+            ess=ess,
+            trace=trace,
+            support=support,
+            role_score=role_score,
+        )
+        logs.update({
+            "signed_support_logdet_objective": float(score.detach().item()),
+            "signed_support_logdet_diverse_score": float(diverse_score.detach().item()),
+            "signed_support_logdet_compact_score": float(compact_score.detach().item()),
+            "signed_support_logdet_compact_weight": self.compact_weight,
+            "signed_support_logdet_support_power": self.support_power,
+            "signed_support_logdet_n_diverse_roles": float(len(diverse_pos)),
+            "signed_support_logdet_n_compact_roles": float(len(compact_pos)),
+            "logdet/signed_diverse_score": float(diverse_score.detach().item()),
+            "logdet/signed_compact_score": float(compact_score.detach().item()),
+            "logdet/uses_signed_roles": 1.0,
+        })
+
+        for role, pos in role_to_pos.items():
+            signed = 1.0 if role in self.diverse_role_indices else -self.compact_weight
+            contrib = signed * role_score[..., pos].mean()
+            logs[f"signed_support_logdet_sign_role_{role}"] = float(signed)
+            logs[f"signed_support_logdet_contrib_role_{role}"] = float(
+                contrib.detach().item()
+            )
+
+        return -score, logs
+
+
 class NegMassLogDetDiversityTerm(_BaseLogDetDiversityTerm):
     name = "neg_mass_logdet_diversity"
     log_prefix = "mass_logdet"
@@ -946,6 +1039,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "neg_symmetric_cos_surprise": NegSymmetricCosSurpriseTerm,
     "neg_logdet_diversity": NegLogDetDiversityTerm,
     "neg_support_logdet_diversity": NegSupportLogDetDiversityTerm,
+    "neg_signed_support_logdet": NegSignedSupportLogDetTerm,
     "neg_mass_logdet_diversity": NegMassLogDetDiversityTerm,
     "neg_centroid_dist": NegCentroidDistTerm,
     "floor_penalty": FloorPenaltyTerm,

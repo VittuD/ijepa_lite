@@ -177,6 +177,7 @@ def mask_diagnostics(
             or key.startswith("logdet_")
             or key.startswith("logdet/")
             or key.startswith("support_logdet_")
+            or key.startswith("signed_support_logdet_")
             or key.startswith("mass_logdet_")
         ):
             stats[f"mask/{key}"] = float(value)
