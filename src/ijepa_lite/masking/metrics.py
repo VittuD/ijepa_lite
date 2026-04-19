@@ -165,6 +165,7 @@ def mask_diagnostics(
     for key, value in aux.items():
         if (
             key.startswith("logdet_")
+            or key.startswith("logdet/")
             or key.startswith("support_logdet_")
             or key.startswith("mass_logdet_")
         ):

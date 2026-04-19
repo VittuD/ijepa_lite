@@ -126,6 +126,9 @@ class NegCosSurpriseTerm(MaskerTerm):
 class _BaseLogDetDiversityTerm(MaskerTerm):
     name = "_base_logdet_diversity"
     log_prefix = "logdet"
+    variant_id = -1
+    uses_mass_scaled_cov = False
+    uses_support_multiplier = False
 
     def __init__(
         self,
@@ -263,12 +266,30 @@ class _BaseLogDetDiversityTerm(MaskerTerm):
         trace_by_role = trace.detach().mean(dim=0)
         support_by_role = support.detach().mean(dim=0)
         role_score_by_role = None if role_score is None else role_score.detach().mean(dim=0)
+        score_by_role = logdet_by_role if role_score_by_role is None else role_score_by_role
+        logs.update({
+            "logdet/objective": float(score.detach().item()),
+            "logdet/base_mean": float(logdet.detach().mean().item()),
+            "logdet/mass_mean": float(mass.detach().mean().item()),
+            "logdet/ess_mean": float(ess.detach().mean().item()),
+            "logdet/trace_mean": float(trace.detach().mean().item()),
+            "logdet/support_mean": float(support.detach().mean().item()),
+            "logdet/variant_id": float(self.variant_id),
+            "logdet/uses_mass_scaled_cov": float(self.uses_mass_scaled_cov),
+            "logdet/uses_support_multiplier": float(self.uses_support_multiplier),
+        })
         for j, role_idx in enumerate(self.role_indices):
             logs[f"{prefix}_diversity_role_{role_idx}"] = float(logdet_by_role[j].item())
             logs[f"{prefix}_mass_role_{role_idx}"] = float(mass_by_role[j].item())
             logs[f"{prefix}_ess_role_{role_idx}"] = float(ess_by_role[j].item())
             logs[f"{prefix}_trace_role_{role_idx}"] = float(trace_by_role[j].item())
             logs[f"{prefix}_support_role_{role_idx}"] = float(support_by_role[j].item())
+            logs[f"logdet/base_role_{role_idx}"] = float(logdet_by_role[j].item())
+            logs[f"logdet/score_role_{role_idx}"] = float(score_by_role[j].item())
+            logs[f"logdet/mass_role_{role_idx}"] = float(mass_by_role[j].item())
+            logs[f"logdet/ess_role_{role_idx}"] = float(ess_by_role[j].item())
+            logs[f"logdet/trace_role_{role_idx}"] = float(trace_by_role[j].item())
+            logs[f"logdet/support_role_{role_idx}"] = float(support_by_role[j].item())
             if role_score_by_role is not None:
                 logs[f"{prefix}_supported_role_{role_idx}"] = float(role_score_by_role[j].item())
         return logs
@@ -277,6 +298,7 @@ class _BaseLogDetDiversityTerm(MaskerTerm):
 class NegLogDetDiversityTerm(_BaseLogDetDiversityTerm):
     name = "neg_logdet_diversity"
     log_prefix = "logdet"
+    variant_id = 0
 
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
         logdet, mass, ess, trace, support = self._compute_role_stats(
@@ -298,6 +320,8 @@ class NegLogDetDiversityTerm(_BaseLogDetDiversityTerm):
 class NegSupportLogDetDiversityTerm(_BaseLogDetDiversityTerm):
     name = "neg_support_logdet_diversity"
     log_prefix = "support_logdet"
+    variant_id = 1
+    uses_support_multiplier = True
 
     def __init__(self, support_power: float = 0.5, **kw):
         super().__init__(**kw)
@@ -327,6 +351,8 @@ class NegSupportLogDetDiversityTerm(_BaseLogDetDiversityTerm):
 class NegMassLogDetDiversityTerm(_BaseLogDetDiversityTerm):
     name = "neg_mass_logdet_diversity"
     log_prefix = "mass_logdet"
+    variant_id = 2
+    uses_mass_scaled_cov = True
 
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
         logdet, mass, ess, trace, support = self._compute_mass_scaled_role_stats(
