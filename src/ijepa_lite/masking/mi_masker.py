@@ -220,26 +220,24 @@ class MIRateMasker(LatentMasker):
             else:
                 winners = soft.argmax(dim=-1)
 
-            tgt_scores = (winners == 1).float()
-            tgt_counts = tgt_scores.sum(dim=-1)
-            needs_tgt_fallback = tgt_counts < self.ntgt_min
-            if needs_tgt_fallback.any():
-                tgt_scores[needs_tgt_fallback] = p_tgt[needs_tgt_fallback]
-
-            ntgt = max(self.ntgt_min, int(tgt_counts.max().item()))
-            # Scores are binary except fallback rows; topk avoids sorting all
-            # patches while still selecting winners before non-winner fillers.
+            tgt_winners = winners == 1
+            # Pack a rectangular hard mask without letting the max-count sample
+            # dictate the whole batch width.  Winners are ranked before fillers;
+            # fillers use soft probabilities to avoid arbitrary zero-score ties.
+            tgt_counts = tgt_winners.float().sum(dim=-1)
+            tgt_scores = tgt_winners.float() + p_tgt * (~tgt_winners).float()
+            ntgt = max(self.ntgt_min, int(round(tgt_counts.float().mean().item())))
+            ntgt = min(ntgt, self.num_patches - self.nctx_min)
+            # topk avoids sorting all patches while still selecting winners
+            # before non-winner fillers.
             _, tgt_idx = torch.topk(tgt_scores, ntgt, dim=-1, sorted=False)
 
-            ctx_scores = (winners == 0).float()
-            ctx_counts = ctx_scores.sum(dim=-1)
-            needs_ctx_fallback = ctx_counts < self.nctx_min
-            if needs_ctx_fallback.any():
-                p_ctx_fb = p_ctx[needs_ctx_fallback].clone()
-                p_ctx_fb.scatter_(1, tgt_idx[needs_ctx_fallback], 0.0)
-                ctx_scores[needs_ctx_fallback] = p_ctx_fb
-
-            nctx = max(self.nctx_min, int(ctx_counts.max().item()))
+            ctx_winners = winners == 0
+            ctx_counts = ctx_winners.float().sum(dim=-1)
+            ctx_scores = ctx_winners.float() + p_ctx * (~ctx_winners).float()
+            nctx = max(self.nctx_min, int(round(ctx_counts.float().mean().item())))
+            nctx = min(nctx, self.num_patches - ntgt)
+            ctx_scores = ctx_scores.scatter(1, tgt_idx, -torch.inf)
             _, ctx_idx = torch.topk(ctx_scores, nctx, dim=-1, sorted=False)
 
             aux_counts = {
