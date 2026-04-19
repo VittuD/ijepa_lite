@@ -123,8 +123,9 @@ class NegCosSurpriseTerm(MaskerTerm):
 # −logdet diversity — role-wise sketched covariance volume
 # ------------------------------------------------------------------
 
-class NegLogDetDiversityTerm(MaskerTerm):
-    name = "neg_logdet_diversity"
+class _BaseLogDetDiversityTerm(MaskerTerm):
+    name = "_base_logdet_diversity"
+    log_prefix = "logdet"
 
     def __init__(
         self,
@@ -164,7 +165,7 @@ class NegLogDetDiversityTerm(MaskerTerm):
             self._projection = proj.to(device=device)
         return self._projection
 
-    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+    def _compute_role_stats(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
         soft = kw.get("soft")
         if soft is None:
             soft = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)  # (B, N, 3)
@@ -198,19 +199,87 @@ class NegLogDetDiversityTerm(MaskerTerm):
         trace = cov.diagonal(dim1=-2, dim2=-1).sum(-1)                       # (B, R)
         sum_w2 = weights.square().sum(dim=1).clamp(min=self.eps)             # (B, R)
         ess = torch.where(mass > self.eps, sum_w2.reciprocal(), torch.zeros_like(sum_w2))
+        support = (mass / float(ema_full.shape[1])).clamp(min=0.0)           # (B, R)
+        return logdet, mass, ess, trace, support
 
+    def _build_logs(
+        self,
+        *,
+        score: torch.Tensor,
+        logdet: torch.Tensor,
+        mass: torch.Tensor,
+        ess: torch.Tensor,
+        trace: torch.Tensor,
+        support: torch.Tensor,
+        role_score: torch.Tensor | None = None,
+    ) -> dict[str, float]:
+        prefix = self.log_prefix
         logs = {
-            "logdet_diversity": float(score.detach().item()),
+            f"{prefix}_diversity": float(score.detach().item()),
         }
         logdet_by_role = logdet.detach().mean(dim=0)
         mass_by_role = mass.detach().mean(dim=0)
         ess_by_role = ess.detach().mean(dim=0)
         trace_by_role = trace.detach().mean(dim=0)
+        support_by_role = support.detach().mean(dim=0)
+        role_score_by_role = None if role_score is None else role_score.detach().mean(dim=0)
         for j, role_idx in enumerate(self.role_indices):
-            logs[f"logdet_diversity_role_{role_idx}"] = float(logdet_by_role[j].item())
-            logs[f"logdet_mass_role_{role_idx}"] = float(mass_by_role[j].item())
-            logs[f"logdet_ess_role_{role_idx}"] = float(ess_by_role[j].item())
-            logs[f"logdet_trace_role_{role_idx}"] = float(trace_by_role[j].item())
+            logs[f"{prefix}_diversity_role_{role_idx}"] = float(logdet_by_role[j].item())
+            logs[f"{prefix}_mass_role_{role_idx}"] = float(mass_by_role[j].item())
+            logs[f"{prefix}_ess_role_{role_idx}"] = float(ess_by_role[j].item())
+            logs[f"{prefix}_trace_role_{role_idx}"] = float(trace_by_role[j].item())
+            logs[f"{prefix}_support_role_{role_idx}"] = float(support_by_role[j].item())
+            if role_score_by_role is not None:
+                logs[f"{prefix}_supported_role_{role_idx}"] = float(role_score_by_role[j].item())
+        return logs
+
+
+class NegLogDetDiversityTerm(_BaseLogDetDiversityTerm):
+    name = "neg_logdet_diversity"
+    log_prefix = "logdet"
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        logdet, mass, ess, trace, support = self._compute_role_stats(
+            p_ctx=p_ctx, p_tgt=p_tgt, p_ign=p_ign, ema_full=ema_full, **kw,
+        )
+        score = logdet.mean()
+        logs = self._build_logs(
+            score=score,
+            logdet=logdet,
+            mass=mass,
+            ess=ess,
+            trace=trace,
+            support=support,
+        )
+
+        return -score, logs
+
+
+class NegSupportLogDetDiversityTerm(_BaseLogDetDiversityTerm):
+    name = "neg_support_logdet_diversity"
+    log_prefix = "support_logdet"
+
+    def __init__(self, support_power: float = 0.5, **kw):
+        super().__init__(**kw)
+        self.support_power = float(support_power)
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        logdet, mass, ess, trace, support = self._compute_role_stats(
+            p_ctx=p_ctx, p_tgt=p_tgt, p_ign=p_ign, ema_full=ema_full, **kw,
+        )
+        support_factor = support.clamp(min=self.eps).pow(self.support_power)
+        role_score = support_factor * logdet
+        score = role_score.mean()
+        logs = self._build_logs(
+            score=score,
+            logdet=logdet,
+            mass=mass,
+            ess=ess,
+            trace=trace,
+            support=support,
+            role_score=role_score,
+        )
+        logs["support_logdet_support_power"] = self.support_power
 
         return -score, logs
 
@@ -689,6 +758,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "neg_surprise": NegSurpriseTerm,
     "neg_cos_surprise": NegCosSurpriseTerm,
     "neg_logdet_diversity": NegLogDetDiversityTerm,
+    "neg_support_logdet_diversity": NegSupportLogDetDiversityTerm,
     "neg_centroid_dist": NegCentroidDistTerm,
     "floor_penalty": FloorPenaltyTerm,
     "ignore_tax": IgnoreTaxTerm,
