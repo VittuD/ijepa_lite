@@ -14,7 +14,7 @@ masker-based pools (ctx / tgt / ign / ctx+tgt). The "center" pool needs no
 masker and serves as the positional-prior baseline.
 
 Usage:
-  python hacky_cross_ckpt_probe.py \\
+  python scripts/hacky/hacky_cross_ckpt_probe.py \\
       --encoder-ckpt /path/to/vanilla_last.pt \\
       --masker-ckpt  /path/to/mi_coupled_last.pt \\
       --data-root    /path/to/datasets/ \\
@@ -25,7 +25,7 @@ Usage:
       --device       cuda
 
   # masker-ckpt optional — omit when only running center / all pools
-  python hacky_cross_ckpt_probe.py \\
+  python scripts/hacky/hacky_cross_ckpt_probe.py \\
       --encoder-ckpt /path/to/vanilla_last.pt \\
       --data-root    /path/to/datasets/ \\
       --dataset      stl10 \\

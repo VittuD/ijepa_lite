@@ -29,12 +29,12 @@ Each grid is 25 columns x 20 rows = 500 images.
 Each cell is a 3-panel strip: [original | ign-only | color-coded] = 288x96 px.
 
 Usage (single checkpoint — encoder and masker from same file):
-  python hacky_visualize_ign_patches.py \\
+  python scripts/hacky/hacky_visualize_ign_patches.py \\
       --ckpt /path/to/mi_coupled_last.pt \\
       [--data-root /path/to/datasets] [--out-dir ign_viz] [--n 500] [--device cuda]
 
 Usage (split checkpoints — Phase-2 diagnostic):
-  python hacky_visualize_ign_patches.py \\
+  python scripts/hacky/hacky_visualize_ign_patches.py \\
       --encoder-ckpt /path/to/vanilla_last.pt \\
       --masker-ckpt  /path/to/mi_coupled_last.pt \\
       [--data-root /path/to/datasets] [--out-dir ign_viz_phase2]

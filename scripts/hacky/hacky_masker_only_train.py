@@ -19,18 +19,18 @@ Key metric logged: spatial_pos_std
 
 The saved checkpoint uses latent_masker.* key prefix so it is directly
 compatible with hacky_visualize_ign_patches.py via:
-  python hacky_visualize_ign_patches.py \\
+  python scripts/hacky/hacky_visualize_ign_patches.py \\
       --encoder-ckpt /path/to/original_encoder_ckpt.pt \\
       --masker-ckpt  <out_dir>/epoch_XXXX.pt
 
 Usage:
   # Jointly-trained encoder (main diagnostic)
-  python hacky_masker_only_train.py \\
+  python scripts/hacky/hacky_masker_only_train.py \\
       --encoder-ckpt /path/to/mi_coupled_last.pt \\
       --out-dir masker_only_joint_enc
 
   # Vanilla JEPA encoder (control)
-  python hacky_masker_only_train.py \\
+  python scripts/hacky/hacky_masker_only_train.py \\
       --encoder-ckpt /path/to/vanilla_last.pt \\
       --out-dir masker_only_vanilla_enc
 """
@@ -356,7 +356,7 @@ def main():
 
     print(f"\nDone. Checkpoints in ./{out_dir}/")
     print("Visualise with:")
-    print(f"  python hacky_visualize_ign_patches.py \\")
+    print(f"  python scripts/hacky/hacky_visualize_ign_patches.py \\")
     print(f"      --encoder-ckpt {args.encoder_ckpt} \\")
     print(f"      --masker-ckpt  {out_dir}/epoch_{args.epochs-1:04d}.pt \\")
     print(f"      --out-dir      ign_viz_masker_only")

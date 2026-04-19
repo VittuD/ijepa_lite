@@ -10,10 +10,10 @@ Usage:
   wandb sync path/to/wandb/offline-run-XXXXXXXX-YYYYYYYY
 
   # 2. Then analyze (use the run path printed after sync):
-  python hacky_analyze_goldilocks_hist.py --run entity/project/run_id
+  python scripts/hacky/hacky_analyze_goldilocks_hist.py --run entity/project/run_id
 
   # Or by local wandb dir (attempts direct file read):
-  python hacky_analyze_goldilocks_hist.py --run-dir path/to/wandb/offline-run-...
+  python scripts/hacky/hacky_analyze_goldilocks_hist.py --run-dir path/to/wandb/offline-run-...
 
   # Options:
   --steps 10          # how many steps to sample (default: all, can be slow)

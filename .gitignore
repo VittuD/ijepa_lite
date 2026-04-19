@@ -1,4 +1,9 @@
 .vscode/
+.claude/
+.codex
+.codex/
+CLAUDE.md
+ijepa/
 
 # Ignore pycaches
 __pycache__/

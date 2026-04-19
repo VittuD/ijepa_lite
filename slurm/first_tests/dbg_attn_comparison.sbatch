@@ -29,7 +29,7 @@ export N=100
 export OUT_DIR="$WORK/vitturini/attn_comparison_output/${SLURM_JOB_ID}"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python $WORK/vitturini/ijepa_lite/hacky_visualize_attention_comparison.py \
+  python $WORK/vitturini/ijepa_lite/scripts/hacky/hacky_visualize_attention_comparison.py \
     --ckpt-ours "$CKPT_OURS" \
     --ckpt-orig "$CKPT_ORIG" \
     --experiment "$EXPERIMENT" \

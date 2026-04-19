@@ -41,7 +41,7 @@ mkdir -p sbatch_logs/viz-goldilocks
 export PRETRAIN_CKPT="$WORK/vitturini/outputs/2026-03-07/19-39-54_stl10_vits_ps8_goldilocks/rank0/checkpoints/last.pt"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python ijepa_lite/hacky_visualize_goldilocks.py \
+  python ijepa_lite/scripts/hacky/hacky_visualize_goldilocks.py \
     --ckpt       "$PRETRAIN_CKPT" \
     --experiment stl10_vits_ps8_goldilocks \
     --k-tgt      36 \

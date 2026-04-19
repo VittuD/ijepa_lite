@@ -67,7 +67,7 @@ echo "Array task ${SLURM_ARRAY_TASK_ID}: encoder=${ENCODER_CKPT}  predictor=${PR
 mkdir -p sbatch_logs/masker-only-train_vanilla-predictor
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python ijepa_lite/hacky_masker_only_train.py \
+  python ijepa_lite/scripts/hacky/hacky_masker_only_train.py \
     --encoder-ckpt   "$ENCODER_CKPT" \
     --predictor-ckpt "$PREDICTOR_CKPT" \
     --data-root      "$FAST/datasets/" \

@@ -29,7 +29,7 @@ CKPT="$WORK/vitturini/outputs/2026-03-07/19-39-54_stl10_vits_ps8_goldilocks/rank
 DATA_ROOT="$FAST/datasets"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python $WORK/vitturini/ijepa_lite/hacky_stl10_logreg.py \
+  python $WORK/vitturini/ijepa_lite/scripts/hacky/hacky_stl10_logreg.py \
     --ckpt "$CKPT" \
     --data_root "$DATA_ROOT" \
     --prefer target \

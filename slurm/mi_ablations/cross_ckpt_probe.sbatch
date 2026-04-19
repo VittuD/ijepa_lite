@@ -66,7 +66,7 @@ echo "  masker  : $MASKER_CKPT"
 mkdir -p sbatch_logs/cross-ckpt-probe
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python ijepa_lite/hacky_cross_ckpt_probe.py \
+  python ijepa_lite/scripts/hacky/hacky_cross_ckpt_probe.py \
     --encoder-ckpt "$ENCODER_CKPT" \
     --masker-ckpt  "$MASKER_CKPT" \
     --data-root    "$FAST/datasets/" \

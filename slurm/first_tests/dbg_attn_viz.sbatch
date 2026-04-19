@@ -29,7 +29,7 @@ export LAYER=-1
 export OUT_DIR="$WORK/vitturini/viz_attn/attn_viz_output/${SLURM_JOB_ID}"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python $WORK/vitturini/ijepa_lite/hacky_visualize_attention.py \
+  python $WORK/vitturini/ijepa_lite/scripts/hacky/hacky_visualize_attention.py \
     --ckpt "$CKPT" \
     --experiment "$EXPERIMENT" \
     --data-root "$DATA_ROOT" \

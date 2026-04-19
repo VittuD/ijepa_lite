@@ -17,7 +17,7 @@ All three modes (cls, mean, rollout) are run automatically into subdirs
 of --out-dir.
 
 Usage:
-  python hacky_visualize_attention.py \
+  python scripts/hacky/hacky_visualize_attention.py \
       --ckpt /path/to/last.pt \
       --experiment stl10_vits_ps8_multiblock \
       [--data-root /path/to/datasets] [--out-dir attn_viz] [--n 200] \

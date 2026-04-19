@@ -17,7 +17,7 @@ Aggregate outputs:
   3-way: <out_dir>/<dataset>_avg_3way.png,  <dataset>_per_class_3way.png
 
 Usage:
-  python hacky_visualize_goldilocks.py \\
+  python scripts/hacky/hacky_visualize_goldilocks.py \\
       --ckpt /path/to/last.pt \\
       --experiment stl10_vits_ps8_mi \\
       [--data-root /path/to/datasets] [--out-dir masker_viz] [--n 500]

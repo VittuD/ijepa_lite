@@ -65,7 +65,7 @@ echo "  alpha_min=${ALPHA_MIN}  out=${OUT_DIR}"
 mkdir -p sbatch_logs/masker-only-amin
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python ijepa_lite/hacky_masker_only_train.py \
+  python ijepa_lite/scripts/hacky/hacky_masker_only_train.py \
     --encoder-ckpt   "$ENCODER_CKPT" \
     --predictor-ckpt "$VANILLA_CKPT" \
     --data-root      "$FAST/datasets/" \

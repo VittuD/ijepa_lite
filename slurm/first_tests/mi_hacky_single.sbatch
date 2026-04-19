@@ -29,7 +29,7 @@ CKPT="$WORK/vitturini/outputs/2026-02-27/01-16-13_stl10_vits_ps8_mi/rank0/checkp
 DATA_ROOT="$FAST/datasets"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python $WORK/vitturini/ijepa_lite/hacky_stl10_masker_probe.py \
+  python $WORK/vitturini/ijepa_lite/scripts/hacky/hacky_stl10_masker_probe.py \
     --ckpt "$CKPT" \
     --data_root "$DATA_ROOT" \
     --prefer target \

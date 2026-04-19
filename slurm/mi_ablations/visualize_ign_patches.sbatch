@@ -36,7 +36,7 @@ export PRETRAIN_CKPT="$WORK/vitturini/masker_only_joint_enc_pretrain_class/epoch
 mkdir -p sbatch_logs/viz-ign-patches
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
-  python ijepa_lite/hacky_visualize_goldilocks.py \
+  python ijepa_lite/scripts/hacky/hacky_visualize_goldilocks.py \
     --ckpt       "$PRETRAIN_CKPT" \
     --experiment stl10_vits_ps8_mi \
     --data-root  "$FAST/datasets/" \

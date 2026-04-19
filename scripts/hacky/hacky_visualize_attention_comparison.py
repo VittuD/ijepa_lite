@@ -14,7 +14,7 @@ Produces per-mode:
   <out_dir>/<mode>/original_avg.png      — aggregate heatmap (original)
 
 Usage:
-  python hacky_visualize_attention_comparison.py \
+  python scripts/hacky/hacky_visualize_attention_comparison.py \
       --ckpt-ours /path/to/our/last.pt \
       --ckpt-orig /path/to/ijepa_vith14_ep300.pth.tar \
       --experiment stl10_vits_ps8_multiblock \
