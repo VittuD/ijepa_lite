@@ -227,7 +227,9 @@ class MIRateMasker(LatentMasker):
                 tgt_scores[needs_tgt_fallback] = p_tgt[needs_tgt_fallback]
 
             ntgt = max(self.ntgt_min, int(tgt_counts.max().item()))
-            tgt_idx = tgt_scores.argsort(dim=-1, descending=True)[:, :ntgt]
+            # Scores are binary except fallback rows; topk avoids sorting all
+            # patches while still selecting winners before non-winner fillers.
+            _, tgt_idx = torch.topk(tgt_scores, ntgt, dim=-1, sorted=False)
 
             ctx_scores = (winners == 0).float()
             ctx_counts = ctx_scores.sum(dim=-1)
@@ -238,7 +240,7 @@ class MIRateMasker(LatentMasker):
                 ctx_scores[needs_ctx_fallback] = p_ctx_fb
 
             nctx = max(self.nctx_min, int(ctx_counts.max().item()))
-            ctx_idx = ctx_scores.argsort(dim=-1, descending=True)[:, :nctx]
+            _, ctx_idx = torch.topk(ctx_scores, nctx, dim=-1, sorted=False)
 
             aux_counts = {
                 "hard_sampled_nctx": float(ctx_counts.float().mean().detach().item()),
