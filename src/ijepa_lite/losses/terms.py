@@ -202,6 +202,46 @@ class _BaseLogDetDiversityTerm(MaskerTerm):
         support = (mass / float(ema_full.shape[1])).clamp(min=0.0)           # (B, R)
         return logdet, mass, ess, trace, support
 
+    def _compute_mass_scaled_role_stats(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")
+        if soft is None:
+            soft = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)  # (B, N, 3)
+        n_roles = soft.shape[-1]
+        bad = [idx for idx in self.role_indices if idx < 0 or idx >= n_roles]
+        if bad:
+            raise ValueError(
+                f"neg_logdet_diversity.role_indices out of range for {n_roles} roles: {bad}"
+            )
+
+        # Mass-scaled covariance:
+        #   C_r = (1/N) Σ_i p_r(i) (z_i - μ_r)(z_i - μ_r)^T
+        # Unlike the normalized covariance above, adding low-diversity patches
+        # has diminishing logdet return but no separate support reward.
+        z = F.normalize(ema_full.float(), dim=-1, eps=self.eps)              # (B, N, D)
+        proj = self._get_projection(z.shape[-1], z.device)                  # (S, D)
+        u = F.normalize(torch.matmul(z, proj.t()), dim=-1, eps=self.eps)     # (B, N, S)
+
+        role_probs = soft[..., list(self.role_indices)].float()              # (B, N, R)
+        mass = role_probs.sum(dim=1)                                         # (B, R)
+        support = (mass / float(ema_full.shape[1])).clamp(min=0.0)           # (B, R)
+
+        weights = role_probs / mass.clamp(min=self.eps).unsqueeze(1)         # (B, N, R)
+        mean = torch.einsum("bnr,bns->brs", weights, u)                     # (B, R, S)
+        raw_second = torch.einsum("bnr,bns,bnt->brst", role_probs, u, u)
+        raw_second = raw_second / float(ema_full.shape[1])                  # (B, R, S, S)
+        cov = raw_second - support.unsqueeze(-1).unsqueeze(-1) \
+              * mean.unsqueeze(-1) * mean.unsqueeze(-2)                    # (B, R, S, S)
+        cov = 0.5 * (cov + cov.transpose(-1, -2))
+
+        eye = torch.eye(self.sketch_dim, device=u.device, dtype=u.dtype)
+        mat = eye.view(1, 1, self.sketch_dim, self.sketch_dim) + self.alpha * cov
+        _, logdet = torch.linalg.slogdet(mat)                                # (B, R)
+
+        trace = cov.diagonal(dim1=-2, dim2=-1).sum(-1)                       # (B, R)
+        sum_w2 = weights.square().sum(dim=1).clamp(min=self.eps)             # (B, R)
+        ess = torch.where(mass > self.eps, sum_w2.reciprocal(), torch.zeros_like(sum_w2))
+        return logdet, mass, ess, trace, support
+
     def _build_logs(
         self,
         *,
@@ -280,6 +320,27 @@ class NegSupportLogDetDiversityTerm(_BaseLogDetDiversityTerm):
             role_score=role_score,
         )
         logs["support_logdet_support_power"] = self.support_power
+
+        return -score, logs
+
+
+class NegMassLogDetDiversityTerm(_BaseLogDetDiversityTerm):
+    name = "neg_mass_logdet_diversity"
+    log_prefix = "mass_logdet"
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        logdet, mass, ess, trace, support = self._compute_mass_scaled_role_stats(
+            p_ctx=p_ctx, p_tgt=p_tgt, p_ign=p_ign, ema_full=ema_full, **kw,
+        )
+        score = logdet.mean()
+        logs = self._build_logs(
+            score=score,
+            logdet=logdet,
+            mass=mass,
+            ess=ess,
+            trace=trace,
+            support=support,
+        )
 
         return -score, logs
 
@@ -759,6 +820,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "neg_cos_surprise": NegCosSurpriseTerm,
     "neg_logdet_diversity": NegLogDetDiversityTerm,
     "neg_support_logdet_diversity": NegSupportLogDetDiversityTerm,
+    "neg_mass_logdet_diversity": NegMassLogDetDiversityTerm,
     "neg_centroid_dist": NegCentroidDistTerm,
     "floor_penalty": FloorPenaltyTerm,
     "ignore_tax": IgnoreTaxTerm,

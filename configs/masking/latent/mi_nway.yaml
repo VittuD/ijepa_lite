@@ -30,6 +30,13 @@ terms:
     eps: 1.0e-6
     projection_seed: 0
     support_power: 0.5
+  neg_mass_logdet_diversity:
+    weight: [0, 0]
+    role_indices: [0, 1]  # ctx, tgt_0
+    sketch_dim: 32
+    alpha: 1.0
+    eps: 1.0e-6
+    projection_seed: 0
   nway_floor_penalty:
     weight: [5.0, 5.0]
     h_floor: 0.16
