@@ -181,6 +181,10 @@ def mask_diagnostics(
     if "floor_penalty" in aux:
         stats["mask/floor_penalty"] = float(aux["floor_penalty"])
 
+    for _hard_key in ("hard_sampled_nctx", "hard_sampled_ntgt", "hard_sampled_nign"):
+        if _hard_key in aux:
+            stats[f"mask/{_hard_key}"] = float(aux[_hard_key])
+
     if "role_alive_penalty" in aux:
         stats["mask/role_alive_penalty"] = float(aux["role_alive_penalty"])
     if "role_dead_frac" in aux:

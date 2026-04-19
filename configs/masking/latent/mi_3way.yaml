@@ -38,3 +38,5 @@ terms:
 warmup_epochs: 0
 ntgt_min: 4
 nctx_min: 1
+hard_assignment: topk    # "topk", "argmax", or "gumbel"
+gumbel_tau: 1.0          # temperature for gumbel hard assignment

@@ -44,6 +44,8 @@ class MIRateMasker(LatentMasker):
     terms          : Nested dict of term configs (see CompositeMaskerLoss).
     ntgt_min       : Hard floor on target count.
     nctx_min       : Hard floor on context count.
+    hard_assignment: "topk", "argmax", or "gumbel" for hard reconstruction masks.
+    gumbel_tau     : Temperature for Gumbel hard assignment.
     warmup_epochs  : Epochs to grow weight sampling range to full.
     """
 
@@ -62,6 +64,8 @@ class MIRateMasker(LatentMasker):
         terms: dict,
         ntgt_min: int = 4,
         nctx_min: int = 1,
+        hard_assignment: str = "topk",
+        gumbel_tau: float = 1.0,
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
         # Unused — kept for build.py kwarg filtering
@@ -73,6 +77,13 @@ class MIRateMasker(LatentMasker):
         self.num_patches = int(num_patches)
         self.ntgt_min = max(1, int(ntgt_min))
         self.nctx_min = max(1, int(nctx_min))
+        if hard_assignment not in ("topk", "argmax", "gumbel"):
+            raise ValueError(
+                "hard_assignment must be 'topk', 'argmax', or 'gumbel', "
+                f"got {hard_assignment!r}"
+            )
+        self.hard_assignment = str(hard_assignment)
+        self.gumbel_tau = float(gumbel_tau)
         self.warmup_epochs = int(warmup_epochs)
 
         # _progress in [0, 1]; initialised to 1.0 so unit tests use full range.
@@ -198,14 +209,49 @@ class MIRateMasker(LatentMasker):
         p_ign = soft[..., 2]
 
         # ----------------------------------------------------------------
-        # Hard counts — ntgt floored at ntgt_min
+        # Hard reconstruction masks
         # ----------------------------------------------------------------
-        ntgt = max(self.ntgt_min, int(round(p_tgt.sum(dim=-1).mean().item())))
-        nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
+        aux_counts = {}
+        if self.hard_assignment in ("argmax", "gumbel"):
+            if self.hard_assignment == "gumbel":
+                # Gumbel-max samples one hard role per patch from the categorical.
+                g = -torch.empty_like(logits).exponential_().log()
+                winners = (logits / self.gumbel_tau + g).argmax(dim=-1)
+            else:
+                winners = soft.argmax(dim=-1)
 
-        _, tgt_idx = torch.topk(p_tgt, ntgt, dim=-1, sorted=False)
-        p_ctx_masked = p_ctx.clone().scatter_(1, tgt_idx, 0.0)
-        _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
+            tgt_scores = (winners == 1).float()
+            tgt_counts = tgt_scores.sum(dim=-1)
+            needs_tgt_fallback = tgt_counts < self.ntgt_min
+            if needs_tgt_fallback.any():
+                tgt_scores[needs_tgt_fallback] = p_tgt[needs_tgt_fallback]
+
+            ntgt = max(self.ntgt_min, int(tgt_counts.max().item()))
+            tgt_idx = tgt_scores.argsort(dim=-1, descending=True)[:, :ntgt]
+
+            ctx_scores = (winners == 0).float()
+            ctx_counts = ctx_scores.sum(dim=-1)
+            needs_ctx_fallback = ctx_counts < self.nctx_min
+            if needs_ctx_fallback.any():
+                p_ctx_fb = p_ctx[needs_ctx_fallback].clone()
+                p_ctx_fb.scatter_(1, tgt_idx[needs_ctx_fallback], 0.0)
+                ctx_scores[needs_ctx_fallback] = p_ctx_fb
+
+            nctx = max(self.nctx_min, int(ctx_counts.max().item()))
+            ctx_idx = ctx_scores.argsort(dim=-1, descending=True)[:, :nctx]
+
+            aux_counts = {
+                "hard_sampled_nctx": float(ctx_counts.float().mean().detach().item()),
+                "hard_sampled_ntgt": float(tgt_counts.float().mean().detach().item()),
+                "hard_sampled_nign": float((winners == 2).float().sum(dim=-1).mean().detach().item()),
+            }
+        else:
+            ntgt = max(self.ntgt_min, int(round(p_tgt.sum(dim=-1).mean().item())))
+            nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
+
+            _, tgt_idx = torch.topk(p_tgt, ntgt, dim=-1, sorted=False)
+            p_ctx_masked = p_ctx.clone().scatter_(1, tgt_idx, 0.0)
+            _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
 
         # Sample weights for this step
         weights = self._sample_weights(tokens.device)
@@ -220,6 +266,8 @@ class MIRateMasker(LatentMasker):
                 "p_ign":    p_ign,
                 "logits":   logits.detach(),
                 "ema_full": ema_full,
+                "hard_assignment": self.hard_assignment,
+                **aux_counts,
             },
         )
 
