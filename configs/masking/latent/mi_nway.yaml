@@ -18,6 +18,7 @@ terms:
     weight: [0.04, 0.04]
   neg_symmetric_cos_surprise:
     weight: [0, 0]
+    role_indices: [0, 1]  # ctx, tgt_0; include more role indices as needed
   neg_logdet_diversity:
     weight: [0, 0]
     role_indices: [0, 1]  # ctx, tgt_0

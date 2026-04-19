@@ -52,6 +52,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.neg_H_marg.weight='[0,0]' \
       masking.latent.terms.neg_surprise.weight='[0,0]' \
       masking.latent.terms.neg_symmetric_cos_surprise.weight='[0.25,0.25]' \
+      masking.latent.terms.neg_symmetric_cos_surprise.role_indices='[0,1]' \
       masking.latent.terms.neg_logdet_diversity.weight='[0,0]' \
       masking.latent.terms.neg_support_logdet_diversity.weight='[0,0]' \
       masking.latent.terms.neg_mass_logdet_diversity.weight='[1.0,1.0]' \

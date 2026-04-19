@@ -125,6 +125,12 @@ class NegCosSurpriseTerm(MaskerTerm):
 class NegSymmetricCosSurpriseTerm(MaskerTerm):
     name = "neg_symmetric_cos_surprise"
 
+    def __init__(self, role_indices: list[int] | tuple[int, ...] = (0, 1)):
+        super().__init__()
+        if len(role_indices) < 2:
+            raise ValueError("neg_symmetric_cos_surprise.role_indices needs at least two roles")
+        self.role_indices = tuple(int(i) for i in role_indices)
+
     @staticmethod
     def _centroid(p: torch.Tensor, ema_full: torch.Tensor) -> torch.Tensor:
         image_mean = ema_full.mean(dim=1)                                    # (B, D)
@@ -151,22 +157,65 @@ class NegSymmetricCosSurpriseTerm(MaskerTerm):
         return ((p * dist).sum(-1) / p_sum).mean()
 
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
-        ctx_centroid = self._centroid(p_ctx, ema_full)
-        tgt_centroid = self._centroid(p_tgt, ema_full)
+        soft = kw.get("soft")
+        if soft is None:
+            soft = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)  # (B, N, 3)
+        n_roles = soft.shape[-1]
+        bad = [idx for idx in self.role_indices if idx < 0 or idx >= n_roles]
+        if bad:
+            raise ValueError(
+                f"neg_symmetric_cos_surprise.role_indices out of range for {n_roles} roles: {bad}"
+            )
 
-        tgt_to_ctx = self._weighted_cos_distance(p_tgt, ema_full, ctx_centroid)
-        ctx_to_tgt = self._weighted_cos_distance(p_ctx, ema_full, tgt_centroid)
-        sym = 0.5 * (tgt_to_ctx + ctx_to_tgt)
+        role_probs = [soft[..., idx] for idx in self.role_indices]
+        centroids = [self._centroid(p, ema_full) for p in role_probs]
 
-        return -sym, {
+        pair_vals: list[torch.Tensor] = []
+        logs: dict[str, float] = {}
+        for src_pos, src_role in enumerate(self.role_indices):
+            for dst_pos, dst_role in enumerate(self.role_indices):
+                if src_pos == dst_pos:
+                    continue
+                val = self._weighted_cos_distance(
+                    role_probs[src_pos],
+                    ema_full,
+                    centroids[dst_pos],
+                )
+                pair_vals.append(val)
+                logs[f"sym_cos_surprise_role_{src_role}_to_{dst_role}"] = float(
+                    val.detach().item()
+                )
+
+        sym = torch.stack(pair_vals).mean()
+        logs.update({
             "sym_cos_surprise_mean": float(sym.detach().item()),
-            "sym_cos_surprise_tgt_to_ctx": float(tgt_to_ctx.detach().item()),
-            "sym_cos_surprise_ctx_to_tgt": float(ctx_to_tgt.detach().item()),
             "cos_surprise/objective": float(sym.detach().item()),
-            "cos_surprise/tgt_to_ctx": float(tgt_to_ctx.detach().item()),
-            "cos_surprise/ctx_to_tgt": float(ctx_to_tgt.detach().item()),
             "cos_surprise/is_symmetric": 1.0,
-        }
+            "cos_surprise/n_roles": float(len(self.role_indices)),
+        })
+
+        if 0 in self.role_indices and 1 in self.role_indices:
+            role_to_pos = {role: pos for pos, role in enumerate(self.role_indices)}
+            ctx_pos = role_to_pos[0]
+            tgt_pos = role_to_pos[1]
+            tgt_to_ctx = self._weighted_cos_distance(
+                role_probs[tgt_pos],
+                ema_full,
+                centroids[ctx_pos],
+            )
+            ctx_to_tgt = self._weighted_cos_distance(
+                role_probs[ctx_pos],
+                ema_full,
+                centroids[tgt_pos],
+            )
+            logs.update({
+                "sym_cos_surprise_tgt_to_ctx": float(tgt_to_ctx.detach().item()),
+                "sym_cos_surprise_ctx_to_tgt": float(ctx_to_tgt.detach().item()),
+                "cos_surprise/tgt_to_ctx": float(tgt_to_ctx.detach().item()),
+                "cos_surprise/ctx_to_tgt": float(ctx_to_tgt.detach().item()),
+            })
+
+        return -sym, logs
 
 
 # ------------------------------------------------------------------
