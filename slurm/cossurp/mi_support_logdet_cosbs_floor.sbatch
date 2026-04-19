@@ -46,6 +46,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_mi \
       exp_name="$EXP_NAME" \
+      masking.latent.hard_assignment=gumbel \
+      masking.latent.gumbel_tau=0.5 \
       masking.latent.terms.H_cond.weight='[0,0]' \
       masking.latent.terms.neg_H_marg.weight='[0,0]' \
       masking.latent.terms.neg_surprise.weight='[0,0]' \
