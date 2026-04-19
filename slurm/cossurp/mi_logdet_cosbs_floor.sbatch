@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-mi-logdet-cosbs-floor
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/cossurp/%x_%j.out
 #SBATCH --error=sbatch_logs/cossurp/%x_%j.err
 
