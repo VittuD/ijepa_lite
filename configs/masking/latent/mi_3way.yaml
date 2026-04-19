@@ -8,6 +8,8 @@ terms:
     weight: [0.01, 1.0]
   neg_surprise:
     weight: [0.01, 0.5]
+  neg_symmetric_cos_surprise:
+    weight: [0, 0]
   neg_logdet_diversity:
     weight: [0, 0]
     role_indices: [0, 1]  # ctx, tgt

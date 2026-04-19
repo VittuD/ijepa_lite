@@ -116,6 +116,56 @@ class NegCosSurpriseTerm(MaskerTerm):
 
         return -cos_surprise, {
             "cos_surprise_mean": float(cos_surprise.detach().item()),
+            "cos_surprise/objective": float(cos_surprise.detach().item()),
+            "cos_surprise/tgt_to_ctx": float(cos_surprise.detach().item()),
+            "cos_surprise/is_symmetric": 0.0,
+        }
+
+
+class NegSymmetricCosSurpriseTerm(MaskerTerm):
+    name = "neg_symmetric_cos_surprise"
+
+    @staticmethod
+    def _centroid(p: torch.Tensor, ema_full: torch.Tensor) -> torch.Tensor:
+        image_mean = ema_full.mean(dim=1)                                    # (B, D)
+        p_sum = p.sum(dim=1, keepdim=True)                                   # (B, 1)
+        weighted = (p.unsqueeze(-1) * ema_full).sum(dim=1)                   # (B, D)
+        virtual_w = (1.0 - p_sum).clamp(min=0.0)                             # (B, 1)
+        return (weighted + virtual_w * image_mean) \
+               / (p_sum + virtual_w).clamp(min=1e-6)                         # (B, D)
+
+    @staticmethod
+    def _weighted_cos_distance(
+        p: torch.Tensor,
+        ema_full: torch.Tensor,
+        centroid: torch.Tensor,
+    ) -> torch.Tensor:
+        cos = F.cosine_similarity(
+            ema_full,
+            centroid.unsqueeze(1),
+            dim=-1,
+            eps=1e-8,
+        )                                                                    # (B, N)
+        dist = 1.0 - cos
+        p_sum = p.sum(dim=-1).clamp(min=1.0)                                 # (B,)
+        return ((p * dist).sum(-1) / p_sum).mean()
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        ctx_centroid = self._centroid(p_ctx, ema_full)
+        tgt_centroid = self._centroid(p_tgt, ema_full)
+
+        tgt_to_ctx = self._weighted_cos_distance(p_tgt, ema_full, ctx_centroid)
+        ctx_to_tgt = self._weighted_cos_distance(p_ctx, ema_full, tgt_centroid)
+        sym = 0.5 * (tgt_to_ctx + ctx_to_tgt)
+
+        return -sym, {
+            "sym_cos_surprise_mean": float(sym.detach().item()),
+            "sym_cos_surprise_tgt_to_ctx": float(tgt_to_ctx.detach().item()),
+            "sym_cos_surprise_ctx_to_tgt": float(ctx_to_tgt.detach().item()),
+            "cos_surprise/objective": float(sym.detach().item()),
+            "cos_surprise/tgt_to_ctx": float(tgt_to_ctx.detach().item()),
+            "cos_surprise/ctx_to_tgt": float(ctx_to_tgt.detach().item()),
+            "cos_surprise/is_symmetric": 1.0,
         }
 
 
@@ -844,6 +894,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "neg_H_marg": NegHMargTerm,
     "neg_surprise": NegSurpriseTerm,
     "neg_cos_surprise": NegCosSurpriseTerm,
+    "neg_symmetric_cos_surprise": NegSymmetricCosSurpriseTerm,
     "neg_logdet_diversity": NegLogDetDiversityTerm,
     "neg_support_logdet_diversity": NegSupportLogDetDiversityTerm,
     "neg_mass_logdet_diversity": NegMassLogDetDiversityTerm,
