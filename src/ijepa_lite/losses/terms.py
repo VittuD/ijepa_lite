@@ -120,6 +120,102 @@ class NegCosSurpriseTerm(MaskerTerm):
 
 
 # ------------------------------------------------------------------
+# −logdet diversity — role-wise sketched covariance volume
+# ------------------------------------------------------------------
+
+class NegLogDetDiversityTerm(MaskerTerm):
+    name = "neg_logdet_diversity"
+
+    def __init__(
+        self,
+        role_indices: list[int] | tuple[int, ...] = (0, 1),
+        sketch_dim: int = 32,
+        alpha: float = 1.0,
+        eps: float = 1e-6,
+        projection_seed: int = 0,
+    ):
+        super().__init__()
+        if len(role_indices) == 0:
+            raise ValueError("neg_logdet_diversity.role_indices must be non-empty")
+        self.role_indices = tuple(int(i) for i in role_indices)
+        self.sketch_dim = int(sketch_dim)
+        if self.sketch_dim <= 0:
+            raise ValueError("neg_logdet_diversity.sketch_dim must be positive")
+        self.alpha = float(alpha)
+        self.eps = float(eps)
+        self.projection_seed = int(projection_seed)
+        self.register_buffer("_projection", torch.empty(0), persistent=False)
+
+    def _get_projection(self, dim: int, device: torch.device) -> torch.Tensor:
+        if (
+            self._projection.numel() == 0
+            or self._projection.shape != (self.sketch_dim, dim)
+            or self._projection.device != device
+        ):
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(self.projection_seed)
+            proj = torch.randn(
+                self.sketch_dim,
+                dim,
+                generator=gen,
+                dtype=torch.float32,
+            )
+            proj = proj * (self.sketch_dim ** -0.5)
+            self._projection = proj.to(device=device)
+        return self._projection
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        soft = kw.get("soft")
+        if soft is None:
+            soft = torch.stack([p_ctx, p_tgt, p_ign], dim=-1)  # (B, N, 3)
+        n_roles = soft.shape[-1]
+        bad = [idx for idx in self.role_indices if idx < 0 or idx >= n_roles]
+        if bad:
+            raise ValueError(
+                f"neg_logdet_diversity.role_indices out of range for {n_roles} roles: {bad}"
+            )
+
+        # Project normalized EMA tokens to a fixed low-dimensional sketch before
+        # the covariance logdet; compute second-order stats in fp32 for stability.
+        z = F.normalize(ema_full.float(), dim=-1, eps=self.eps)              # (B, N, D)
+        proj = self._get_projection(z.shape[-1], z.device)                  # (S, D)
+        u = F.normalize(torch.matmul(z, proj.t()), dim=-1, eps=self.eps)     # (B, N, S)
+
+        role_probs = soft[..., list(self.role_indices)].float()              # (B, N, R)
+        mass = role_probs.sum(dim=1)                                         # (B, R)
+        weights = role_probs / mass.clamp(min=self.eps).unsqueeze(1)         # (B, N, R)
+
+        mean = torch.einsum("bnr,bns->brs", weights, u)                     # (B, R, S)
+        second = torch.einsum("bnr,bns,bnt->brst", weights, u, u)           # (B, R, S, S)
+        cov = second - mean.unsqueeze(-1) * mean.unsqueeze(-2)              # (B, R, S, S)
+        cov = 0.5 * (cov + cov.transpose(-1, -2))
+
+        eye = torch.eye(self.sketch_dim, device=u.device, dtype=u.dtype)
+        mat = eye.view(1, 1, self.sketch_dim, self.sketch_dim) + self.alpha * cov
+        _, logdet = torch.linalg.slogdet(mat)                                # (B, R)
+        score = logdet.mean()
+
+        trace = cov.diagonal(dim1=-2, dim2=-1).sum(-1)                       # (B, R)
+        sum_w2 = weights.square().sum(dim=1).clamp(min=self.eps)             # (B, R)
+        ess = torch.where(mass > self.eps, sum_w2.reciprocal(), torch.zeros_like(sum_w2))
+
+        logs = {
+            "logdet_diversity": float(score.detach().item()),
+        }
+        logdet_by_role = logdet.detach().mean(dim=0)
+        mass_by_role = mass.detach().mean(dim=0)
+        ess_by_role = ess.detach().mean(dim=0)
+        trace_by_role = trace.detach().mean(dim=0)
+        for j, role_idx in enumerate(self.role_indices):
+            logs[f"logdet_diversity_role_{role_idx}"] = float(logdet_by_role[j].item())
+            logs[f"logdet_mass_role_{role_idx}"] = float(mass_by_role[j].item())
+            logs[f"logdet_ess_role_{role_idx}"] = float(ess_by_role[j].item())
+            logs[f"logdet_trace_role_{role_idx}"] = float(trace_by_role[j].item())
+
+        return -score, logs
+
+
+# ------------------------------------------------------------------
 # −centroid distance — ||μ_ctx − μ_tgt||² (minimise → maximise)
 #
 # Same as neg_surprise but without the within-target variance term.
@@ -592,6 +688,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "neg_H_marg": NegHMargTerm,
     "neg_surprise": NegSurpriseTerm,
     "neg_cos_surprise": NegCosSurpriseTerm,
+    "neg_logdet_diversity": NegLogDetDiversityTerm,
     "neg_centroid_dist": NegCentroidDistTerm,
     "floor_penalty": FloorPenaltyTerm,
     "ignore_tax": IgnoreTaxTerm,

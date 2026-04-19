@@ -162,6 +162,9 @@ def mask_diagnostics(
         stats["mask/surprise_mean"] = float(aux["surprise_mean"])
     if "cos_surprise_mean" in aux:
         stats["mask/cos_surprise_mean"] = float(aux["cos_surprise_mean"])
+    for key, value in aux.items():
+        if key.startswith("logdet_"):
+            stats[f"mask/{key}"] = float(value)
 
     if "ign_rate" in aux:
         stats["mask/ign_rate"] = float(aux["ign_rate"])
