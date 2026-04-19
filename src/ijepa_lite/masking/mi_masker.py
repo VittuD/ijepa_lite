@@ -44,6 +44,7 @@ class MIRateMasker(LatentMasker):
     terms          : Nested dict of term configs (see CompositeMaskerLoss).
     ntgt_min       : Hard floor on target count.
     nctx_min       : Hard floor on context count.
+    max_total_hard : Optional cap on nctx + ntgt predictor tokens.
     hard_assignment: "topk", "argmax", or "gumbel" for hard reconstruction masks.
     gumbel_tau     : Temperature for Gumbel hard assignment.
     warmup_epochs  : Epochs to grow weight sampling range to full.
@@ -64,6 +65,7 @@ class MIRateMasker(LatentMasker):
         terms: dict,
         ntgt_min: int = 4,
         nctx_min: int = 1,
+        max_total_hard: int = 0,
         hard_assignment: str = "topk",
         gumbel_tau: float = 1.0,
         warmup_epochs: int = 0,
@@ -77,6 +79,7 @@ class MIRateMasker(LatentMasker):
         self.num_patches = int(num_patches)
         self.ntgt_min = max(1, int(ntgt_min))
         self.nctx_min = max(1, int(nctx_min))
+        self.max_total_hard = int(max_total_hard)
         if hard_assignment not in ("topk", "argmax", "gumbel"):
             raise ValueError(
                 "hard_assignment must be 'topk', 'argmax', or 'gumbel', "
@@ -129,6 +132,36 @@ class MIRateMasker(LatentMasker):
         nn.init.trunc_normal_(self.selection_token, std=0.02)
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)
+
+    def _allocate_hard_counts(self, raw_nctx: float, raw_ntgt: float) -> tuple[int, int]:
+        """Allocate hard ctx/tgt widths under the optional predictor-token cap."""
+        nctx = max(self.nctx_min, int(round(float(raw_nctx))))
+        ntgt = max(self.ntgt_min, int(round(float(raw_ntgt))))
+        nctx = min(nctx, self.num_patches - self.ntgt_min)
+        ntgt = min(ntgt, self.num_patches - nctx)
+
+        if self.max_total_hard <= 0:
+            return nctx, ntgt
+
+        min_total = self.nctx_min + self.ntgt_min
+        budget = min(self.num_patches, max(min_total, self.max_total_hard))
+        if nctx + ntgt <= budget:
+            return nctx, ntgt
+
+        extra_budget = budget - min_total
+        if extra_budget <= 0:
+            return self.nctx_min, self.ntgt_min
+
+        ctx_extra_signal = max(0.0, float(raw_nctx) - float(self.nctx_min))
+        tgt_extra_signal = max(0.0, float(raw_ntgt) - float(self.ntgt_min))
+        signal_sum = ctx_extra_signal + tgt_extra_signal
+        if signal_sum <= 0.0:
+            ctx_extra = extra_budget // 2
+        else:
+            ctx_extra = int(round(extra_budget * ctx_extra_signal / signal_sum))
+        ctx_extra = max(0, min(extra_budget, ctx_extra))
+        tgt_extra = extra_budget - ctx_extra
+        return self.nctx_min + ctx_extra, self.ntgt_min + tgt_extra
 
     # ------------------------------------------------------------------
     # Warmup progress
@@ -226,17 +259,16 @@ class MIRateMasker(LatentMasker):
             # fillers use soft probabilities to avoid arbitrary zero-score ties.
             tgt_counts = tgt_winners.float().sum(dim=-1)
             tgt_scores = tgt_winners.float() + p_tgt * (~tgt_winners).float()
-            ntgt = max(self.ntgt_min, int(round(tgt_counts.float().mean().item())))
-            ntgt = min(ntgt, self.num_patches - self.nctx_min)
+            raw_ntgt = float(tgt_counts.float().mean().item())
+            ctx_winners = winners == 0
+            ctx_counts = ctx_winners.float().sum(dim=-1)
+            ctx_scores = ctx_winners.float() + p_ctx * (~ctx_winners).float()
+            raw_nctx = float(ctx_counts.float().mean().item())
+            nctx, ntgt = self._allocate_hard_counts(raw_nctx, raw_ntgt)
             # topk avoids sorting all patches while still selecting winners
             # before non-winner fillers.
             _, tgt_idx = torch.topk(tgt_scores, ntgt, dim=-1, sorted=False)
 
-            ctx_winners = winners == 0
-            ctx_counts = ctx_winners.float().sum(dim=-1)
-            ctx_scores = ctx_winners.float() + p_ctx * (~ctx_winners).float()
-            nctx = max(self.nctx_min, int(round(ctx_counts.float().mean().item())))
-            nctx = min(nctx, self.num_patches - ntgt)
             ctx_scores = ctx_scores.scatter(1, tgt_idx, -torch.inf)
             _, ctx_idx = torch.topk(ctx_scores, nctx, dim=-1, sorted=False)
 
@@ -246,8 +278,9 @@ class MIRateMasker(LatentMasker):
                 "hard_sampled_nign": float((winners == 2).float().sum(dim=-1).mean().detach().item()),
             }
         else:
-            ntgt = max(self.ntgt_min, int(round(p_tgt.sum(dim=-1).mean().item())))
-            nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
+            raw_ntgt = float(p_tgt.sum(dim=-1).mean().item())
+            raw_nctx = float(p_ctx.sum(dim=-1).mean().item())
+            nctx, ntgt = self._allocate_hard_counts(raw_nctx, raw_ntgt)
 
             _, tgt_idx = torch.topk(p_tgt, ntgt, dim=-1, sorted=False)
             p_ctx_masked = p_ctx.clone().scatter_(1, tgt_idx, 0.0)
@@ -267,6 +300,7 @@ class MIRateMasker(LatentMasker):
                 "logits":   logits.detach(),
                 "ema_full": ema_full,
                 "hard_assignment": self.hard_assignment,
+                "max_total_hard": self.max_total_hard,
                 **aux_counts,
             },
         )
@@ -340,6 +374,7 @@ class MINWayMasker(LatentMasker):
         ntgt_min_per_block: int = 4,
         max_total_tgt: int = 0,
         max_tgt_per_block: int = 0,
+        max_total_hard: int = 0,
         nctx_min: int = 1,
         hard_assignment: str = "topk",
         arch: str = "transformer",
@@ -369,6 +404,7 @@ class MINWayMasker(LatentMasker):
         self.ntgt_min_per_block = max(1, int(ntgt_min_per_block))
         self.max_total_tgt = int(max_total_tgt)
         self.max_tgt_per_block = int(max_tgt_per_block)
+        self.max_total_hard = int(max_total_hard)
         self.nctx_min = max(1, int(nctx_min))
         self.hard_assignment = str(hard_assignment)
         self.arch = str(arch)
@@ -576,9 +612,11 @@ class MINWayMasker(LatentMasker):
 
         Returns
         -------
-        counts : (M,) LongTensor when max_total_tgt > 0, otherwise None.
+        counts : (M,) LongTensor when a target or total-hard cap is active,
+                 otherwise None.
         """
-        if self.max_total_tgt <= 0:
+        target_budget = self._target_budget_limit()
+        if target_budget <= 0:
             return None
 
         device = signal.device
@@ -586,7 +624,7 @@ class MINWayMasker(LatentMasker):
             (self.M,), self.ntgt_min_per_block, device=device, dtype=torch.long
         )
         min_total = int(counts.sum().item())
-        total_budget = max(min_total, self.max_total_tgt)
+        total_budget = max(min_total, target_budget)
         extra_budget = total_budget - min_total
         if extra_budget <= 0:
             return counts
@@ -643,6 +681,23 @@ class MINWayMasker(LatentMasker):
                     extra_budget -= 1
 
         return counts
+
+    def _target_budget_limit(self) -> int:
+        """Target-token budget implied by max_total_tgt and max_total_hard."""
+        budgets = []
+        if self.max_total_tgt > 0:
+            budgets.append(self.max_total_tgt)
+        if self.max_total_hard > 0:
+            min_target_total = self.M * self.ntgt_min_per_block
+            budgets.append(max(min_target_total, self.max_total_hard - self.nctx_min))
+        return min(budgets) if budgets else 0
+
+    def _context_budget_limit(self, target_total: int) -> int:
+        """Context-token cap implied by max_total_hard after target allocation."""
+        limit = self.num_patches
+        if self.max_total_hard > 0:
+            limit = min(limit, max(self.nctx_min, self.max_total_hard - int(target_total)))
+        return limit
 
     def _sample_weights(self, device: torch.device) -> dict[str, float]:
         p = max(self._progress.item(), 1e-3)
@@ -773,6 +828,7 @@ class MINWayMasker(LatentMasker):
                 tgt_idx_list.append(idx_i)
             tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
             tgt_flat = torch.cat(tgt_flat_parts, dim=1)
+            target_total = int(target_block_counts.sum().item())
 
             # --- Vectorized context indices ---
             ctx_scores = (winners == 0).float()  # (B, N)
@@ -784,7 +840,8 @@ class MINWayMasker(LatentMasker):
                 p_ctx_fb.scatter_(1, tgt_flat[needs_ctx_fallback], 0.0)
                 ctx_scores[needs_ctx_fallback] = p_ctx_fb
 
-            nctx = max(self.nctx_min, min(K_max_cap, int(ctx_counts.max().item())))
+            ctx_cap = self._context_budget_limit(target_total)
+            nctx = max(self.nctx_min, min(K_max_cap, ctx_cap, int(ctx_counts.max().item())))
             ctx_idx = ctx_scores.argsort(dim=-1, descending=True)[:, :nctx]  # (B, nctx)
         else:
             # topk (default): fixed K per block from soft mass
@@ -815,9 +872,11 @@ class MINWayMasker(LatentMasker):
                 tgt_idx_list.append(idx_k)
             tgt_idx = torch.stack(tgt_idx_list, dim=1)  # (B, M, K)
             tgt_flat = torch.cat(tgt_flat_parts, dim=1)
+            target_total = int(target_block_counts.sum().item())
 
             # Context: topk on p_ctx after zeroing all target positions
-            nctx = max(self.nctx_min, int(round(p_ctx.sum(dim=-1).mean().item())))
+            ctx_cap = self._context_budget_limit(target_total)
+            nctx = max(self.nctx_min, min(ctx_cap, int(round(p_ctx.sum(dim=-1).mean().item()))))
             p_ctx_masked = p_ctx.clone().scatter_(1, tgt_flat, 0.0)
             _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
 
@@ -836,6 +895,7 @@ class MINWayMasker(LatentMasker):
             "target_block_counts": target_block_counts,
             "max_total_tgt": self.max_total_tgt,
             "max_tgt_per_block": self.max_tgt_per_block,
+            "max_total_hard": self.max_total_hard,
         }
         if self._k_enabled:
             aux["k"] = self._current_k.item()

@@ -115,6 +115,8 @@ def mask_diagnostics(
         stats["mask/max_total_tgt"] = float(aux["max_total_tgt"])
     if "max_tgt_per_block" in aux:
         stats["mask/max_tgt_per_block"] = float(aux["max_tgt_per_block"])
+    if "max_total_hard" in aux:
+        stats["mask/max_total_hard"] = float(aux["max_total_hard"])
 
     if "lambda" in aux:
         lam = aux["lambda"]

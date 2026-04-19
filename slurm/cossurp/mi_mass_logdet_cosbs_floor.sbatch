@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
+#SBATCH --time=06:30:00
 #SBATCH --output=sbatch_logs/cossurp/%x_%j.out
 #SBATCH --error=sbatch_logs/cossurp/%x_%j.err
 

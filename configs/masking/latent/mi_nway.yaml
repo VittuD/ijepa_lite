@@ -5,6 +5,7 @@ num_tgt_blocks: 4
 ntgt_min_per_block: 4
 max_total_tgt: 0        # 0 = disabled; otherwise cap the sum across target blocks
 max_tgt_per_block: 0    # 0 = disabled; otherwise cap any single target block
+max_total_hard: 0       # 0 = disabled; otherwise cap nctx + total target predictor tokens
 nctx_min: 1
 hard_assignment: topk    # "topk", "argmax", or "gumbel" (sample from learned distribution)
 arch: transformer        # "transformer", "mlp", or "linear"

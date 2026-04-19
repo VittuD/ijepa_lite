@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
+#SBATCH --time=06:30:00
 #SBATCH --output=sbatch_logs/cossurp/%x_%j.out
 #SBATCH --error=sbatch_logs/cossurp/%x_%j.err
 
@@ -47,6 +47,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       exp_name="$EXP_NAME" \
       masking.latent.hard_assignment=gumbel \
       masking.latent.gumbel_tau=0.5 \
+      masking.latent.max_total_hard=128 \
       masking.latent.terms.H_cond.weight='[0,0]' \
       masking.latent.terms.neg_H_marg.weight='[0,0]' \
       masking.latent.terms.neg_surprise.weight='[0,0]' \

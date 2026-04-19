@@ -47,5 +47,6 @@ terms:
 warmup_epochs: 0
 ntgt_min: 4
 nctx_min: 1
+max_total_hard: 0      # 0 = disabled; otherwise cap nctx + ntgt predictor tokens
 hard_assignment: topk    # "topk", "argmax", or "gumbel"
 gumbel_tau: 1.0          # temperature for gumbel hard assignment
