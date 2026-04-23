@@ -201,6 +201,8 @@ def train(
             state["global_step"] = next_step
 
             gnorm = None
+            base_gnorm = None
+            masker_gnorm = None
             if clip_norm > 0 or do_log:
                 if amp:
                     scaler.unscale_(optimizer)
@@ -210,6 +212,21 @@ def train(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 if do_log:
                     gnorm = float(grad_norm(model.parameters()))
+                    masker_params = []
+                    if _masker is not None:
+                        masker_params.extend(_masker.parameters())
+                    _compressor = getattr(core, "token_compressor", None)
+                    if _compressor is not None:
+                        masker_params.extend(_compressor.parameters())
+                    if masker_params:
+                        masker_gnorm = float(grad_norm(masker_params))
+                        masker_param_ids = {id(p) for p in masker_params}
+                        base_gnorm = float(
+                            grad_norm(
+                                p for p in model.parameters()
+                                if id(p) not in masker_param_ids
+                            )
+                        )
 
             is_masker_step = masker_step_every == 1 or next_step % masker_step_every == 0
 
@@ -297,6 +314,10 @@ def train(
 
                 if gnorm is not None:
                     extra["train/grad_norm"] = gnorm
+                if base_gnorm is not None:
+                    extra["train/base_grad_norm"] = base_gnorm
+                if masker_gnorm is not None:
+                    extra["train/masker_grad_norm"] = masker_gnorm
 
                 if is_rank0():
                     extra.update(
