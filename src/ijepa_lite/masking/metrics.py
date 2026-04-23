@@ -174,6 +174,7 @@ def mask_diagnostics(
         if (
             key.startswith("cos_surprise/")
             or key.startswith("sym_cos_surprise_")
+            or key.startswith("prompt_contrast/")
             or key.startswith("logdet_")
             or key.startswith("logdet/")
             or key.startswith("support_logdet_")

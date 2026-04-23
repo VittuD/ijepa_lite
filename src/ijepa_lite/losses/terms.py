@@ -218,6 +218,179 @@ class NegSymmetricCosSurpriseTerm(MaskerTerm):
         return -sym, logs
 
 
+class NegPromptContrastTerm(MaskerTerm):
+    name = "neg_prompt_contrast"
+
+    def __init__(
+        self,
+        sample_mode: str = "uniform_distinct",
+        sample_temperature: float = 0.5,
+        exclude_prompts: bool = True,
+        degenerate_cos_threshold: float = 0.9,
+        eps: float = 1e-8,
+    ):
+        super().__init__()
+        if sample_mode not in ("uniform_distinct", "feature_far"):
+            raise ValueError(
+                "neg_prompt_contrast.sample_mode must be "
+                f"'uniform_distinct' or 'feature_far', got {sample_mode!r}"
+            )
+        self.sample_mode = str(sample_mode)
+        self.sample_temperature = float(sample_temperature)
+        if self.sample_temperature <= 0.0:
+            raise ValueError("neg_prompt_contrast.sample_temperature must be > 0")
+        self.exclude_prompts = bool(exclude_prompts)
+        self.degenerate_cos_threshold = float(degenerate_cos_threshold)
+        self.eps = float(eps)
+
+    def _sample_prompt_indices(
+        self,
+        z: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sample one context prompt and one target prompt per image."""
+        B, N, _ = z.shape
+        if N < 2:
+            raise ValueError("neg_prompt_contrast requires at least two patches")
+
+        device = z.device
+        ctx_idx = torch.randint(N, (B,), device=device)
+
+        if self.sample_mode == "uniform_distinct":
+            tgt_idx = torch.randint(N - 1, (B,), device=device)
+            tgt_idx = tgt_idx + (tgt_idx >= ctx_idx).long()
+            entropy = torch.log(z.new_tensor(float(N - 1))).expand(B)
+            return ctx_idx, tgt_idx, entropy
+
+        with torch.no_grad():
+            batch_idx = torch.arange(B, device=device)
+            ctx_feat = z.detach()[batch_idx, ctx_idx]                       # (B, D)
+            cos_to_ctx = torch.einsum("bnd,bd->bn", z.detach(), ctx_feat)   # (B, N)
+            dist = (1.0 - cos_to_ctx).clamp(min=0.0)
+            logits = dist / self.sample_temperature
+            logits = logits.scatter(1, ctx_idx.unsqueeze(1), -torch.inf)
+            probs = F.softmax(logits, dim=-1)
+            tgt_idx = torch.multinomial(probs, num_samples=1).squeeze(1)
+            entropy = -(probs * probs.clamp(min=self.eps).log()).sum(dim=-1)
+        return ctx_idx, tgt_idx, entropy
+
+    @staticmethod
+    def _gather_prompt(z: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+        batch_idx = torch.arange(z.shape[0], device=z.device)
+        return z[batch_idx, idx]
+
+    def _exclude_prompt_mass(
+        self,
+        probs: torch.Tensor,
+        idx: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        excluded = probs.gather(1, idx.unsqueeze(1)).squeeze(1)
+        if not self.exclude_prompts:
+            return probs.float(), excluded
+        probs_eff = probs.float().scatter(1, idx.unsqueeze(1), 0.0)
+        return probs_eff, excluded
+
+    def _mass_aware_centroid(
+        self,
+        probs: torch.Tensor,
+        z: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mass = probs.sum(dim=-1)                                            # (B,)
+        # Deliberately clamp at one patch of soft mass, not eps. Below one
+        # patch, the role contributes a mass-scaled partial sum rather than an
+        # amplified average from a tiny anchor.
+        denom = mass.clamp(min=1.0).unsqueeze(-1)                           # (B, 1)
+        centroid = (probs.unsqueeze(-1) * z).sum(dim=1) / denom              # (B, D)
+        return centroid, mass
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        del p_ign, kw
+
+        z = F.normalize(ema_full.float(), dim=-1, eps=self.eps)              # (B, N, D)
+        ctx_idx, tgt_idx, sampling_entropy = self._sample_prompt_indices(z)
+
+        z_ctx = self._gather_prompt(z, ctx_idx)                              # (B, D)
+        z_tgt = self._gather_prompt(z, tgt_idx)                              # (B, D)
+        prompt_axis = z_tgt - z_ctx                                          # (B, D)
+
+        p_ctx_eff, prompt_ctx_mass = self._exclude_prompt_mass(p_ctx, ctx_idx)
+        p_tgt_eff, prompt_tgt_mass = self._exclude_prompt_mass(p_tgt, tgt_idx)
+
+        mu_ctx, mass_ctx = self._mass_aware_centroid(p_ctx_eff, z)
+        mu_tgt, mass_tgt = self._mass_aware_centroid(p_tgt_eff, z)
+        role_delta = mu_tgt - mu_ctx
+
+        tgt_projection = (mu_tgt * prompt_axis).sum(dim=-1)                  # (B,)
+        ctx_projection = -(mu_ctx * prompt_axis).sum(dim=-1)                 # (B,)
+        score_per_image = tgt_projection + ctx_projection
+        score = score_per_image.mean()
+
+        origin_cos = (z_ctx * z_tgt).sum(dim=-1).clamp(min=-1.0, max=1.0)
+        orientation_cos = F.cosine_similarity(
+            role_delta,
+            prompt_axis,
+            dim=-1,
+            eps=self.eps,
+        )
+        role_delta_norm = role_delta.norm(dim=-1)
+        prompt_axis_norm = prompt_axis.norm(dim=-1)
+        alignment_scale = role_delta_norm * prompt_axis_norm
+        max_sampling_entropy = torch.log(z.new_tensor(float(z.shape[1] - 1)))
+
+        logs = {
+            "prompt_contrast/score": float(score.detach().item()),
+            "prompt_contrast/tgt_margin": float(tgt_projection.detach().mean().item()),
+            "prompt_contrast/ctx_margin": float(ctx_projection.detach().mean().item()),
+            "prompt_contrast/orientation_cos": float(orientation_cos.detach().mean().item()),
+            "prompt_contrast/role_delta_norm": float(role_delta_norm.detach().mean().item()),
+            "prompt_contrast/prompt_axis_norm": float(prompt_axis_norm.detach().mean().item()),
+            "prompt_contrast/alignment_scale": float(alignment_scale.detach().mean().item()),
+            "prompt_contrast/origin_cos": float(origin_cos.detach().mean().item()),
+            "prompt_contrast/origin_distance": float((1.0 - origin_cos).detach().mean().item()),
+            "prompt_contrast/degenerate_fraction": float(
+                (origin_cos.detach() > self.degenerate_cos_threshold).float().mean().item()
+            ),
+            "prompt_contrast/sampling_entropy": float(sampling_entropy.detach().mean().item()),
+            "prompt_contrast/sampling_entropy_norm": float(
+                (
+                    sampling_entropy.detach().mean()
+                    / max_sampling_entropy.clamp(min=self.eps)
+                ).item()
+            ),
+            "prompt_contrast/mass_ctx": float(mass_ctx.detach().mean().item()),
+            "prompt_contrast/mass_tgt": float(mass_tgt.detach().mean().item()),
+            "prompt_contrast/mass_ctx_lt_one_frac": float(
+                (mass_ctx.detach() < 1.0).float().mean().item()
+            ),
+            "prompt_contrast/mass_tgt_lt_one_frac": float(
+                (mass_tgt.detach() < 1.0).float().mean().item()
+            ),
+            "prompt_contrast/raw_mass_ctx": float(p_ctx.detach().sum(dim=-1).mean().item()),
+            "prompt_contrast/raw_mass_tgt": float(p_tgt.detach().sum(dim=-1).mean().item()),
+            "prompt_contrast/prompt_as_context_mass": float(
+                prompt_ctx_mass.detach().mean().item()
+            ),
+            "prompt_contrast/prompt_as_target_mass": float(
+                prompt_tgt_mass.detach().mean().item()
+            ),
+            "prompt_contrast/anchor_shortcut_signal": float(
+                (
+                    0.5
+                    * (
+                        prompt_ctx_mass.detach().mean()
+                        + prompt_tgt_mass.detach().mean()
+                    )
+                ).item()
+            ),
+            "prompt_contrast/exclude_prompts": float(self.exclude_prompts),
+            "prompt_contrast/sample_mode_id": 0.0
+            if self.sample_mode == "uniform_distinct"
+            else 1.0,
+            "prompt_contrast/sample_temperature": self.sample_temperature,
+        }
+
+        return -score, logs
+
+
 # ------------------------------------------------------------------
 # −logdet diversity — role-wise sketched covariance volume
 # ------------------------------------------------------------------
@@ -1037,6 +1210,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "neg_surprise": NegSurpriseTerm,
     "neg_cos_surprise": NegCosSurpriseTerm,
     "neg_symmetric_cos_surprise": NegSymmetricCosSurpriseTerm,
+    "neg_prompt_contrast": NegPromptContrastTerm,
     "neg_logdet_diversity": NegLogDetDiversityTerm,
     "neg_support_logdet_diversity": NegSupportLogDetDiversityTerm,
     "neg_signed_support_logdet": NegSignedSupportLogDetTerm,

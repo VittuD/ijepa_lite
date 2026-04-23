@@ -11,6 +11,13 @@ terms:
   neg_symmetric_cos_surprise:
     weight: [0, 0]
     role_indices: [0, 1]  # ctx, tgt; set [0, 1, 2] to include ign
+  neg_prompt_contrast:
+    weight: [0, 0]
+    sample_mode: uniform_distinct  # "uniform_distinct" or "feature_far"
+    sample_temperature: 0.5
+    exclude_prompts: true
+    degenerate_cos_threshold: 0.9
+    eps: 1.0e-8
   neg_logdet_diversity:
     weight: [0, 0]
     role_indices: [0, 1]  # ctx, tgt
