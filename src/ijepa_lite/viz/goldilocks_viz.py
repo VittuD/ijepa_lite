@@ -95,23 +95,38 @@ def apply_assignment_overlay(
     bin_map: np.ndarray,
     patch_size: int,
     alpha: float = ALPHA_ASSIGN,
+    ctx_seed_idx: Optional[int] = None,
+    tgt_seed_idx: Optional[int] = None,
+    seed_alpha: float = 1.0,
 ) -> np.ndarray:
-    """Hard assignment: ctx=blue, tgt=red, ignored=grey."""
+    """Hard assignment: ctx=blue, tgt=red, ignored=grey.
+
+    When ctx_seed_idx / tgt_seed_idx are provided, those patches are repainted
+    with a stronger alpha so RandomRegionGrowth seeds are easy to spot.
+    """
     out = orig_np.copy().astype(float)
     gh, gw = bin_map.shape
     for i in range(gh):
         for j in range(gw):
             b = bin_map[i, j]
+            flat_idx = i * gw + j
             y0, y1 = i * patch_size, (i + 1) * patch_size
             x0, x1 = j * patch_size, (j + 1) * patch_size
-            if b == 0:
+            alpha_ij = alpha
+            if ctx_seed_idx is not None and flat_idx == int(ctx_seed_idx):
+                col = np.array(CTX_RGB, dtype=float)
+                alpha_ij = seed_alpha
+            elif tgt_seed_idx is not None and flat_idx == int(tgt_seed_idx):
+                col = np.array(TGT_RGB, dtype=float)
+                alpha_ij = seed_alpha
+            elif b == 0:
                 col = np.array(CTX_RGB, dtype=float)
             elif b == 1:
                 col = np.array(TGT_RGB, dtype=float)
             else:
                 col = np.array(GREY, dtype=float)
             orig_patch = orig_np[y0:y1, x0:x1].astype(float)
-            blended = (1.0 - alpha) * orig_patch + alpha * col
+            blended = (1.0 - alpha_ij) * orig_patch + alpha_ij * col
             out[y0:y1, x0:x1] = blended
     return out.clip(0, 255).astype(np.uint8)
 
@@ -1063,6 +1078,8 @@ def visualize_split(
         p_ctx = mask_out.context_soft
         p_ign = mask_out.aux.get("p_ign")
         soft_nway = mask_out.aux.get("soft")  # (B, N, M+2) for N-way
+        rrg_ctx_seed_idx = mask_out.aux.get("rrg_ctx_seed_idx")
+        rrg_tgt_seed_idx = mask_out.aux.get("rrg_tgt_seed_idx")
 
         # Detect masker type on first batch
         if masker_type is None:
@@ -1131,7 +1148,15 @@ def visualize_split(
                 pt = p_tgt[bi].cpu().reshape(gh, gw).numpy()
                 pi = p_ign[bi].detach().cpu().reshape(gh, gw).numpy()
                 mid_np = apply_soft_3way_overlay(orig_np, pc, pt, pi, patch_size)
-                assign_np = apply_assignment_overlay(orig_np, bin_map, patch_size)
+                ctx_seed = None if rrg_ctx_seed_idx is None else int(rrg_ctx_seed_idx[bi].item())
+                tgt_seed = None if rrg_tgt_seed_idx is None else int(rrg_tgt_seed_idx[bi].item())
+                assign_np = apply_assignment_overlay(
+                    orig_np,
+                    bin_map,
+                    patch_size,
+                    ctx_seed_idx=ctx_seed,
+                    tgt_seed_idx=tgt_seed,
+                )
 
                 role_sums["ctx"] += pc.astype(np.float64)
                 role_sums["tgt"] += pt.astype(np.float64)

@@ -202,6 +202,18 @@ def mask_diagnostics(
         if _hard_key in aux:
             stats[f"mask/{_hard_key}"] = float(aux[_hard_key])
 
+    for _rrg_key in (
+        "rrg_keep_percent",
+        "rrg_semantic_nctx",
+        "rrg_semantic_ntgt",
+        "rrg_semantic_nign",
+        "rrg_exec_nctx",
+        "rrg_exec_ntgt",
+        "rrg_exec_nign",
+    ):
+        if _rrg_key in aux:
+            stats[f"mask/{_rrg_key}"] = float(aux[_rrg_key])
+
     if "role_alive_penalty" in aux:
         stats["mask/role_alive_penalty"] = float(aux["role_alive_penalty"])
     if "role_dead_frac" in aux:

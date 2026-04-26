@@ -45,8 +45,11 @@ class MIRateMasker(LatentMasker):
     ntgt_min       : Hard floor on target count.
     nctx_min       : Hard floor on context count.
     max_total_hard : Optional cap on nctx + ntgt predictor tokens.
-    hard_assignment: "topk", "argmax", or "gumbel" for hard reconstruction masks.
+    hard_assignment: "topk", "argmax", "gumbel", or "random_region_growth"
+                     for hard reconstruction masks.
     gumbel_tau     : Temperature for Gumbel hard assignment.
+    rrg_keep_percent: Percentage of argmax winners to keep per role when using
+                      random_region_growth.
     warmup_epochs  : Epochs to grow weight sampling range to full.
     """
 
@@ -68,6 +71,7 @@ class MIRateMasker(LatentMasker):
         max_total_hard: int = 0,
         hard_assignment: str = "topk",
         gumbel_tau: float = 1.0,
+        rrg_keep_percent: int = 50,
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
         # Unused — kept for build.py kwarg filtering
@@ -80,13 +84,24 @@ class MIRateMasker(LatentMasker):
         self.ntgt_min = max(1, int(ntgt_min))
         self.nctx_min = max(1, int(nctx_min))
         self.max_total_hard = int(max_total_hard)
-        if hard_assignment not in ("topk", "argmax", "gumbel"):
+        if hard_assignment not in ("topk", "argmax", "gumbel", "random_region_growth"):
             raise ValueError(
-                "hard_assignment must be 'topk', 'argmax', or 'gumbel', "
-                f"got {hard_assignment!r}"
+                "hard_assignment must be 'topk', 'argmax', 'gumbel', or "
+                f"'random_region_growth', got {hard_assignment!r}"
+            )
+        if not (1 <= int(rrg_keep_percent) <= 100):
+            raise ValueError(
+                "rrg_keep_percent must be in [1, 100], "
+                f"got {rrg_keep_percent!r}"
+            )
+        if hard_assignment == "random_region_growth" and self.max_total_hard > 0:
+            raise ValueError(
+                "hard_assignment='random_region_growth' does not support "
+                "max_total_hard > 0."
             )
         self.hard_assignment = str(hard_assignment)
         self.gumbel_tau = float(gumbel_tau)
+        self.rrg_keep_percent = int(rrg_keep_percent)
         self.warmup_epochs = int(warmup_epochs)
 
         # _progress in [0, 1]; initialised to 1.0 so unit tests use full range.
@@ -97,6 +112,17 @@ class MIRateMasker(LatentMasker):
         from ijepa_lite.models.pos_embed import build_pos_embed_2d
 
         grid_size = int(math.isqrt(num_patches))
+        if grid_size * grid_size != self.num_patches:
+            raise ValueError(
+                f"num_patches={self.num_patches} is not a perfect square; "
+                "RandomRegionGrowth relies on 2D patch-grid coordinates."
+            )
+
+        rows = torch.arange(grid_size, dtype=torch.long)
+        cols = torch.arange(grid_size, dtype=torch.long)
+        grid_r, grid_c = torch.meshgrid(rows, cols, indexing="ij")
+        coords = torch.stack([grid_r.reshape(-1), grid_c.reshape(-1)], dim=-1)
+        self.register_buffer("_patch_coords", coords, persistent=False)
 
         # ----------------------------------------------------------------
         # Transformer backbone
@@ -133,6 +159,19 @@ class MIRateMasker(LatentMasker):
         nn.init.trunc_normal_(self.proj_score.weight, std=0.02)
         nn.init.zeros_(self.proj_score.bias)
 
+    def _sample_hard_winners(
+        self,
+        logits: torch.Tensor,
+        soft: torch.Tensor,
+        mode: str,
+    ) -> torch.Tensor:
+        if mode == "gumbel":
+            g = -torch.empty_like(logits).exponential_().log()
+            return (logits / self.gumbel_tau + g).argmax(dim=-1)
+        if mode == "argmax":
+            return soft.argmax(dim=-1)
+        raise ValueError(f"Unsupported winner sampling mode={mode!r}")
+
     def _allocate_hard_counts(self, raw_nctx: float, raw_ntgt: float) -> tuple[int, int]:
         """Allocate hard ctx/tgt widths under the optional predictor-token cap."""
         nctx = max(self.nctx_min, int(round(float(raw_nctx))))
@@ -162,6 +201,131 @@ class MIRateMasker(LatentMasker):
         ctx_extra = max(0, min(extra_budget, ctx_extra))
         tgt_extra = extra_budget - ctx_extra
         return self.nctx_min + ctx_extra, self.ntgt_min + tgt_extra
+
+    def _rectangularize_winner_masks(
+        self,
+        winners: torch.Tensor,
+        p_ctx: torch.Tensor,
+        p_tgt: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+        tgt_winners = winners == 1
+        # Pack a rectangular hard mask without letting the max-count sample
+        # dictate the whole batch width. Winners are ranked before fillers;
+        # fillers use soft probabilities to avoid arbitrary zero-score ties.
+        tgt_counts = tgt_winners.float().sum(dim=-1)
+        tgt_scores = tgt_winners.float() + p_tgt * (~tgt_winners).float()
+        raw_ntgt = float(tgt_counts.float().mean().item())
+        ctx_winners = winners == 0
+        ctx_counts = ctx_winners.float().sum(dim=-1)
+        ctx_scores = ctx_winners.float() + p_ctx * (~ctx_winners).float()
+        raw_nctx = float(ctx_counts.float().mean().item())
+        nctx, ntgt = self._allocate_hard_counts(raw_nctx, raw_ntgt)
+        # topk avoids sorting all patches while still selecting winners
+        # before non-winner fillers.
+        _, tgt_idx = torch.topk(tgt_scores, ntgt, dim=-1, sorted=False)
+
+        ctx_scores = ctx_scores.scatter(1, tgt_idx, -torch.inf)
+        _, ctx_idx = torch.topk(ctx_scores, nctx, dim=-1, sorted=False)
+
+        aux_counts = {
+            "hard_sampled_nctx": float(ctx_counts.float().mean().detach().item()),
+            "hard_sampled_ntgt": float(tgt_counts.float().mean().detach().item()),
+            "hard_sampled_nign": float(
+                (winners == 2).float().sum(dim=-1).mean().detach().item()
+            ),
+        }
+        return ctx_idx, tgt_idx, aux_counts
+
+    def _grow_random_region(
+        self,
+        winners: torch.Tensor,
+        role_idx: int,
+    ) -> tuple[list[torch.Tensor], torch.Tensor, torch.Tensor]:
+        keep_fraction = float(self.rrg_keep_percent) / 100.0
+        exact_indices: list[torch.Tensor] = []
+        exact_counts = torch.empty(
+            winners.shape[0], device=winners.device, dtype=torch.long
+        )
+        seed_indices = torch.empty(
+            winners.shape[0], device=winners.device, dtype=torch.long
+        )
+        patch_coords = self._patch_coords.to(device=winners.device)
+
+        for b in range(winners.shape[0]):
+            role_indices = (winners[b] == role_idx).nonzero(as_tuple=False).flatten()
+            count = int(role_indices.numel())
+            if count <= 0:
+                role_name = "ctx" if role_idx == 0 else "tgt"
+                raise RuntimeError(
+                    "hard_assignment='random_region_growth' requires at least one "
+                    f"{role_name} argmax winner per sample; sample {b} had none."
+                )
+            keep_count = max(1, int(math.ceil(count * keep_fraction)))
+            seed_offset = int(
+                torch.randint(count, (1,), device=winners.device).item()
+            )
+            seed_idx = role_indices[seed_offset]
+            seed_indices[b] = seed_idx
+            seed_coord = patch_coords[seed_idx]
+            role_coords = patch_coords[role_indices]
+            distances = (role_coords - seed_coord).abs().sum(dim=-1)
+            tie_break = distances * self.num_patches + role_indices
+            order = tie_break.argsort(dim=0)
+            exact = role_indices[order[:keep_count]]
+            exact_indices.append(exact)
+            exact_counts[b] = keep_count
+
+        return exact_indices, exact_counts, seed_indices
+
+    def _truncate_exact_sets(
+        self,
+        exact_ctx: list[torch.Tensor],
+        exact_tgt: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        final_nctx = min(int(x.numel()) for x in exact_ctx)
+        final_ntgt = min(int(x.numel()) for x in exact_tgt)
+        if final_nctx <= 0 or final_ntgt <= 0:
+            raise RuntimeError(
+                "RandomRegionGrowth produced an empty executed context or target set "
+                "after batch-min truncation."
+            )
+        ctx_idx = torch.stack([x[:final_nctx] for x in exact_ctx], dim=0)
+        tgt_idx = torch.stack([x[:final_ntgt] for x in exact_tgt], dim=0)
+        return ctx_idx, tgt_idx
+
+    def _random_region_growth_indices(
+        self,
+        logits: torch.Tensor,
+        soft: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+        winners = self._sample_hard_winners(logits, soft, mode="argmax")
+        exact_ctx, exact_ctx_counts, ctx_seed_idx = self._grow_random_region(
+            winners, role_idx=0
+        )
+        exact_tgt, exact_tgt_counts, tgt_seed_idx = self._grow_random_region(
+            winners, role_idx=1
+        )
+        ctx_idx, tgt_idx = self._truncate_exact_sets(exact_ctx, exact_tgt)
+
+        aux_counts = {
+            "rrg_keep_percent": float(self.rrg_keep_percent),
+            "rrg_ctx_seed_idx": ctx_seed_idx,
+            "rrg_tgt_seed_idx": tgt_seed_idx,
+            "rrg_semantic_nctx": float(exact_ctx_counts.float().mean().item()),
+            "rrg_semantic_ntgt": float(exact_tgt_counts.float().mean().item()),
+            "rrg_semantic_nign": float(
+                self.num_patches
+                - exact_ctx_counts.float().mean().item()
+                - exact_tgt_counts.float().mean().item()
+            ),
+            "rrg_exec_nctx": float(ctx_idx.shape[1]),
+            "rrg_exec_ntgt": float(tgt_idx.shape[1]),
+            "rrg_exec_nign": float(self.num_patches - ctx_idx.shape[1] - tgt_idx.shape[1]),
+            "hard_sampled_nctx": float(ctx_idx.shape[1]),
+            "hard_sampled_ntgt": float(tgt_idx.shape[1]),
+            "hard_sampled_nign": float(self.num_patches - ctx_idx.shape[1] - tgt_idx.shape[1]),
+        }
+        return ctx_idx, tgt_idx, aux_counts
 
     # ------------------------------------------------------------------
     # Warmup progress
@@ -245,38 +409,15 @@ class MIRateMasker(LatentMasker):
         # Hard reconstruction masks
         # ----------------------------------------------------------------
         aux_counts = {}
-        if self.hard_assignment in ("argmax", "gumbel"):
-            if self.hard_assignment == "gumbel":
-                # Gumbel-max samples one hard role per patch from the categorical.
-                g = -torch.empty_like(logits).exponential_().log()
-                winners = (logits / self.gumbel_tau + g).argmax(dim=-1)
-            else:
-                winners = soft.argmax(dim=-1)
-
-            tgt_winners = winners == 1
-            # Pack a rectangular hard mask without letting the max-count sample
-            # dictate the whole batch width.  Winners are ranked before fillers;
-            # fillers use soft probabilities to avoid arbitrary zero-score ties.
-            tgt_counts = tgt_winners.float().sum(dim=-1)
-            tgt_scores = tgt_winners.float() + p_tgt * (~tgt_winners).float()
-            raw_ntgt = float(tgt_counts.float().mean().item())
-            ctx_winners = winners == 0
-            ctx_counts = ctx_winners.float().sum(dim=-1)
-            ctx_scores = ctx_winners.float() + p_ctx * (~ctx_winners).float()
-            raw_nctx = float(ctx_counts.float().mean().item())
-            nctx, ntgt = self._allocate_hard_counts(raw_nctx, raw_ntgt)
-            # topk avoids sorting all patches while still selecting winners
-            # before non-winner fillers.
-            _, tgt_idx = torch.topk(tgt_scores, ntgt, dim=-1, sorted=False)
-
-            ctx_scores = ctx_scores.scatter(1, tgt_idx, -torch.inf)
-            _, ctx_idx = torch.topk(ctx_scores, nctx, dim=-1, sorted=False)
-
-            aux_counts = {
-                "hard_sampled_nctx": float(ctx_counts.float().mean().detach().item()),
-                "hard_sampled_ntgt": float(tgt_counts.float().mean().detach().item()),
-                "hard_sampled_nign": float((winners == 2).float().sum(dim=-1).mean().detach().item()),
-            }
+        if self.hard_assignment == "random_region_growth":
+            ctx_idx, tgt_idx, aux_counts = self._random_region_growth_indices(
+                logits, soft
+            )
+        elif self.hard_assignment in ("argmax", "gumbel"):
+            winners = self._sample_hard_winners(logits, soft, mode=self.hard_assignment)
+            ctx_idx, tgt_idx, aux_counts = self._rectangularize_winner_masks(
+                winners, p_ctx, p_tgt
+            )
         else:
             raw_ntgt = float(p_tgt.sum(dim=-1).mean().item())
             raw_nctx = float(p_ctx.sum(dim=-1).mean().item())
@@ -406,6 +547,11 @@ class MINWayMasker(LatentMasker):
         self.max_tgt_per_block = int(max_tgt_per_block)
         self.max_total_hard = int(max_total_hard)
         self.nctx_min = max(1, int(nctx_min))
+        if hard_assignment not in ("topk", "argmax", "gumbel"):
+            raise ValueError(
+                "hard_assignment must be 'topk', 'argmax', or 'gumbel' for "
+                f"mi_nway, got {hard_assignment!r}"
+            )
         self.hard_assignment = str(hard_assignment)
         self.arch = str(arch)
         self.gumbel_tau = float(gumbel_tau)
