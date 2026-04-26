@@ -2,4 +2,10 @@ lr: 3e-4
 weight_decay: 0.05
 betas: [0.9, 0.95]
 eps: 1e-8
-masker_lr_scale: 1.0   # multiplier on base LR for latent_masker + token_compressor
+masker:
+  lr_scale: 1.0            # multiplier on base LR for latent_masker + token_compressor
+  separate_optimizer: false
+  betas: [0.9, 0.95]       # only used when separate_optimizer=true
+  eps: 1e-8                # only used when separate_optimizer=true
+  weight_decay: 0.05       # only used when separate_optimizer=true
+  final_weight_decay: 0.05 # only used when separate_optimizer=true

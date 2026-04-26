@@ -426,12 +426,27 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     lr = float(cfg.optim.lr)
     betas = tuple(float(x) for x in cfg.optim.betas)
     eps = float(cfg.optim.eps)
-    masker_lr_scale = float(getattr(cfg.optim, "masker_lr_scale", 1.0))
-    separate_masker_opt = bool(getattr(cfg.optim, "masker_separate_optimizer", False))
-    masker_betas = tuple(float(x) for x in getattr(cfg.optim, "masker_betas", betas))
-    masker_eps = float(getattr(cfg.optim, "masker_eps", eps))
-    masker_wd_start = float(getattr(cfg.optim, "masker_weight_decay", wd_start))
-    masker_wd_end = float(getattr(cfg.optim, "masker_final_weight_decay", masker_wd_start))
+    masker_cfg = getattr(cfg.optim, "masker", None)
+
+    def _masker_opt_value(nested_key: str, legacy_key: str, default):
+        if masker_cfg is not None and hasattr(masker_cfg, nested_key):
+            return getattr(masker_cfg, nested_key)
+        return getattr(cfg.optim, legacy_key, default)
+
+    masker_lr_scale = float(_masker_opt_value("lr_scale", "masker_lr_scale", 1.0))
+    separate_masker_opt = bool(
+        _masker_opt_value("separate_optimizer", "masker_separate_optimizer", False)
+    )
+    masker_betas = tuple(float(x) for x in _masker_opt_value("betas", "masker_betas", betas))
+    masker_eps = float(_masker_opt_value("eps", "masker_eps", eps))
+    masker_wd_start = float(
+        _masker_opt_value("weight_decay", "masker_weight_decay", wd_start)
+    )
+    masker_wd_end = float(
+        _masker_opt_value(
+            "final_weight_decay", "masker_final_weight_decay", masker_wd_start
+        )
+    )
 
     # Split params: masker submodules optionally get a separate optimizer
     core = model.module if hasattr(model, "module") else model
