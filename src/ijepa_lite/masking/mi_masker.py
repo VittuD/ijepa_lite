@@ -172,6 +172,55 @@ class MIRateMasker(LatentMasker):
             return soft.argmax(dim=-1)
         raise ValueError(f"Unsupported winner sampling mode={mode!r}")
 
+    def _ensure_required_winner_roles(
+        self,
+        winners: torch.Tensor,
+        soft: torch.Tensor,
+        required_roles: tuple[int, ...],
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Ensure each sample has at least one winner for every required role.
+
+        RandomRegionGrowth operates on an exclusive hard winner partition, but
+        plain argmax can collapse an entire sample to a subset of roles early in
+        training. For missing required roles, minimally repair the winner map by
+        reassigning the highest-probability available patch to that role.
+        """
+        winners = winners.clone()
+        fallback_counts = {role: 0 for role in required_roles}
+
+        for b in range(winners.shape[0]):
+            present = {
+                role: bool((winners[b] == role).any().item())
+                for role in required_roles
+            }
+            if all(present.values()):
+                continue
+
+            reserved: set[int] = set()
+            for role in required_roles:
+                if present[role]:
+                    continue
+                order = soft[b, :, role].argsort(descending=True)
+                chosen_idx = None
+                for idx in order.tolist():
+                    if idx not in reserved:
+                        chosen_idx = int(idx)
+                        break
+                if chosen_idx is None:
+                    raise RuntimeError(
+                        f"Could not assign fallback winner for required role {role} "
+                        f"in sample {b}."
+                    )
+                winners[b, chosen_idx] = role
+                reserved.add(chosen_idx)
+                fallback_counts[role] += 1
+
+        aux_counts = {}
+        role_names = {0: "ctx", 1: "tgt"}
+        for role, count in fallback_counts.items():
+            aux_counts[f"rrg_fallback_{role_names.get(role, role)}"] = float(count)
+        return winners, aux_counts
+
     def _allocate_hard_counts(self, raw_nctx: float, raw_ntgt: float) -> tuple[int, int]:
         """Allocate hard ctx/tgt widths under the optional predictor-token cap."""
         nctx = max(self.nctx_min, int(round(float(raw_nctx))))
@@ -299,6 +348,9 @@ class MIRateMasker(LatentMasker):
         soft: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
         winners = self._sample_hard_winners(logits, soft, mode="argmax")
+        winners, fallback_counts = self._ensure_required_winner_roles(
+            winners, soft, required_roles=(0, 1)
+        )
         exact_ctx, exact_ctx_counts, ctx_seed_idx = self._grow_random_region(
             winners, role_idx=0
         )
@@ -324,6 +376,7 @@ class MIRateMasker(LatentMasker):
             "hard_sampled_nctx": float(ctx_idx.shape[1]),
             "hard_sampled_ntgt": float(tgt_idx.shape[1]),
             "hard_sampled_nign": float(self.num_patches - ctx_idx.shape[1] - tgt_idx.shape[1]),
+            **fallback_counts,
         }
         return ctx_idx, tgt_idx, aux_counts
 

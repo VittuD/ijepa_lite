@@ -204,6 +204,8 @@ def mask_diagnostics(
 
     for _rrg_key in (
         "rrg_keep_percent",
+        "rrg_fallback_ctx",
+        "rrg_fallback_tgt",
         "rrg_semantic_nctx",
         "rrg_semantic_ntgt",
         "rrg_semantic_nign",
