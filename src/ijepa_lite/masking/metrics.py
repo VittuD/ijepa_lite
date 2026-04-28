@@ -204,17 +204,27 @@ def mask_diagnostics(
 
     for _rrg_key in (
         "rrg_keep_percent",
+        "rrg_num_target_blocks",
         "rrg_fallback_ctx",
         "rrg_fallback_tgt",
         "rrg_semantic_nctx",
         "rrg_semantic_ntgt",
+        "rrg_semantic_ntgt_total",
         "rrg_semantic_nign",
         "rrg_exec_nctx",
         "rrg_exec_ntgt",
+        "rrg_exec_ntgt_total",
         "rrg_exec_nign",
     ):
         if _rrg_key in aux:
             stats[f"mask/{_rrg_key}"] = float(aux[_rrg_key])
+    for key, value in aux.items():
+        if key.startswith("rrg_semantic_ntgt_block_") or key.startswith("rrg_exec_ntgt_block_"):
+            if torch.is_tensor(value):
+                if value.numel() == 1:
+                    stats[f"mask/{key}"] = float(value.item())
+            else:
+                stats[f"mask/{key}"] = float(value)
 
     if "role_alive_penalty" in aux:
         stats["mask/role_alive_penalty"] = float(aux["role_alive_penalty"])

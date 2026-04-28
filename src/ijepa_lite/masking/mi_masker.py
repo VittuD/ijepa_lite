@@ -45,11 +45,14 @@ class MIRateMasker(LatentMasker):
     ntgt_min       : Hard floor on target count.
     nctx_min       : Hard floor on context count.
     max_total_hard : Optional cap on nctx + ntgt predictor tokens.
-    hard_assignment: "topk", "argmax", "gumbel", or "random_region_growth"
+    hard_assignment: "topk", "argmax", "gumbel", "random_region_growth",
+                     or "random_region_growth_multiblock"
                      for hard reconstruction masks.
     gumbel_tau     : Temperature for Gumbel hard assignment.
     rrg_keep_percent: Percentage of argmax winners to keep per role when using
                       random_region_growth.
+    rrg_num_target_blocks: Number of target blocks when using multiblock
+                           random-region-growth hard assignment.
     warmup_epochs  : Epochs to grow weight sampling range to full.
     """
 
@@ -72,6 +75,7 @@ class MIRateMasker(LatentMasker):
         hard_assignment: str = "topk",
         gumbel_tau: float = 1.0,
         rrg_keep_percent: int = 50,
+        rrg_num_target_blocks: int = 4,
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
         # Unused — kept for build.py kwarg filtering
@@ -84,19 +88,35 @@ class MIRateMasker(LatentMasker):
         self.ntgt_min = max(1, int(ntgt_min))
         self.nctx_min = max(1, int(nctx_min))
         self.max_total_hard = int(max_total_hard)
-        if hard_assignment not in ("topk", "argmax", "gumbel", "random_region_growth"):
+        if hard_assignment not in (
+            "topk",
+            "argmax",
+            "gumbel",
+            "random_region_growth",
+            "random_region_growth_multiblock",
+        ):
             raise ValueError(
-                "hard_assignment must be 'topk', 'argmax', 'gumbel', or "
-                f"'random_region_growth', got {hard_assignment!r}"
+                "hard_assignment must be 'topk', 'argmax', 'gumbel', "
+                "'random_region_growth', or 'random_region_growth_multiblock', "
+                f"got {hard_assignment!r}"
             )
         if not (1 <= int(rrg_keep_percent) <= 100):
             raise ValueError(
                 "rrg_keep_percent must be in [1, 100], "
                 f"got {rrg_keep_percent!r}"
             )
-        if hard_assignment == "random_region_growth" and self.max_total_hard > 0:
+        self.rrg_num_target_blocks = max(1, int(rrg_num_target_blocks))
+        if self.rrg_num_target_blocks >= self.num_patches:
             raise ValueError(
-                "hard_assignment='random_region_growth' does not support "
+                "rrg_num_target_blocks must be smaller than num_patches, "
+                f"got {self.rrg_num_target_blocks} for num_patches={self.num_patches}."
+            )
+        if (
+            hard_assignment in ("random_region_growth", "random_region_growth_multiblock")
+            and self.max_total_hard > 0
+        ):
+            raise ValueError(
+                f"hard_assignment={hard_assignment!r} does not support "
                 "max_total_hard > 0."
             )
         self.hard_assignment = str(hard_assignment)
@@ -172,6 +192,61 @@ class MIRateMasker(LatentMasker):
             return soft.argmax(dim=-1)
         raise ValueError(f"Unsupported winner sampling mode={mode!r}")
 
+    def _ensure_role_min_counts(
+        self,
+        winners: torch.Tensor,
+        soft: torch.Tensor,
+        min_counts: dict[int, int],
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Ensure each sample has the requested minimum winner count per role."""
+        winners = winners.clone()
+        fallback_counts = {role: 0 for role in min_counts}
+
+        for b in range(winners.shape[0]):
+            reserved: set[int] = set()
+            while True:
+                role_counts = {
+                    role: int((winners[b] == role).sum().item())
+                    for role in min_counts
+                }
+                missing_roles = [
+                    role for role, min_count in min_counts.items()
+                    if role_counts[role] < min_count
+                ]
+                if not missing_roles:
+                    break
+
+                role = missing_roles[0]
+                order = soft[b, :, role].argsort(descending=True)
+                chosen_idx = None
+                for idx in order.tolist():
+                    idx = int(idx)
+                    if idx in reserved:
+                        continue
+                    current_role = int(winners[b, idx].item())
+                    if (
+                        current_role in role_counts
+                        and current_role != role
+                        and role_counts[current_role] <= min_counts[current_role]
+                    ):
+                        continue
+                    chosen_idx = idx
+                    break
+                if chosen_idx is None:
+                    raise RuntimeError(
+                        "Could not assign fallback winner without violating "
+                        f"required role minima in sample {b}."
+                    )
+                winners[b, chosen_idx] = role
+                reserved.add(chosen_idx)
+                fallback_counts[role] += 1
+
+        aux_counts = {}
+        role_names = {0: "ctx", 1: "tgt"}
+        for role, count in fallback_counts.items():
+            aux_counts[f"rrg_fallback_{role_names.get(role, role)}"] = float(count)
+        return winners, aux_counts
+
     def _ensure_required_winner_roles(
         self,
         winners: torch.Tensor,
@@ -185,51 +260,11 @@ class MIRateMasker(LatentMasker):
         training. For missing required roles, minimally repair the winner map by
         reassigning the highest-probability available patch to that role.
         """
-        winners = winners.clone()
-        fallback_counts = {role: 0 for role in required_roles}
-
-        for b in range(winners.shape[0]):
-            reserved: set[int] = set()
-            while True:
-                role_counts = {
-                    role: int((winners[b] == role).sum().item())
-                    for role in required_roles
-                }
-                missing_roles = [role for role in required_roles if role_counts[role] <= 0]
-                if not missing_roles:
-                    break
-
-                role = missing_roles[0]
-                order = soft[b, :, role].argsort(descending=True)
-                chosen_idx = None
-                for idx in order.tolist():
-                    idx = int(idx)
-                    if idx in reserved:
-                        continue
-                    current_role = int(winners[b, idx].item())
-                    # Do not steal the sole remaining winner of another required role.
-                    if (
-                        current_role in role_counts
-                        and current_role != role
-                        and role_counts[current_role] <= 1
-                    ):
-                        continue
-                    chosen_idx = idx
-                    break
-                if chosen_idx is None:
-                    raise RuntimeError(
-                        "Could not assign fallback winner without emptying another "
-                        f"required role in sample {b}."
-                    )
-                winners[b, chosen_idx] = role
-                reserved.add(chosen_idx)
-                fallback_counts[role] += 1
-
-        aux_counts = {}
-        role_names = {0: "ctx", 1: "tgt"}
-        for role, count in fallback_counts.items():
-            aux_counts[f"rrg_fallback_{role_names.get(role, role)}"] = float(count)
-        return winners, aux_counts
+        return self._ensure_role_min_counts(
+            winners,
+            soft,
+            {role: 1 for role in required_roles},
+        )
 
     def _allocate_hard_counts(self, raw_nctx: float, raw_ntgt: float) -> tuple[int, int]:
         """Allocate hard ctx/tgt widths under the optional predictor-token cap."""
@@ -335,6 +370,194 @@ class MIRateMasker(LatentMasker):
             exact_counts[b] = keep_count
 
         return exact_indices, exact_counts, seed_indices
+
+    def _sample_rrg_target_seeds(
+        self,
+        role_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        order = torch.randperm(role_indices.numel(), device=role_indices.device)
+        return role_indices[order[:self.rrg_num_target_blocks]]
+
+    def _partition_target_support(
+        self,
+        role_indices: torch.Tensor,
+        seed_indices: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        patch_coords = self._patch_coords.to(device=role_indices.device)
+        role_coords = patch_coords[role_indices]
+        seed_coords = patch_coords[seed_indices]
+        distances = (role_coords[:, None, :] - seed_coords[None, :, :]).abs().sum(dim=-1)
+        tie_break = distances * self.num_patches + seed_indices.unsqueeze(0)
+        assign = tie_break.argmin(dim=1)
+
+        blocks: list[torch.Tensor] = []
+        for k in range(seed_indices.numel()):
+            block_indices = role_indices[assign == k]
+            block_distances = distances[assign == k, k]
+            order = (block_distances * self.num_patches + block_indices).argsort(dim=0)
+            blocks.append(block_indices[order])
+        return blocks
+
+    def _allocate_rrg_block_keep_counts(
+        self,
+        block_sizes: list[int],
+        keep_total: int,
+    ) -> list[int]:
+        num_blocks = len(block_sizes)
+        total_size = sum(block_sizes)
+        if num_blocks <= 0 or total_size <= 0:
+            raise RuntimeError("RRG multiblock allocation requires non-empty blocks.")
+
+        keep_total = max(num_blocks, min(total_size, int(keep_total)))
+        counts = [1 for _ in block_sizes]
+        remaining = keep_total - num_blocks
+        if remaining <= 0:
+            return counts
+
+        capacities = [max(0, size - 1) for size in block_sizes]
+        capacity_sum = sum(capacities)
+        if capacity_sum <= 0:
+            return counts
+
+        raw_quota = [remaining * cap / capacity_sum for cap in capacities]
+        extra = [min(cap, int(math.floor(quota))) for cap, quota in zip(capacities, raw_quota)]
+        counts = [base + add for base, add in zip(counts, extra)]
+        remaining -= sum(extra)
+
+        order = sorted(
+            range(num_blocks),
+            key=lambda i: (raw_quota[i] - extra[i], capacities[i], block_sizes[i]),
+            reverse=True,
+        )
+        for i in order:
+            if remaining <= 0:
+                break
+            if counts[i] < block_sizes[i]:
+                counts[i] += 1
+                remaining -= 1
+        if remaining > 0:
+            for i in order:
+                while remaining > 0 and counts[i] < block_sizes[i]:
+                    counts[i] += 1
+                    remaining -= 1
+                if remaining <= 0:
+                    break
+        return counts
+
+    def _truncate_multiblock_target_sets(
+        self,
+        exact_blocks: list[list[torch.Tensor]],
+    ) -> torch.Tensor:
+        final_ntgt = min(
+            int(block.numel()) for sample_blocks in exact_blocks for block in sample_blocks
+        )
+        if final_ntgt <= 0:
+            raise RuntimeError(
+                "RandomRegionGrowthMultiblock produced an empty executed target block "
+                "after batch-min truncation."
+            )
+        return torch.stack(
+            [
+                torch.stack([block[:final_ntgt] for block in sample_blocks], dim=0)
+                for sample_blocks in exact_blocks
+            ],
+            dim=0,
+        )
+
+    def _random_region_growth_multiblock_indices(
+        self,
+        logits: torch.Tensor,
+        soft: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+        winners = self._sample_hard_winners(logits, soft, mode="argmax")
+        winners, fallback_counts = self._ensure_role_min_counts(
+            winners,
+            soft,
+            {0: 1, 1: self.rrg_num_target_blocks},
+        )
+        exact_ctx, exact_ctx_counts, ctx_seed_idx = self._grow_random_region(
+            winners, role_idx=0
+        )
+
+        keep_fraction = float(self.rrg_keep_percent) / 100.0
+        patch_coords_device = winners.device
+        target_blocks: list[list[torch.Tensor]] = []
+        target_seed_idx = torch.empty(
+            winners.shape[0], self.rrg_num_target_blocks, device=patch_coords_device, dtype=torch.long
+        )
+        semantic_counts = torch.empty(
+            winners.shape[0], self.rrg_num_target_blocks, device=patch_coords_device, dtype=torch.long
+        )
+
+        for b in range(winners.shape[0]):
+            role_indices = (winners[b] == 1).nonzero(as_tuple=False).flatten()
+            total_count = int(role_indices.numel())
+            if total_count < self.rrg_num_target_blocks:
+                raise RuntimeError(
+                    "hard_assignment='random_region_growth_multiblock' requires at "
+                    "least rrg_num_target_blocks target winners per sample after "
+                    f"fallback repair; sample {b} had {total_count}, expected "
+                    f"{self.rrg_num_target_blocks}."
+                )
+            keep_total = max(
+                self.rrg_num_target_blocks,
+                int(math.ceil(total_count * keep_fraction)),
+            )
+            seeds = self._sample_rrg_target_seeds(role_indices)
+            blocks_full = self._partition_target_support(role_indices, seeds)
+            block_sizes = [int(block.numel()) for block in blocks_full]
+            keep_counts = self._allocate_rrg_block_keep_counts(block_sizes, keep_total)
+            blocks_kept = [block[:keep_count] for block, keep_count in zip(blocks_full, keep_counts)]
+
+            target_blocks.append(blocks_kept)
+            target_seed_idx[b] = seeds
+            semantic_counts[b] = torch.tensor(
+                keep_counts, device=patch_coords_device, dtype=torch.long
+            )
+
+        ctx_idx = torch.stack(
+            [x[: min(int(y.numel()) for y in exact_ctx)] for x in exact_ctx], dim=0
+        )
+        tgt_idx = self._truncate_multiblock_target_sets(target_blocks)
+        final_nctx = ctx_idx.shape[1]
+        final_ntgt_per_block = tgt_idx.shape[2]
+        target_block_counts = torch.full(
+            (self.rrg_num_target_blocks,),
+            final_ntgt_per_block,
+            device=patch_coords_device,
+            dtype=torch.long,
+        )
+        semantic_counts_mean = semantic_counts.float().mean(dim=0)
+        semantic_total_mean = semantic_counts.float().sum(dim=1).mean().item()
+        exec_total = self.rrg_num_target_blocks * final_ntgt_per_block
+
+        aux_counts = {
+            "rrg_keep_percent": float(self.rrg_keep_percent),
+            "rrg_num_target_blocks": float(self.rrg_num_target_blocks),
+            "rrg_ctx_seed_idx": ctx_seed_idx,
+            "rrg_tgt_seed_idx_blocks": target_seed_idx,
+            "rrg_semantic_nctx": float(exact_ctx_counts.float().mean().item()),
+            "rrg_semantic_ntgt": float(semantic_total_mean),
+            "rrg_semantic_ntgt_total": float(semantic_total_mean),
+            "rrg_semantic_nign": float(
+                self.num_patches
+                - exact_ctx_counts.float().mean().item()
+                - semantic_total_mean
+            ),
+            "rrg_exec_nctx": float(final_nctx),
+            "rrg_exec_ntgt": float(exec_total),
+            "rrg_exec_ntgt_total": float(exec_total),
+            "rrg_exec_nign": float(self.num_patches - final_nctx - exec_total),
+            "hard_sampled_nctx": float(final_nctx),
+            "hard_sampled_ntgt": float(exec_total),
+            "hard_sampled_nign": float(self.num_patches - final_nctx - exec_total),
+            "target_block_counts": target_block_counts,
+            **fallback_counts,
+        }
+        for k in range(self.rrg_num_target_blocks):
+            aux_counts[f"rrg_semantic_ntgt_block_{k}"] = float(semantic_counts_mean[k].item())
+            aux_counts[f"rrg_exec_ntgt_block_{k}"] = float(final_ntgt_per_block)
+        return ctx_idx, tgt_idx, aux_counts
 
     def _truncate_exact_sets(
         self,
@@ -474,6 +697,10 @@ class MIRateMasker(LatentMasker):
         aux_counts = {}
         if self.hard_assignment == "random_region_growth":
             ctx_idx, tgt_idx, aux_counts = self._random_region_growth_indices(
+                logits, soft
+            )
+        elif self.hard_assignment == "random_region_growth_multiblock":
+            ctx_idx, tgt_idx, aux_counts = self._random_region_growth_multiblock_indices(
                 logits, soft
             )
         elif self.hard_assignment in ("argmax", "gumbel"):

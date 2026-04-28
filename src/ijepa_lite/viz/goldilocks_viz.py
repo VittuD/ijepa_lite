@@ -1148,15 +1148,24 @@ def visualize_split(
                 pt = p_tgt[bi].cpu().reshape(gh, gw).numpy()
                 pi = p_ign[bi].detach().cpu().reshape(gh, gw).numpy()
                 mid_np = apply_soft_3way_overlay(orig_np, pc, pt, pi, patch_size)
-                ctx_seed = None if rrg_ctx_seed_idx is None else int(rrg_ctx_seed_idx[bi].item())
-                tgt_seed = None if rrg_tgt_seed_idx is None else int(rrg_tgt_seed_idx[bi].item())
-                assign_np = apply_assignment_overlay(
-                    orig_np,
-                    bin_map,
-                    patch_size,
-                    ctx_seed_idx=ctx_seed,
-                    tgt_seed_idx=tgt_seed,
-                )
+                if tgt_idx.dim() == 3:
+                    assign_np = apply_multiblock_overlay(
+                        orig_np,
+                        ctx_idx[bi].cpu().numpy(),
+                        tgt_idx[bi].cpu().numpy(),
+                        patch_size,
+                        image_size,
+                    )
+                else:
+                    ctx_seed = None if rrg_ctx_seed_idx is None else int(rrg_ctx_seed_idx[bi].item())
+                    tgt_seed = None if rrg_tgt_seed_idx is None else int(rrg_tgt_seed_idx[bi].item())
+                    assign_np = apply_assignment_overlay(
+                        orig_np,
+                        bin_map,
+                        patch_size,
+                        ctx_seed_idx=ctx_seed,
+                        tgt_seed_idx=tgt_seed,
+                    )
 
                 role_sums["ctx"] += pc.astype(np.float64)
                 role_sums["tgt"] += pt.astype(np.float64)
