@@ -189,27 +189,37 @@ class MIRateMasker(LatentMasker):
         fallback_counts = {role: 0 for role in required_roles}
 
         for b in range(winners.shape[0]):
-            present = {
-                role: bool((winners[b] == role).any().item())
-                for role in required_roles
-            }
-            if all(present.values()):
-                continue
-
             reserved: set[int] = set()
-            for role in required_roles:
-                if present[role]:
-                    continue
+            while True:
+                role_counts = {
+                    role: int((winners[b] == role).sum().item())
+                    for role in required_roles
+                }
+                missing_roles = [role for role in required_roles if role_counts[role] <= 0]
+                if not missing_roles:
+                    break
+
+                role = missing_roles[0]
                 order = soft[b, :, role].argsort(descending=True)
                 chosen_idx = None
                 for idx in order.tolist():
-                    if idx not in reserved:
-                        chosen_idx = int(idx)
-                        break
+                    idx = int(idx)
+                    if idx in reserved:
+                        continue
+                    current_role = int(winners[b, idx].item())
+                    # Do not steal the sole remaining winner of another required role.
+                    if (
+                        current_role in role_counts
+                        and current_role != role
+                        and role_counts[current_role] <= 1
+                    ):
+                        continue
+                    chosen_idx = idx
+                    break
                 if chosen_idx is None:
                     raise RuntimeError(
-                        f"Could not assign fallback winner for required role {role} "
-                        f"in sample {b}."
+                        "Could not assign fallback winner without emptying another "
+                        f"required role in sample {b}."
                     )
                 winners[b, chosen_idx] = role
                 reserved.add(chosen_idx)
