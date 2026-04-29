@@ -205,6 +205,7 @@ def mask_diagnostics(
     for _rrg_key in (
         "warmup_random_multiblock_active",
         "rrg_keep_percent",
+        "rrg_keep_k_per_block",
         "rrg_num_target_blocks",
         "rrg_fallback_ctx",
         "rrg_fallback_tgt",

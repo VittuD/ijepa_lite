@@ -71,3 +71,4 @@ hard_assignment: topk    # "topk", "argmax", "gumbel", "random_region_growth", o
 gumbel_tau: 1.0          # temperature for gumbel hard assignment
 rrg_keep_percent: 50     # only used by random-region-growth hard assignments
 rrg_num_target_blocks: 4 # only used when hard_assignment=random_region_growth_multiblock
+rrg_keep_k_per_block: 0  # 0 = disabled; otherwise fixed per-block target budget for learned multiblock RRG

@@ -79,6 +79,7 @@ class MIRateMasker(LatentMasker):
         gumbel_tau: float = 1.0,
         rrg_keep_percent: int = 50,
         rrg_num_target_blocks: int = 4,
+        rrg_keep_k_per_block: int = 0,
         warmup_use_vanilla_multiblock: bool = False,
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
@@ -120,6 +121,11 @@ class MIRateMasker(LatentMasker):
                 "rrg_keep_percent must be in [1, 100], "
                 f"got {rrg_keep_percent!r}"
             )
+        if int(rrg_keep_k_per_block) < 0:
+            raise ValueError(
+                "rrg_keep_k_per_block must be >= 0, "
+                f"got {rrg_keep_k_per_block!r}"
+            )
         self.rrg_num_target_blocks = max(1, int(rrg_num_target_blocks))
         if self.rrg_num_target_blocks >= self.num_patches:
             raise ValueError(
@@ -137,6 +143,7 @@ class MIRateMasker(LatentMasker):
         self.hard_assignment = str(hard_assignment)
         self.gumbel_tau = float(gumbel_tau)
         self.rrg_keep_percent = int(rrg_keep_percent)
+        self.rrg_keep_k_per_block = int(rrg_keep_k_per_block)
         self.warmup_use_vanilla_multiblock = bool(warmup_use_vanilla_multiblock)
         self.warmup_epochs = int(warmup_epochs)
         if self.warmup_use_vanilla_multiblock and self.hard_assignment != "random_region_growth_multiblock":
@@ -602,10 +609,16 @@ class MIRateMasker(LatentMasker):
 
         for b in range(winners.shape[0]):
             total_count = int((winners[b] == 1).sum().item())
-            semantic_keep_per_block[b] = max(
-                1,
-                int(math.ceil(total_count * keep_fraction)),
-            )
+            if self.rrg_keep_k_per_block > 0:
+                semantic_keep_per_block[b] = max(
+                    1,
+                    min(total_count, self.rrg_keep_k_per_block),
+                )
+            else:
+                semantic_keep_per_block[b] = max(
+                    1,
+                    int(math.ceil(total_count * keep_fraction)),
+                )
 
         final_ntgt_per_block = int(semantic_keep_per_block.min().item())
         if final_ntgt_per_block <= 0:
@@ -666,6 +679,7 @@ class MIRateMasker(LatentMasker):
 
         aux_counts = {
             "rrg_keep_percent": float(self.rrg_keep_percent),
+            "rrg_keep_k_per_block": float(self.rrg_keep_k_per_block),
             "rrg_num_target_blocks": float(self.rrg_num_target_blocks),
             "rrg_ctx_seed_idx": ctx_seed_idx,
             "rrg_tgt_seed_idx_blocks": target_seed_idx,
