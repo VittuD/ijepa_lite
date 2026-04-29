@@ -604,7 +604,7 @@ class MIRateMasker(LatentMasker):
             total_count = int((winners[b] == 1).sum().item())
             semantic_keep_per_block[b] = max(
                 1,
-                int(math.ceil(total_count * keep_fraction / self.rrg_num_target_blocks)),
+                int(math.ceil(total_count * keep_fraction)),
             )
 
         final_ntgt_per_block = int(semantic_keep_per_block.min().item())
