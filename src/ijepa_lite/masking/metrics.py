@@ -203,6 +203,7 @@ def mask_diagnostics(
             stats[f"mask/{_hard_key}"] = float(aux[_hard_key])
 
     for _rrg_key in (
+        "warmup_random_multiblock_active",
         "rrg_keep_percent",
         "rrg_num_target_blocks",
         "rrg_fallback_ctx",

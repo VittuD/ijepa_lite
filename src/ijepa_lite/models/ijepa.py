@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Dict, Optional
 
 import torch
@@ -155,7 +156,7 @@ class IJEPAModel(nn.Module):
         cached_ema_tokens: Optional[torch.Tensor] = None
 
         if self.latent_masker is not None:
-            mask_output, cached_ema_tokens = self._resolve_latent_masks(images)
+            mask_output, cached_ema_tokens = self._resolve_latent_masks(images, epoch=epoch)
         else:
             mask_output = self._resolve_collate_masks(masks, images)
 
@@ -313,7 +314,7 @@ class IJEPAModel(nn.Module):
     # ------------------------------------------------------------------
 
     def _resolve_latent_masks(
-        self, images: torch.Tensor
+        self, images: torch.Tensor, epoch: Optional[int] = None
     ) -> tuple[MaskOutput, torch.Tensor]:
         """
         Run EMA encoder → compress → latent masker.
@@ -338,10 +339,14 @@ class IJEPAModel(nn.Module):
 
         # Compressor and latent masker are outside no_grad — grads flow normally.
         compressed = self.token_compressor(ema_tokens, cls_token=cls_token)  # (B, M, D)
+        forward_sig = inspect.signature(self.latent_masker.forward)
+        latent_kwargs = {}
+        if "epoch" in forward_sig.parameters:
+            latent_kwargs["epoch"] = epoch
         if self.latent_masker.needs_full_tokens:
-            mask_output = self.latent_masker(compressed, ema_full=ema_tokens)
+            mask_output = self.latent_masker(compressed, ema_full=ema_tokens, **latent_kwargs)
         else:
-            mask_output = self.latent_masker(compressed)
+            mask_output = self.latent_masker(compressed, **latent_kwargs)
         return mask_output, ema_tokens
 
     def _resolve_collate_masks(

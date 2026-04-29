@@ -194,6 +194,7 @@ class VizCallback(Callback):
             patch_size=self._patch_size,
             image_size=self._image_size,
             k_tgt=k_tgt,
+            epoch=epoch,
         )
 
         if viz_type == "nway":

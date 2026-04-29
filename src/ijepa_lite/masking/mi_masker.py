@@ -53,6 +53,9 @@ class MIRateMasker(LatentMasker):
                       random_region_growth.
     rrg_num_target_blocks: Number of target blocks when using multiblock
                            random-region-growth hard assignment.
+    warmup_use_vanilla_multiblock: When True and epoch < warmup_epochs, use
+                      the vanilla random MultiBlockMaskGenerator for hard masks
+                      and fall back to pure reconstruction loss.
     warmup_epochs  : Epochs to grow weight sampling range to full.
     """
 
@@ -76,8 +79,20 @@ class MIRateMasker(LatentMasker):
         gumbel_tau: float = 1.0,
         rrg_keep_percent: int = 50,
         rrg_num_target_blocks: int = 4,
+        warmup_use_vanilla_multiblock: bool = False,
         warmup_epochs: int = 0,
         pos_embed_kind: str = "learned",
+        image_size: int = 96,
+        patch_size: int = 8,
+        target_ratio: float = 0.25,
+        context_ratio: float = 0.75,
+        num_target_blocks: int = 4,
+        allow_overlap: bool = False,
+        min_keep: int = 10,
+        ctx_scale: list[float] | tuple[float, float] = (0.85, 1.00),
+        ctx_aspect: list[float] | tuple[float, float] = (0.75, 1.50),
+        tgt_scale: list[float] | tuple[float, float] = (0.15, 0.20),
+        tgt_aspect: list[float] | tuple[float, float] = (0.75, 1.50),
         # Unused — kept for build.py kwarg filtering
         base_kind: str = "smooth_l1",
         normalize: bool = False,
@@ -122,7 +137,13 @@ class MIRateMasker(LatentMasker):
         self.hard_assignment = str(hard_assignment)
         self.gumbel_tau = float(gumbel_tau)
         self.rrg_keep_percent = int(rrg_keep_percent)
+        self.warmup_use_vanilla_multiblock = bool(warmup_use_vanilla_multiblock)
         self.warmup_epochs = int(warmup_epochs)
+        if self.warmup_use_vanilla_multiblock and self.hard_assignment != "random_region_growth_multiblock":
+            raise ValueError(
+                "warmup_use_vanilla_multiblock requires "
+                "hard_assignment='random_region_growth_multiblock'."
+            )
 
         # _progress in [0, 1]; initialised to 1.0 so unit tests use full range.
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
@@ -172,6 +193,32 @@ class MIRateMasker(LatentMasker):
         # Composite loss
         self.composite_loss = CompositeMaskerLoss(terms, num_patches)
 
+        self._warmup_mask_generator = None
+        if self.warmup_use_vanilla_multiblock:
+            from ijepa_lite.masking.multiblock_mask import MultiBlockMaskGenerator
+
+            ctx_scale = list(ctx_scale)
+            ctx_aspect = list(ctx_aspect)
+            tgt_scale = list(tgt_scale)
+            tgt_aspect = list(tgt_aspect)
+            self._warmup_mask_generator = MultiBlockMaskGenerator(
+                image_size=int(image_size),
+                patch_size=int(patch_size),
+                target_ratio=float(target_ratio),
+                context_ratio=float(context_ratio),
+                num_target_blocks=self.rrg_num_target_blocks,
+                tgt_min_scale=float(tgt_scale[0]),
+                tgt_max_scale=float(tgt_scale[1]),
+                tgt_min_aspect=float(tgt_aspect[0]),
+                tgt_max_aspect=float(tgt_aspect[1]),
+                ctx_min_scale=float(ctx_scale[0]),
+                ctx_max_scale=float(ctx_scale[1]),
+                ctx_min_aspect=float(ctx_aspect[0]),
+                ctx_max_aspect=float(ctx_aspect[1]),
+                allow_overlap=bool(allow_overlap),
+                min_keep=int(min_keep),
+            )
+
         # ----------------------------------------------------------------
         # Initialisation
         # ----------------------------------------------------------------
@@ -191,6 +238,52 @@ class MIRateMasker(LatentMasker):
         if mode == "argmax":
             return soft.argmax(dim=-1)
         raise ValueError(f"Unsupported winner sampling mode={mode!r}")
+
+    def _warmup_random_multiblock_active(self, epoch: Optional[int]) -> bool:
+        return (
+            self.warmup_use_vanilla_multiblock
+            and self._warmup_mask_generator is not None
+            and epoch is not None
+            and int(epoch) < self.warmup_epochs
+        )
+
+    def _build_warmup_multiblock_masks(
+        self,
+        batch_size: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor | float]]:
+        mask_output = self._warmup_mask_generator(batch_size=batch_size)
+        ctx_idx = mask_output.context_idx.to(device)
+        tgt_idx = mask_output.target_idx.to(device)
+        b = int(batch_size)
+        n = self.num_patches
+        m = int(tgt_idx.shape[1])
+        k = int(tgt_idx.shape[2])
+
+        ctx_mask = torch.zeros((b, n), device=device, dtype=torch.float32)
+        tgt_mask = torch.zeros((b, n), device=device, dtype=torch.float32)
+        ctx_mask.scatter_(1, ctx_idx, 1.0)
+        tgt_flat = tgt_idx.reshape(b, -1)
+        tgt_mask.scatter_(1, tgt_flat, 1.0)
+        p_ctx = ctx_mask
+        p_tgt = tgt_mask.clamp(max=1.0)
+        p_ign = (1.0 - p_ctx - p_tgt).clamp(min=0.0)
+        target_block_counts = torch.full(
+            (m,), k, device=device, dtype=torch.long
+        )
+        aux_counts = {
+            "warmup_random_multiblock_active": 1.0,
+            "target_block_counts": target_block_counts,
+            "hard_sampled_nctx": float(ctx_idx.shape[1]),
+            "hard_sampled_ntgt": float(m * k),
+            "hard_sampled_nign": float(self.num_patches - ctx_idx.shape[1] - m * k),
+        }
+        return ctx_idx, tgt_idx, {
+            "context_soft": p_ctx,
+            "target_soft": p_tgt,
+            "p_ign": p_ign,
+            "aux_counts": aux_counts,
+        }
 
     def _ensure_role_min_counts(
         self,
@@ -706,6 +799,7 @@ class MIRateMasker(LatentMasker):
         tokens: torch.Tensor,                     # (B, M, D)
         ema_full: Optional[torch.Tensor] = None,   # (B, N, D)
         rates: Optional[torch.Tensor] = None,      # unused, kept for interface compat
+        epoch: Optional[int] = None,
     ) -> MaskOutput:
         B = tokens.shape[0]
 
@@ -737,7 +831,16 @@ class MIRateMasker(LatentMasker):
         # Hard reconstruction masks
         # ----------------------------------------------------------------
         aux_counts = {}
-        if self.hard_assignment == "random_region_growth":
+        if self._warmup_random_multiblock_active(epoch):
+            ctx_idx, tgt_idx, warmup_payload = self._build_warmup_multiblock_masks(
+                batch_size=B,
+                device=tokens.device,
+            )
+            p_ctx = warmup_payload["context_soft"]
+            p_tgt = warmup_payload["target_soft"]
+            p_ign = warmup_payload["p_ign"]
+            aux_counts = warmup_payload["aux_counts"]
+        elif self.hard_assignment == "random_region_growth":
             ctx_idx, tgt_idx, aux_counts = self._random_region_growth_indices(
                 logits, soft
             )
@@ -791,6 +894,10 @@ class MIRateMasker(LatentMasker):
         p_ctx    = mask_output.context_soft
         p_tgt    = mask_output.target_soft
         p_ign    = mask_output.aux["p_ign"]
+
+        if bool(mask_output.aux.get("warmup_random_multiblock_active", 0.0)):
+            return reconstruction_loss
+
         weights  = mask_output.aux["weights"]
         ema_full = mask_output.aux.get("ema_full")
 

@@ -11,6 +11,7 @@ script and the VizCallback can share the same logic.
 """
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Optional
 
@@ -1004,6 +1005,7 @@ def visualize_split(
     image_size: int,
     batch_size: int = BATCH_SIZE,
     k_tgt: Optional[int] = None,
+    epoch: Optional[int] = None,
 ) -> tuple:
     """
     Run masker on ``n`` images from ``dataset`` and produce visualization grids.
@@ -1086,7 +1088,11 @@ def visualize_split(
         tokens = encoder(x)
         B, N, _ = tokens.shape
 
-        mask_out = masker(tokens, ema_full=tokens)
+        forward_sig = inspect.signature(masker.forward)
+        latent_kwargs = {}
+        if "epoch" in forward_sig.parameters:
+            latent_kwargs["epoch"] = epoch
+        mask_out = masker(tokens, ema_full=tokens, **latent_kwargs)
 
         ctx_idx = mask_out.context_idx
         tgt_idx = mask_out.target_idx

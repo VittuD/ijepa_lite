@@ -63,6 +63,7 @@ terms:
     weight: [0, 0]
 
 warmup_epochs: 0
+warmup_use_vanilla_multiblock: false
 ntgt_min: 4
 nctx_min: 1
 max_total_hard: 0      # 0 = disabled; otherwise cap nctx + ntgt predictor tokens
