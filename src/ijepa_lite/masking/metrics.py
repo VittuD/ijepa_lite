@@ -210,10 +210,12 @@ def mask_diagnostics(
         "rrg_semantic_nctx",
         "rrg_semantic_ntgt",
         "rrg_semantic_ntgt_total",
+        "rrg_semantic_ntgt_unique",
         "rrg_semantic_nign",
         "rrg_exec_nctx",
         "rrg_exec_ntgt",
         "rrg_exec_ntgt_total",
+        "rrg_exec_ntgt_unique",
         "rrg_exec_nign",
     ):
         if _rrg_key in aux:

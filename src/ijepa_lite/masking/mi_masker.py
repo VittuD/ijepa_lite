@@ -375,8 +375,16 @@ class MIRateMasker(LatentMasker):
         self,
         role_indices: torch.Tensor,
     ) -> torch.Tensor:
-        order = torch.randperm(role_indices.numel(), device=role_indices.device)
-        return role_indices[order[:self.rrg_num_target_blocks]]
+        count = int(role_indices.numel())
+        if count >= self.rrg_num_target_blocks:
+            order = torch.randperm(count, device=role_indices.device)
+            return role_indices[order[:self.rrg_num_target_blocks]]
+        seed_offsets = torch.randint(
+            count,
+            (self.rrg_num_target_blocks,),
+            device=role_indices.device,
+        )
+        return role_indices[seed_offsets]
 
     def _partition_target_support(
         self,
@@ -473,7 +481,7 @@ class MIRateMasker(LatentMasker):
         winners, fallback_counts = self._ensure_role_min_counts(
             winners,
             soft,
-            {0: 1, 1: self.rrg_num_target_blocks},
+            {0: 1, 1: 1},
         )
         exact_ctx, exact_ctx_counts, ctx_seed_idx = self._grow_random_region(
             winners, role_idx=0
@@ -481,6 +489,7 @@ class MIRateMasker(LatentMasker):
 
         keep_fraction = float(self.rrg_keep_percent) / 100.0
         patch_coords_device = winners.device
+        patch_coords = self._patch_coords.to(device=patch_coords_device)
         target_blocks: list[list[torch.Tensor]] = []
         target_seed_idx = torch.empty(
             winners.shape[0], self.rrg_num_target_blocks, device=patch_coords_device, dtype=torch.long
@@ -488,39 +497,70 @@ class MIRateMasker(LatentMasker):
         semantic_counts = torch.empty(
             winners.shape[0], self.rrg_num_target_blocks, device=patch_coords_device, dtype=torch.long
         )
+        semantic_unique_counts = torch.empty(
+            winners.shape[0], device=patch_coords_device, dtype=torch.long
+        )
+        exec_unique_counts = torch.empty(
+            winners.shape[0], device=patch_coords_device, dtype=torch.long
+        )
+        semantic_keep_per_block = torch.empty(
+            winners.shape[0], device=patch_coords_device, dtype=torch.long
+        )
+
+        for b in range(winners.shape[0]):
+            total_count = int((winners[b] == 1).sum().item())
+            semantic_keep_per_block[b] = max(
+                1,
+                int(math.ceil(total_count * keep_fraction / self.rrg_num_target_blocks)),
+            )
+
+        final_ntgt_per_block = int(semantic_keep_per_block.min().item())
+        if final_ntgt_per_block <= 0:
+            raise RuntimeError(
+                "RandomRegionGrowthMultiblock produced an empty executed target block "
+                "after batch-min truncation."
+            )
 
         for b in range(winners.shape[0]):
             role_indices = (winners[b] == 1).nonzero(as_tuple=False).flatten()
             total_count = int(role_indices.numel())
-            if total_count < self.rrg_num_target_blocks:
+            if total_count <= 0:
                 raise RuntimeError(
                     "hard_assignment='random_region_growth_multiblock' requires at "
-                    "least rrg_num_target_blocks target winners per sample after "
-                    f"fallback repair; sample {b} had {total_count}, expected "
-                    f"{self.rrg_num_target_blocks}."
+                    f"least one tgt argmax winner per sample; sample {b} had none."
                 )
-            keep_total = max(
-                self.rrg_num_target_blocks,
-                int(math.ceil(total_count * keep_fraction)),
-            )
+            keep_count = int(semantic_keep_per_block[b].item())
             seeds = self._sample_rrg_target_seeds(role_indices)
-            blocks_full = self._partition_target_support(role_indices, seeds)
-            block_sizes = [int(block.numel()) for block in blocks_full]
-            keep_counts = self._allocate_rrg_block_keep_counts(block_sizes, keep_total)
-            blocks_kept = [block[:keep_count] for block, keep_count in zip(blocks_full, keep_counts)]
+            role_coords = patch_coords[role_indices]
+            blocks_semantic: list[torch.Tensor] = []
+            blocks_exec: list[torch.Tensor] = []
+            for seed_idx in seeds:
+                seed_coord = patch_coords[seed_idx]
+                distances = (role_coords - seed_coord).abs().sum(dim=-1)
+                tie_break = distances * self.num_patches + role_indices
+                order = tie_break.argsort(dim=0)
+                block_semantic = role_indices[order[:keep_count]]
+                blocks_semantic.append(block_semantic)
+                blocks_exec.append(block_semantic[:final_ntgt_per_block])
 
-            target_blocks.append(blocks_kept)
+            target_blocks.append(blocks_exec)
             target_seed_idx[b] = seeds
-            semantic_counts[b] = torch.tensor(
-                keep_counts, device=patch_coords_device, dtype=torch.long
-            )
+            semantic_counts[b].fill_(keep_count)
+            semantic_unique_counts[b] = torch.unique(
+                torch.cat(blocks_semantic, dim=0)
+            ).numel()
+            exec_unique_counts[b] = torch.unique(
+                torch.cat(blocks_exec, dim=0)
+            ).numel()
 
         ctx_idx = torch.stack(
             [x[: min(int(y.numel()) for y in exact_ctx)] for x in exact_ctx], dim=0
         )
-        tgt_idx = self._truncate_multiblock_target_sets(target_blocks)
+        tgt_idx = torch.stack(
+            [torch.stack(sample_blocks, dim=0) for sample_blocks in target_blocks],
+            dim=0,
+        )
         final_nctx = ctx_idx.shape[1]
-        final_ntgt_per_block = tgt_idx.shape[2]
         target_block_counts = torch.full(
             (self.rrg_num_target_blocks,),
             final_ntgt_per_block,
@@ -539,6 +579,7 @@ class MIRateMasker(LatentMasker):
             "rrg_semantic_nctx": float(exact_ctx_counts.float().mean().item()),
             "rrg_semantic_ntgt": float(semantic_total_mean),
             "rrg_semantic_ntgt_total": float(semantic_total_mean),
+            "rrg_semantic_ntgt_unique": float(semantic_unique_counts.float().mean().item()),
             "rrg_semantic_nign": float(
                 self.num_patches
                 - exact_ctx_counts.float().mean().item()
@@ -547,6 +588,7 @@ class MIRateMasker(LatentMasker):
             "rrg_exec_nctx": float(final_nctx),
             "rrg_exec_ntgt": float(exec_total),
             "rrg_exec_ntgt_total": float(exec_total),
+            "rrg_exec_ntgt_unique": float(exec_unique_counts.float().mean().item()),
             "rrg_exec_nign": float(self.num_patches - final_nctx - exec_total),
             "hard_sampled_nctx": float(final_nctx),
             "hard_sampled_ntgt": float(exec_total),
