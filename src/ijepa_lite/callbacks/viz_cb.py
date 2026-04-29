@@ -101,6 +101,23 @@ class VizCallback(Callback):
         if (epoch + 1) % self._viz_every != 0:
             return
 
+        if not self._is_multiblock:
+            bundle = state.get("_ckpt_bundle")
+            if bundle is not None:
+                core = unwrap_model(bundle["model"])
+                masker = getattr(core, "latent_masker", None)
+                if (
+                    masker is not None
+                    and bool(getattr(masker, "warmup_use_vanilla_multiblock", False))
+                    and epoch < int(getattr(masker, "warmup_epochs", 0))
+                ):
+                    print(
+                        "[VizCallback] skipping visualization during "
+                        f"vanilla-multiblock warmup (epoch={epoch}, "
+                        f"warmup_epochs={int(getattr(masker, 'warmup_epochs', 0))})."
+                    )
+                    return
+
         self._run_viz(cfg, state, epoch)
 
     def _run_viz(self, cfg: Any, state: dict, epoch: int) -> None:

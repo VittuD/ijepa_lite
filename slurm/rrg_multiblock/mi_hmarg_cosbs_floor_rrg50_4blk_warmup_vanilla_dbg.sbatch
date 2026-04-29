@@ -50,7 +50,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.rrg_num_target_blocks=4 \
       masking.latent.rrg_keep_k_per_block=8 \
       masking.latent.warmup_use_vanilla_multiblock=true \
-      masking.latent.warmup_epochs=10 \
+      masking.latent.warmup_epochs=30 \
       distributed.find_unused_parameters=true \
       model.pos_embed_kind=learned \
       data.root=$FAST/datasets/ \
