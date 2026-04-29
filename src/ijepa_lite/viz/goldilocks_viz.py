@@ -525,6 +525,9 @@ def apply_multiblock_overlay(
     patch_size: int,
     image_size: int,
     alpha: float = ALPHA_ASSIGN,
+    ctx_seed_idx: Optional[int] = None,
+    tgt_seed_idx_blocks: Optional[np.ndarray] = None,
+    seed_alpha: float = 1.0,
 ) -> np.ndarray:
     """Per-block colored overlay: ctx=blue, each target block k→distinct color, ignored=grey.
 
@@ -545,11 +548,24 @@ def apply_multiblock_overlay(
 
     role_map = role.reshape(gh, gw)
     out = orig_np.copy().astype(float)
+    tgt_seed_to_block: dict[int, int] = {}
+    if tgt_seed_idx_blocks is not None:
+        for k, seed_idx in enumerate(np.asarray(tgt_seed_idx_blocks).reshape(-1).tolist()):
+            tgt_seed_to_block[int(seed_idx)] = k
 
     for i in range(gh):
         for j in range(gw):
             r = role_map[i, j]
-            if r == -1:
+            flat_idx = i * gw + j
+            alpha_ij = alpha
+            if ctx_seed_idx is not None and flat_idx == int(ctx_seed_idx):
+                col = np.array(CTX_RGB, dtype=float)
+                alpha_ij = seed_alpha
+            elif flat_idx in tgt_seed_to_block:
+                block_idx = tgt_seed_to_block[flat_idx]
+                col = np.array(_BLOCK_COLORS[block_idx % len(_BLOCK_COLORS)], dtype=float)
+                alpha_ij = seed_alpha
+            elif r == -1:
                 col = np.array(GREY, dtype=float)
             elif r == 0:
                 col = np.array(CTX_RGB, dtype=float)
@@ -558,7 +574,7 @@ def apply_multiblock_overlay(
             y0, y1 = i * patch_size, (i + 1) * patch_size
             x0, x1 = j * patch_size, (j + 1) * patch_size
             orig_patch = orig_np[y0:y1, x0:x1].astype(float)
-            out[y0:y1, x0:x1] = (1.0 - alpha) * orig_patch + alpha * col
+            out[y0:y1, x0:x1] = (1.0 - alpha_ij) * orig_patch + alpha_ij * col
 
     return out.clip(0, 255).astype(np.uint8)
 
@@ -1080,6 +1096,7 @@ def visualize_split(
         soft_nway = mask_out.aux.get("soft")  # (B, N, M+2) for N-way
         rrg_ctx_seed_idx = mask_out.aux.get("rrg_ctx_seed_idx")
         rrg_tgt_seed_idx = mask_out.aux.get("rrg_tgt_seed_idx")
+        rrg_tgt_seed_idx_blocks = mask_out.aux.get("rrg_tgt_seed_idx_blocks")
 
         # Detect masker type on first batch
         if masker_type is None:
@@ -1149,12 +1166,18 @@ def visualize_split(
                 pi = p_ign[bi].detach().cpu().reshape(gh, gw).numpy()
                 mid_np = apply_soft_3way_overlay(orig_np, pc, pt, pi, patch_size)
                 if tgt_idx.dim() == 3:
+                    ctx_seed = None if rrg_ctx_seed_idx is None else int(rrg_ctx_seed_idx[bi].item())
+                    tgt_seed_blocks = None if rrg_tgt_seed_idx_blocks is None else (
+                        rrg_tgt_seed_idx_blocks[bi].detach().cpu().numpy()
+                    )
                     assign_np = apply_multiblock_overlay(
                         orig_np,
                         ctx_idx[bi].cpu().numpy(),
                         tgt_idx[bi].cpu().numpy(),
                         patch_size,
                         image_size,
+                        ctx_seed_idx=ctx_seed,
+                        tgt_seed_idx_blocks=tgt_seed_blocks,
                     )
                 else:
                     ctx_seed = None if rrg_ctx_seed_idx is None else int(rrg_ctx_seed_idx[bi].item())
