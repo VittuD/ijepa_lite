@@ -38,5 +38,6 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       exp_name=vanilla_baseline_multiblock_stl10 \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
+      train.eval_every_epochs=5 \
       train.viz.out_dir="viz_output_vanilla_baseline_multiblock_stl10" \
       logger.mode=offline
