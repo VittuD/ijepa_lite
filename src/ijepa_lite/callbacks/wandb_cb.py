@@ -20,6 +20,41 @@ class WandbCallback(Callback):
     logger_cfg: Any
     run: Optional[Any] = None
 
+    @staticmethod
+    def _cfg_value(cfg: Any, key: str) -> Any:
+        value = getattr(cfg, key, None)
+        if value in (None, ""):
+            return None
+        return value
+
+    def _resolve_run_id(self, state: dict) -> Optional[str]:
+        configured = self._cfg_value(self.logger_cfg, "run_id")
+        if configured is not None:
+            return str(configured)
+        saved = state.get("wandb_run_id", None)
+        return str(saved) if saved not in (None, "") else None
+
+    def _resolve_resume_mode(self, state: dict, run_id: Optional[str]) -> Optional[str]:
+        configured = self._cfg_value(self.logger_cfg, "resume")
+        if configured is not None:
+            return str(configured)
+        # Checkpoint resume should automatically attempt to reattach to the
+        # stored W&B run when a prior run id is available.
+        if run_id is not None and state.get("wandb_run_id", None) not in (None, ""):
+            return "allow"
+        return None
+
+    def _resolve_run_name(self, state: dict, run_id: Optional[str]) -> str:
+        configured = str(self.logger_cfg.run_name)
+        if run_id is None:
+            return configured
+        if not bool(getattr(self.logger_cfg, "resume_use_saved_name", True)):
+            return configured
+        saved = state.get("wandb_run_name", None)
+        if saved not in (None, ""):
+            return str(saved)
+        return configured
+
     def on_run_start(self, cfg: Any, state: dict, model: Any) -> None:
         if not is_rank0():
             return
@@ -30,16 +65,26 @@ class WandbCallback(Callback):
             )
 
         full_cfg = OmegaConf.to_container(cfg, resolve=False)
-        self.run = wandb.init(
+        run_id = self._resolve_run_id(state)
+        resume_mode = self._resolve_resume_mode(state, run_id)
+        run_name = self._resolve_run_name(state, run_id)
+        init_kwargs = dict(
             project=str(self.logger_cfg.project),
             entity=getattr(self.logger_cfg, "entity", None),
-            name=str(self.logger_cfg.run_name),
+            name=run_name,
             group=str(getattr(self.logger_cfg, "group", "")) or None,
             tags=list(getattr(self.logger_cfg, "tags", [])) or None,
             notes=getattr(self.logger_cfg, "notes", None),
             mode=str(getattr(self.logger_cfg, "mode", "online")),
             config=full_cfg,
         )
+        if run_id is not None:
+            init_kwargs["id"] = run_id
+        if resume_mode is not None:
+            init_kwargs["resume"] = resume_mode
+        self.run = wandb.init(**init_kwargs)
+        state["wandb_run_id"] = str(self.run.id)
+        state["wandb_run_name"] = str(self.run.name)
 
     @staticmethod
     def _convert_histograms(metrics: dict) -> dict:

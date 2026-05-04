@@ -2,6 +2,9 @@ name: wandb
 project: ijepa-lite
 entity: null
 mode: offline   # online | offline | disabled
+run_id: null
+resume: null    # null | allow | must | never | auto
+resume_use_saved_name: true
 tags: [evalv2]
 notes: null
 
