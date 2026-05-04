@@ -39,9 +39,9 @@ mkdir -p sbatch_logs/resume
 # In offline mode, the run id is typically the suffix in:
 #   .../wandb/offline-run-YYYYMMDD_HHMMSS-<run_id>
 # ---------------------------------------------------------------------------
-CHECKPOINT_PATH="/leonardo_work/IscrC_TBoneAI/vitturini/outputs/2026-04-29/19-13-50_mi_HmargCosBS_floor_learned_rrg50_4blk_warmup_vanilla_dbg/rank0/checkpoints/last.pt"
-RUN_ID="kvci0d5f"
-RUN_NAME="mi_HmargCosBS_floor_learned_rrg50_4blk_warmup_vanilla_dbg_0429_191433_r0"
+CHECKPOINT_PATH="/leonardo_work/IscrC_TBoneAI/vitturini/outputs/2026-04-29/20-49-31_mi_HmargCosBS_floor_learned_rrg50_wup100_4blk_warmup_vanilla_dbg/rank0/checkpoints/last.pt"
+RUN_ID="pbmv3kyj"
+RUN_NAME="mi_HmargCosBS_floor_learned_rrg50_wup100_4blk_warmup_vanilla_dbg_0429_205019_r0"
 RESUME_MODE="must"
 
 if [[ -z "${CHECKPOINT_PATH}" ]]; then
