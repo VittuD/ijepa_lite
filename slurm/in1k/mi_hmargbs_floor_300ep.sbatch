@@ -12,7 +12,7 @@
 #SBATCH --error=sbatch_logs/in1k/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# IN1K MI HmargBS + floor pretraining, 96x96 images / patch_size=8, 300 epochs.
+# IN1K MI HmargBS + floor pretraining, 224x224 images / patch_size=16, 300 epochs.
 # Uses the CINECA imagenet module, which exports IMAGENET2012_HOME.
 # Eval and viz are enabled every epoch.
 # ---------------------------------------------------------------------------
@@ -43,13 +43,15 @@ echo "DATA_ROOT=$DATA_ROOT"
 ls -ld "$DATA_ROOT" "$DATA_ROOT/train" "$DATA_ROOT/val"
 nvidia-smi -L
 
-EXP_NAME="in1k_96_vits_ps8_mi_HmargBS_floor_300ep"
+EXP_NAME="in1k_224_vits_ps16_mi_HmargBS_floor_300ep"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
     -m ijepa_lite.run \
       experiment=stl10_vits_ps8_mi \
       exp_name="$EXP_NAME" \
+      model.image_size=224 \
+      model.patch_size=16 \
       data.name=imagenet \
       data.root="$DATA_ROOT" \
       data.pretrain_split=train \
