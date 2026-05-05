@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-mi-hmarg-cosbs-floor-rrg50-4blk-warmup-dbg
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --job-name=ijepa-mi-hmarg-cosbs-floor-rrg50-wup500-4blk-warmup-dbg
+#SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
+#SBATCH --time=16:30:00
 #SBATCH --output=sbatch_logs/rrg_multiblock/%x_%j.out
 #SBATCH --error=sbatch_logs/rrg_multiblock/%x_%j.err
 
@@ -33,7 +33,7 @@ nvidia-smi -L
 
 mkdir -p sbatch_logs/rrg_multiblock
 
-EXP_NAME="mi_HmargCosBS_floor_learned_rrg50_4blk_warmup_vanilla_dbg"
+EXP_NAME="mi_HmargCosBS_floor_learned_rrg50_wup500_4blk_warmup_vanilla_dbg"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -50,13 +50,13 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.rrg_num_target_blocks=4 \
       masking.latent.rrg_keep_k_per_block=10 \
       masking.latent.warmup_use_vanilla_multiblock=true \
-      masking.latent.warmup_epochs=30 \
+      masking.latent.warmup_epochs=10 \
       distributed.find_unused_parameters=true \
       model.pos_embed_kind=learned \
       data.root=$FAST/datasets/ \
       data.batch_size=2048 \
-      train.eval_every_epochs=10 \
+      train.eval_every_epochs=5 \
       train.viz_enabled=true \
-      +train.viz_every_epochs=10 \
+      +train.viz_every_epochs=5 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
