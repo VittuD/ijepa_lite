@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch
 
-from ijepa_lite.utils.dist import unwrap_model
+from ijepa_lite.utils.dist import is_rank0, unwrap_model
 
 
 def save_checkpoint(
@@ -73,3 +73,41 @@ def load_checkpoint_if_available(
     restored = dict(payload.get("state", {}) or {})
     restored["ema_start"] = payload.get("ema_start", None)
     return restored
+
+
+def load_model_weights(
+    path: str,
+    model: torch.nn.Module,
+    *,
+    strict: bool = False,
+) -> None:
+    """
+    Load model weights from a checkpoint or raw state dict without restoring
+    optimizer, scheduler, scaler, or training state.
+
+    This is intended for continued pretraining runs that should start from
+    checkpointed weights but run with fresh optimization state and a fresh
+    epoch budget.
+    """
+    if not path:
+        raise ValueError("load_model_weights requires a non-empty path.")
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    state_dict = (
+        payload["model"]
+        if isinstance(payload, dict) and "model" in payload
+        else payload
+    )
+
+    core = unwrap_model(model)
+    incompatible = core.load_state_dict(state_dict, strict=strict)
+
+    if is_rank0():
+        mode = "strict" if strict else "non-strict"
+        print(f"[init_weights] Loaded model weights from {path} ({mode}).")
+        if incompatible.missing_keys:
+            print(f"[init_weights] Missing keys: {incompatible.missing_keys}")
+        if incompatible.unexpected_keys:
+            print(f"[init_weights] Unexpected keys: {incompatible.unexpected_keys}")

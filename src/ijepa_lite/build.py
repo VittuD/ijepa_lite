@@ -16,7 +16,7 @@ from ijepa_lite.data.transforms import (
     build_linear_probe_transforms,
     build_pretrain_transform,
 )
-from ijepa_lite.engine.checkpoint import load_checkpoint_if_available
+from ijepa_lite.engine.checkpoint import load_checkpoint_if_available, load_model_weights
 from ijepa_lite.losses.rd_loss import RateDistSurpriseLoss
 from ijepa_lite.losses.vanilla import VanillaTokenLoss
 from ijepa_lite.masking.base import CollateMasker, LatentMasker
@@ -688,6 +688,9 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
         loader = build_pretrain_loader(cfg)
         optim, masker_optim, sched, masker_sched, wd_start, wd_end, masker_wd_start, masker_wd_end = build_pretrain_optim_sched(cfg, model)
 
+        if cfg.resume and getattr(cfg, "init_weights", None):
+            raise ValueError("Set either cfg.resume or cfg.init_weights, not both.")
+
         resumed_state: dict | None = None
         if cfg.resume:
             resumed_state = (
@@ -696,6 +699,12 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
                     masker_optimizer=masker_optim, masker_scheduler=masker_sched,
                 )
                 or None
+            )
+        elif getattr(cfg, "init_weights", None):
+            load_model_weights(
+                str(cfg.init_weights),
+                model=model,
+                strict=bool(getattr(cfg, "init_weights_strict", False)),
             )
 
         return {
