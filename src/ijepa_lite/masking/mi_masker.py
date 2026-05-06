@@ -55,7 +55,8 @@ class MIRateMasker(LatentMasker):
                            random-region-growth hard assignment.
     warmup_use_vanilla_multiblock: When True and epoch < warmup_epochs, use
                       the vanilla random MultiBlockMaskGenerator for hard masks
-                      and fall back to pure reconstruction loss.
+                      and fall back to pure reconstruction loss, regardless of
+                      the configured post-warmup hard_assignment mode.
     warmup_epochs  : Epochs to grow weight sampling range to full.
     """
 
@@ -82,6 +83,7 @@ class MIRateMasker(LatentMasker):
         rrg_keep_k_per_block: int = 0,
         warmup_use_vanilla_multiblock: bool = False,
         warmup_epochs: int = 0,
+        total_epochs: int = 1000,
         pos_embed_kind: str = "learned",
         image_size: int = 96,
         patch_size: int = 8,
@@ -146,11 +148,7 @@ class MIRateMasker(LatentMasker):
         self.rrg_keep_k_per_block = int(rrg_keep_k_per_block)
         self.warmup_use_vanilla_multiblock = bool(warmup_use_vanilla_multiblock)
         self.warmup_epochs = int(warmup_epochs)
-        if self.warmup_use_vanilla_multiblock and self.hard_assignment != "random_region_growth_multiblock":
-            raise ValueError(
-                "warmup_use_vanilla_multiblock requires "
-                "hard_assignment='random_region_growth_multiblock'."
-            )
+        self.total_epochs = int(total_epochs)
 
         # _progress in [0, 1]; initialised to 1.0 so unit tests use full range.
         self.register_buffer("_progress", torch.tensor(1.0), persistent=False)
@@ -889,6 +887,8 @@ class MIRateMasker(LatentMasker):
                 "p_ign":    p_ign,
                 "logits":   logits.detach(),
                 "ema_full": ema_full,
+                "epoch": epoch,
+                "total_epochs": self.total_epochs,
                 "hard_assignment": self.hard_assignment,
                 "max_total_hard": self.max_total_hard,
                 **aux_counts,
@@ -914,6 +914,8 @@ class MIRateMasker(LatentMasker):
 
         weights  = mask_output.aux["weights"]
         ema_full = mask_output.aux.get("ema_full")
+        epoch = mask_output.aux.get("epoch")
+        total_epochs = mask_output.aux.get("total_epochs")
 
         if ema_full is None:
             # Unit test fallback — compute only entropy terms
@@ -922,12 +924,18 @@ class MIRateMasker(LatentMasker):
                 p_ctx.shape[0], p_ctx.shape[1], 1, device=device,
             )
 
+        extra_kw = {}
+        if epoch is not None:
+            extra_kw["epoch"] = int(epoch)
+        if total_epochs is not None:
+            extra_kw["total_epochs"] = int(total_epochs)
         total, logs = self.composite_loss(
             weights=weights,
             p_ctx=p_ctx,
             p_tgt=p_tgt,
             p_ign=p_ign,
             ema_full=ema_full,
+            **extra_kw,
         )
 
         # Write logs into aux for metrics.py to pick up

@@ -75,7 +75,8 @@ terms:
     gamma: 0.5
     sketch_dim: 64
     eps: 1.0e-4
-    sigma_rho: 1.0
+    sigma_rho: [1.0, 1.0]  # [start, end]; equal endpoints collapse to constant
+    sigma_rho_schedule: constant  # constant | linear | cosine
     sigma_floor: 1.0e-6
     sketch_seed: 0
     norm_eps: 1.0e-8

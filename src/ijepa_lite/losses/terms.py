@@ -10,6 +10,7 @@ Terms are fully independent — no shared state, no cross-term coupling.
 from __future__ import annotations
 
 import math
+from typing import Sequence
 
 import torch
 import torch.nn as nn
@@ -1314,7 +1315,8 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         gamma: float = 0.5,
         sketch_dim: int = 64,
         eps: float = 1e-4,
-        sigma_rho: float = 1.0,
+        sigma_rho: float | Sequence[float] = 1.0,
+        sigma_rho_schedule: str = "constant",
         sigma_floor: float = 1e-6,
         sketch_seed: int = 0,
         norm_eps: float = 1e-8,
@@ -1328,9 +1330,26 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         if self.sketch_dim <= 0:
             raise ValueError("neg_affinity_novelty.sketch_dim must be > 0")
         self.eps = float(eps)
-        self.sigma_rho = float(sigma_rho)
-        if self.sigma_rho <= 0.0:
-            raise ValueError("neg_affinity_novelty.sigma_rho must be > 0")
+        if isinstance(sigma_rho, Sequence) and not isinstance(sigma_rho, (str, bytes)):
+            if len(sigma_rho) != 2:
+                raise ValueError(
+                    "neg_affinity_novelty.sigma_rho must be a scalar or a [start, end] pair"
+                )
+            sigma_rho_start = float(sigma_rho[0])
+            sigma_rho_end = float(sigma_rho[1])
+        else:
+            sigma_rho_start = float(sigma_rho)
+            sigma_rho_end = float(sigma_rho)
+        if sigma_rho_start <= 0.0 or sigma_rho_end <= 0.0:
+            raise ValueError("neg_affinity_novelty.sigma_rho endpoints must be > 0")
+        self.sigma_rho_start = sigma_rho_start
+        self.sigma_rho_end = sigma_rho_end
+        self.sigma_rho_schedule = str(sigma_rho_schedule).lower()
+        if self.sigma_rho_schedule not in ("constant", "linear", "cosine"):
+            raise ValueError(
+                "neg_affinity_novelty.sigma_rho_schedule must be "
+                "'constant', 'linear', or 'cosine'"
+            )
         self.sigma_floor = float(sigma_floor)
         self.sketch_seed = int(sketch_seed)
         self.norm_eps = float(norm_eps)
@@ -1361,12 +1380,33 @@ class NegAffinityNoveltyTerm(MaskerTerm):
             self._sketch_R = R.to(device=device)
         return self._sketch_R
 
+    def _get_sigma_rho(self, epoch: int | None, total_epochs: int | None) -> float:
+        if self.sigma_rho_start == self.sigma_rho_end or self.sigma_rho_schedule == "constant":
+            return self.sigma_rho_start
+
+        if epoch is None or total_epochs is None or total_epochs <= 1:
+            return self.sigma_rho_start
+
+        progress = min(max(float(epoch) / float(total_epochs - 1), 0.0), 1.0)
+        if self.sigma_rho_schedule == "linear":
+            blend = progress
+        else:
+            blend = 0.5 * (1.0 - math.cos(math.pi * progress))
+
+        return self.sigma_rho_start + (self.sigma_rho_end - self.sigma_rho_start) * blend
+
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
-        del p_ign, kw
+        del p_ign
 
         z_hat = F.normalize(ema_full.float(), dim=-1, eps=self.norm_eps)   # (B,N,D)
         B, N, D = z_hat.shape
         device = z_hat.device
+        epoch = kw.get("epoch")
+        total_epochs = kw.get("total_epochs")
+        sigma_rho = self._get_sigma_rho(
+            None if epoch is None else int(epoch),
+            None if total_epochs is None else int(total_epochs),
+        )
 
         R = self._get_sketch(D, device)                                    # (S, D)
         y = torch.einsum("bnd,sd->bns", z_hat, R)                          # (B, N, S)
@@ -1381,7 +1421,7 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         eye_mask = torch.eye(N, dtype=torch.bool, device=device)
         d_for_med = d_sq.masked_fill(eye_mask, float("nan"))
         sigma_sq = torch.nanmedian(d_for_med.flatten(1), dim=-1).values    # (B,)
-        sigma_sq = (self.sigma_rho * sigma_sq).clamp(min=self.sigma_floor)
+        sigma_sq = (sigma_rho * sigma_sq).clamp(min=self.sigma_floor)
 
         A = torch.exp(-d_sq / (2.0 * sigma_sq.view(B, 1, 1)))               # (B, N, N)
         A = A.masked_fill(eye_mask, 0.0)                                    # diagonal-zero
@@ -1440,6 +1480,14 @@ class NegAffinityNoveltyTerm(MaskerTerm):
             "affinity/alpha": self.alpha,
             "affinity/w_tgt": self.w_tgt,
             "affinity/gamma": self.gamma,
+            "affinity/sigma_rho": sigma_rho,
+            "affinity/sigma_rho_start": self.sigma_rho_start,
+            "affinity/sigma_rho_end": self.sigma_rho_end,
+            "affinity/sigma_rho_schedule_id": {
+                "constant": 0.0,
+                "linear": 1.0,
+                "cosine": 2.0,
+            }[self.sigma_rho_schedule],
         }
         return loss, logs
 
