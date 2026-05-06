@@ -166,6 +166,10 @@ def mask_diagnostics(
         stats["mask/cos_surprise_mean"] = float(aux["cos_surprise_mean"])
     if "sym_cos_surprise_mean" in aux:
         stats["mask/sym_cos_surprise_mean"] = float(aux["sym_cos_surprise_mean"])
+    if "sketched_orthogonal_cos_surprise_mean" in aux:
+        stats["mask/sketched_orthogonal_cos_surprise_mean"] = float(
+            aux["sketched_orthogonal_cos_surprise_mean"]
+        )
     if "sym_cos_surprise_tgt_to_ctx" in aux:
         stats["mask/sym_cos_surprise_tgt_to_ctx"] = float(aux["sym_cos_surprise_tgt_to_ctx"])
     if "sym_cos_surprise_ctx_to_tgt" in aux:
@@ -180,6 +184,7 @@ def mask_diagnostics(
             or key.startswith("support_logdet_")
             or key.startswith("signed_support_logdet_")
             or key.startswith("mass_logdet_")
+            or key.startswith("affinity/")
         ):
             stats[f"mask/{key}"] = float(value)
 

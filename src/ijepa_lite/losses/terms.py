@@ -9,6 +9,8 @@ Terms are fully independent — no shared state, no cross-term coupling.
 """
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -216,6 +218,97 @@ class NegSymmetricCosSurpriseTerm(MaskerTerm):
             })
 
         return -sym, logs
+
+
+class NegSketchedOrthogonalCosSurpriseTerm(MaskerTerm):
+    name = "neg_sketched_orthogonal_cos_surprise"
+
+    def __init__(
+        self,
+        num_sketches: int = 8,
+        assign_tau: float = 0.25,
+        eps: float = 1e-6,
+        sketch_seed: int = 0,
+        detach_assignments: bool = True,
+    ):
+        super().__init__()
+        self.num_sketches = int(num_sketches)
+        if self.num_sketches <= 0:
+            raise ValueError("neg_sketched_orthogonal_cos_surprise.num_sketches must be > 0")
+        self.assign_tau = float(assign_tau)
+        if self.assign_tau <= 0.0:
+            raise ValueError("neg_sketched_orthogonal_cos_surprise.assign_tau must be > 0")
+        self.eps = float(eps)
+        self.sketch_seed = int(sketch_seed)
+        self.detach_assignments = bool(detach_assignments)
+        self.register_buffer("_sketch_dirs", torch.empty(0), persistent=False)
+
+    def _get_sketch_dirs(self, dim: int, device: torch.device) -> torch.Tensor:
+        if (
+            self._sketch_dirs.numel() == 0
+            or self._sketch_dirs.shape != (self.num_sketches, dim)
+            or self._sketch_dirs.device != device
+        ):
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(self.sketch_seed)
+            dirs = torch.randn(
+                self.num_sketches,
+                dim,
+                generator=gen,
+                dtype=torch.float32,
+            )
+            self._sketch_dirs = F.normalize(dirs, dim=-1, eps=self.eps).to(device=device)
+        return self._sketch_dirs
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        del p_ign, kw
+
+        z_raw = ema_full.float()                                              # (B, N, D)
+        z = F.normalize(z_raw, dim=-1, eps=self.eps)                          # (B, N, D)
+        dirs = self._get_sketch_dirs(z.shape[-1], z.device)                   # (K, D)
+
+        assign_source = z.detach() if self.detach_assignments else z
+        assign_logits = torch.einsum("bnd,kd->bnk", assign_source, dirs)      # (B, N, K)
+        assign = F.softmax(assign_logits / self.assign_tau, dim=-1)           # (B, N, K)
+
+        # Build one collapse-safe context prototype per fixed-random sketch
+        # bucket. Low-mass buckets fall back toward the image mean instead of
+        # creating unstable arbitrary directions.
+        p_ctx_f = p_ctx.float()
+        p_tgt_f = p_tgt.float()
+        image_mean = z_raw.mean(dim=1, keepdim=True)                          # (B, 1, D)
+        weights = p_ctx_f.unsqueeze(-1) * assign                              # (B, N, K)
+        mass = weights.sum(dim=1)                                             # (B, K)
+        weighted_sum = torch.einsum("bnk,bnd->bkd", weights, z_raw)           # (B, K, D)
+        virtual_w = (1.0 - mass).clamp(min=0.0)                               # (B, K)
+        prototypes = (
+            weighted_sum + virtual_w.unsqueeze(-1) * image_mean
+        ) / (mass + virtual_w).clamp(min=self.eps).unsqueeze(-1)              # (B, K, D)
+        prototypes = F.normalize(prototypes, dim=-1, eps=self.eps)
+
+        cos = torch.einsum("bnd,bkd->bnk", z, prototypes).clamp(min=-1.0, max=1.0)
+        explained = cos.square().amax(dim=-1)                                 # (B, N)
+        surprise_all = 1.0 - explained                                        # (B, N)
+        p_tgt_sum = p_tgt_f.sum(dim=-1).clamp(min=1.0)                        # (B,)
+        surprise = ((p_tgt_f * surprise_all).sum(dim=-1) / p_tgt_sum).mean()
+
+        support = (mass / float(ema_full.shape[1])).clamp(min=0.0)
+        return -surprise, {
+            "sketched_orthogonal_cos_surprise_mean": float(surprise.detach().item()),
+            "cos_surprise/objective": float(surprise.detach().item()),
+            "cos_surprise/tgt_to_ctx": float(surprise.detach().item()),
+            "cos_surprise/is_symmetric": 0.0,
+            "cos_surprise/is_sketched_orthogonal": 1.0,
+            "cos_surprise/num_sketches": float(self.num_sketches),
+            "cos_surprise/assign_tau": float(self.assign_tau),
+            "cos_surprise/explained_mean": float(explained.detach().mean().item()),
+            "cos_surprise/sketch_ctx_mass_mean": float(mass.detach().mean().item()),
+            "cos_surprise/sketch_ctx_mass_min": float(mass.detach().amin(dim=-1).mean().item()),
+            "cos_surprise/sketch_ctx_support_mean": float(support.detach().mean().item()),
+            "cos_surprise/sketch_ctx_support_min": float(
+                support.detach().amin(dim=-1).mean().item()
+            ),
+        }
 
 
 class NegPromptContrastTerm(MaskerTerm):
@@ -1203,6 +1296,155 @@ class NWayProgressiveKLTerm(MaskerTerm):
 
 
 # ------------------------------------------------------------------
+# Affinity-coverage novelty (loss_formulation.tex / novelty_proxy.tex)
+#
+# L = -U_ctx - w_tgt·U_tgt + γ·log(1+α)·C_act
+# Coverage scores c_j, t_j come from a sketched RBF affinity A_{ij}
+# on EMA embeddings with A_{ii}=0 (load-bearing) and adaptive bandwidth
+# σ² from per-image median pair distance.
+# ------------------------------------------------------------------
+
+class NegAffinityNoveltyTerm(MaskerTerm):
+    name = "neg_affinity_novelty"
+
+    def __init__(
+        self,
+        alpha: float = 4.0,
+        w_tgt: float = 1.0,
+        gamma: float = 0.5,
+        sketch_dim: int = 64,
+        eps: float = 1e-4,
+        sigma_rho: float = 1.0,
+        sigma_floor: float = 1e-6,
+        sketch_seed: int = 0,
+        norm_eps: float = 1e-8,
+        eff_rank_every_steps: int = 50,
+    ):
+        super().__init__()
+        self.alpha = float(alpha)
+        self.w_tgt = float(w_tgt)
+        self.gamma = float(gamma)
+        self.sketch_dim = int(sketch_dim)
+        if self.sketch_dim <= 0:
+            raise ValueError("neg_affinity_novelty.sketch_dim must be > 0")
+        self.eps = float(eps)
+        self.sigma_rho = float(sigma_rho)
+        if self.sigma_rho <= 0.0:
+            raise ValueError("neg_affinity_novelty.sigma_rho must be > 0")
+        self.sigma_floor = float(sigma_floor)
+        self.sketch_seed = int(sketch_seed)
+        self.norm_eps = float(norm_eps)
+        self.eff_rank_every_steps = max(int(eff_rank_every_steps), 1)
+        self.register_buffer("_sketch_R", torch.empty(0), persistent=False)
+        self.register_buffer(
+            "_step_counter", torch.tensor(0, dtype=torch.long), persistent=True
+        )
+        self.register_buffer(
+            "_eff_rank_mean", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_eff_rank_min", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+
+    def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
+        if (
+            self._sketch_R.numel() == 0
+            or self._sketch_R.shape != (self.sketch_dim, dim)
+            or self._sketch_R.device != device
+        ):
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(self.sketch_seed)
+            R = torch.randn(
+                self.sketch_dim, dim, generator=gen, dtype=torch.float32
+            )
+            R = R * (self.sketch_dim ** -0.5)  # entries ~ N(0, 1/S)
+            self._sketch_R = R.to(device=device)
+        return self._sketch_R
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        del p_ign, kw
+
+        z_hat = F.normalize(ema_full.float(), dim=-1, eps=self.norm_eps)   # (B,N,D)
+        B, N, D = z_hat.shape
+        device = z_hat.device
+
+        R = self._get_sketch(D, device)                                    # (S, D)
+        y = torch.einsum("bnd,sd->bns", z_hat, R)                          # (B, N, S)
+
+        y_norm = (y * y).sum(dim=-1)                                       # (B, N)
+        gram = torch.einsum("bns,bms->bnm", y, y)                          # (B, N, N)
+        d_sq = (
+            y_norm.unsqueeze(2) + y_norm.unsqueeze(1) - 2.0 * gram
+        ).clamp(min=0.0)
+
+        # Per-image bandwidth: median of off-diagonal pair distances.
+        eye_mask = torch.eye(N, dtype=torch.bool, device=device)
+        d_for_med = d_sq.masked_fill(eye_mask, float("nan"))
+        sigma_sq = torch.nanmedian(d_for_med.flatten(1), dim=-1).values    # (B,)
+        sigma_sq = (self.sigma_rho * sigma_sq).clamp(min=self.sigma_floor)
+
+        A = torch.exp(-d_sq / (2.0 * sigma_sq.view(B, 1, 1)))               # (B, N, N)
+        A = A.masked_fill(eye_mask, 0.0)                                    # diagonal-zero
+
+        Z = A.sum(dim=1) + self.eps                                         # (B, N)
+        ctx_num = torch.einsum("bi,bij->bj", p_ctx.float(), A)              # (B, N)
+        tgt_num = torch.einsum("bi,bij->bj", p_tgt.float(), A)              # (B, N)
+        c = ctx_num / Z
+        t = tgt_num / Z
+
+        U_ctx = torch.log1p(self.alpha * c).mean()
+        ratio = t / (self.eps + c + t)
+        U_tgt = torch.log1p(self.alpha * ratio).mean()
+        C_act = (p_ctx + p_tgt).mean()
+
+        coupling = self.gamma * math.log1p(self.alpha)
+        loss = -U_ctx - self.w_tgt * U_tgt + coupling * C_act
+
+        # Effective rank via squared-eigenvalue participation ratio:
+        # r = (Σ λ²)² / Σ λ⁴ = ‖A‖_F⁴ / ‖A²‖_F²
+        # Throttled — A² is an (N×N) matmul per image.
+        step = int(self._step_counter.item())
+        if step % self.eff_rank_every_steps == 0:
+            with torch.no_grad():
+                frob_sq = (A * A).sum(dim=(-1, -2))                         # (B,)
+                A_sq = torch.bmm(A, A)                                      # (B, N, N)
+                A_sq_frob_sq = (A_sq * A_sq).sum(dim=(-1, -2))              # (B,)
+                eff_rank = frob_sq.square() / A_sq_frob_sq.clamp(min=1e-12)
+                self._eff_rank_mean.fill_(float(eff_rank.mean().item()))
+                self._eff_rank_min.fill_(float(eff_rank.amin().item()))
+        self._step_counter.add_(1)
+
+        log_max = math.log1p(self.alpha)
+        logs = {
+            "affinity/loss": float(loss.detach().item()),
+            "affinity/U_ctx": float(U_ctx.detach().item()),
+            "affinity/U_tgt": float(U_tgt.detach().item()),
+            "affinity/C_act": float(C_act.detach().item()),
+            "affinity/U_ctx_norm": float(U_ctx.detach().item()) / max(log_max, 1e-12),
+            "affinity/U_tgt_norm": float(U_tgt.detach().item()) / max(log_max, 1e-12),
+            "affinity/sigma_sq_mean": float(sigma_sq.detach().mean().item()),
+            "affinity/sigma_sq_min": float(sigma_sq.detach().amin().item()),
+            "affinity/A_mean_offdiag": float(
+                A.detach().sum().item() / max(B * N * (N - 1), 1)
+            ),
+            "affinity/c_mean": float(c.detach().mean().item()),
+            "affinity/t_mean": float(t.detach().mean().item()),
+            "affinity/c_max_per_image_mean": float(c.detach().amax(dim=-1).mean().item()),
+            "affinity/t_max_per_image_mean": float(t.detach().amax(dim=-1).mean().item()),
+            "affinity/active_coverage_mean": float((c + t).detach().mean().item()),
+            "affinity/Z_mean": float(Z.detach().mean().item()),
+            "affinity/Z_min_mean": float(Z.detach().amin(dim=-1).mean().item()),
+            "affinity/eff_rank_pr_mean": float(self._eff_rank_mean.item()),
+            "affinity/eff_rank_pr_min": float(self._eff_rank_min.item()),
+            "affinity/coupling": coupling,
+            "affinity/alpha": self.alpha,
+            "affinity/w_tgt": self.w_tgt,
+            "affinity/gamma": self.gamma,
+        }
+        return loss, logs
+
+
+# ------------------------------------------------------------------
 
 TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "H_cond": HCondTerm,
@@ -1210,6 +1452,7 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "neg_surprise": NegSurpriseTerm,
     "neg_cos_surprise": NegCosSurpriseTerm,
     "neg_symmetric_cos_surprise": NegSymmetricCosSurpriseTerm,
+    "neg_sketched_orthogonal_cos_surprise": NegSketchedOrthogonalCosSurpriseTerm,
     "neg_prompt_contrast": NegPromptContrastTerm,
     "neg_logdet_diversity": NegLogDetDiversityTerm,
     "neg_support_logdet_diversity": NegSupportLogDetDiversityTerm,
@@ -1227,4 +1470,5 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "nway_floor_penalty": FloorPenaltyTerm,
     "role_alive": RoleAliveTerm,
     "nway_progressive_kl": NWayProgressiveKLTerm,
+    "neg_affinity_novelty": NegAffinityNoveltyTerm,
 }

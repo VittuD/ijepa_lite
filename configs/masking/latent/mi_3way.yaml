@@ -11,6 +11,13 @@ terms:
   neg_symmetric_cos_surprise:
     weight: [0, 0]
     role_indices: [0, 1]  # ctx, tgt; set [0, 1, 2] to include ign
+  neg_sketched_orthogonal_cos_surprise:
+    weight: [0, 0]
+    num_sketches: 8
+    assign_tau: 0.25
+    eps: 1.0e-6
+    sketch_seed: 0
+    detach_assignments: true
   neg_prompt_contrast:
     weight: [0, 0]
     sample_mode: uniform_distinct  # "uniform_distinct" or "feature_far"
@@ -61,6 +68,18 @@ terms:
     weight: [0, 0]
   target_rate:
     weight: [0, 0]
+  neg_affinity_novelty:
+    weight: [0, 0]
+    alpha: 4.0
+    w_tgt: 1.0
+    gamma: 0.5
+    sketch_dim: 64
+    eps: 1.0e-4
+    sigma_rho: 1.0
+    sigma_floor: 1.0e-6
+    sketch_seed: 0
+    norm_eps: 1.0e-8
+    eff_rank_every_steps: 50
 
 warmup_epochs: 0
 warmup_use_vanilla_multiblock: false

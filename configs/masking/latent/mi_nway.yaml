@@ -19,6 +19,13 @@ terms:
   neg_symmetric_cos_surprise:
     weight: [0, 0]
     role_indices: [0, 1]  # ctx, tgt_0; include more role indices as needed
+  neg_sketched_orthogonal_cos_surprise:
+    weight: [0, 0]
+    num_sketches: 8
+    assign_tau: 0.25
+    eps: 1.0e-6
+    sketch_seed: 0
+    detach_assignments: true
   neg_logdet_diversity:
     weight: [0, 0]
     role_indices: [0, 1]  # ctx, tgt_0
