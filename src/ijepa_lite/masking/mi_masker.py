@@ -886,6 +886,7 @@ class MIRateMasker(LatentMasker):
                 "weights":  weights,
                 "p_ign":    p_ign,
                 "logits":   logits.detach(),
+                "warmup_grad_anchor": logits,
                 "ema_full": ema_full,
                 "epoch": epoch,
                 "total_epochs": self.total_epochs,
@@ -910,7 +911,13 @@ class MIRateMasker(LatentMasker):
         p_ign    = mask_output.aux["p_ign"]
 
         if bool(mask_output.aux.get("warmup_random_multiblock_active", 0.0)):
-            return reconstruction_loss
+            warmup_grad_anchor = mask_output.aux.get("warmup_grad_anchor")
+            if warmup_grad_anchor is None:
+                return reconstruction_loss
+            # Keep the learned masker branch in the autograd graph during
+            # vanilla-mask warmup so DDP does not flag its parameters as unused,
+            # while still applying exactly zero update to that branch.
+            return reconstruction_loss + 0.0 * warmup_grad_anchor.sum()
 
         weights  = mask_output.aux["weights"]
         ema_full = mask_output.aux.get("ema_full")
