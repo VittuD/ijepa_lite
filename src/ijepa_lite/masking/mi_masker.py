@@ -57,6 +57,11 @@ class MIRateMasker(LatentMasker):
                       the vanilla random MultiBlockMaskGenerator for hard masks
                       and fall back to pure reconstruction loss, regardless of
                       the configured post-warmup hard_assignment mode.
+    warmup_train_masker_on_soft_assignments:
+                      When True together with vanilla-multiblock warmup, keep
+                      using the vanilla hard masks for predictor reconstruction
+                      while still optimizing the learned masker through its
+                      auxiliary soft-assignment loss.
     warmup_epochs  : Epochs to grow weight sampling range to full.
     """
 
@@ -82,6 +87,7 @@ class MIRateMasker(LatentMasker):
         rrg_num_target_blocks: int = 4,
         rrg_keep_k_per_block: int = 0,
         warmup_use_vanilla_multiblock: bool = False,
+        warmup_train_masker_on_soft_assignments: bool = False,
         warmup_epochs: int = 0,
         total_epochs: int = 1000,
         pos_embed_kind: str = "learned",
@@ -147,6 +153,9 @@ class MIRateMasker(LatentMasker):
         self.rrg_keep_percent = int(rrg_keep_percent)
         self.rrg_keep_k_per_block = int(rrg_keep_k_per_block)
         self.warmup_use_vanilla_multiblock = bool(warmup_use_vanilla_multiblock)
+        self.warmup_train_masker_on_soft_assignments = bool(
+            warmup_train_masker_on_soft_assignments
+        )
         self.warmup_epochs = int(warmup_epochs)
         self.total_epochs = int(total_epochs)
 
@@ -848,9 +857,10 @@ class MIRateMasker(LatentMasker):
                 batch_size=B,
                 device=tokens.device,
             )
-            p_ctx = warmup_payload["context_soft"]
-            p_tgt = warmup_payload["target_soft"]
-            p_ign = warmup_payload["p_ign"]
+            if not self.warmup_train_masker_on_soft_assignments:
+                p_ctx = warmup_payload["context_soft"]
+                p_tgt = warmup_payload["target_soft"]
+                p_ign = warmup_payload["p_ign"]
             aux_counts = warmup_payload["aux_counts"]
         elif self.hard_assignment == "random_region_growth":
             ctx_idx, tgt_idx, aux_counts = self._random_region_growth_indices(
@@ -891,6 +901,9 @@ class MIRateMasker(LatentMasker):
                 "epoch": epoch,
                 "total_epochs": self.total_epochs,
                 "hard_assignment": self.hard_assignment,
+                "warmup_train_masker_on_soft_assignments": (
+                    self.warmup_train_masker_on_soft_assignments
+                ),
                 "max_total_hard": self.max_total_hard,
                 **aux_counts,
             },
@@ -911,13 +924,16 @@ class MIRateMasker(LatentMasker):
         p_ign    = mask_output.aux["p_ign"]
 
         if bool(mask_output.aux.get("warmup_random_multiblock_active", 0.0)):
-            warmup_grad_anchor = mask_output.aux.get("warmup_grad_anchor")
-            if warmup_grad_anchor is None:
-                return reconstruction_loss
-            # Keep the learned masker branch in the autograd graph during
-            # vanilla-mask warmup so DDP does not flag its parameters as unused,
-            # while still applying exactly zero update to that branch.
-            return reconstruction_loss + 0.0 * warmup_grad_anchor.sum()
+            if bool(mask_output.aux.get("warmup_train_masker_on_soft_assignments", False)):
+                pass
+            else:
+                warmup_grad_anchor = mask_output.aux.get("warmup_grad_anchor")
+                if warmup_grad_anchor is None:
+                    return reconstruction_loss
+                # Keep the learned masker branch in the autograd graph during
+                # vanilla-mask warmup so DDP does not flag its parameters as unused,
+                # while still applying exactly zero update to that branch.
+                return reconstruction_loss + 0.0 * warmup_grad_anchor.sum()
 
         weights  = mask_output.aux["weights"]
         ema_full = mask_output.aux.get("ema_full")

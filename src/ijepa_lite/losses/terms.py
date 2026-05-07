@@ -1312,7 +1312,8 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         self,
         alpha: float = 4.0,
         w_tgt: float = 1.0,
-        gamma: float = 0.5,
+        gamma: float | Sequence[float] = 0.5,
+        gamma_schedule: str = "constant",
         sketch_dim: int = 64,
         eps: float = 1e-4,
         sigma_rho: float | Sequence[float] = 1.0,
@@ -1325,7 +1326,24 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         super().__init__()
         self.alpha = float(alpha)
         self.w_tgt = float(w_tgt)
-        self.gamma = float(gamma)
+        if isinstance(gamma, Sequence) and not isinstance(gamma, (str, bytes)):
+            if len(gamma) != 2:
+                raise ValueError(
+                    "neg_affinity_novelty.gamma must be a scalar or a [start, end] pair"
+                )
+            gamma_start = float(gamma[0])
+            gamma_end = float(gamma[1])
+        else:
+            gamma_start = float(gamma)
+            gamma_end = float(gamma)
+        self.gamma_start = gamma_start
+        self.gamma_end = gamma_end
+        self.gamma_schedule = str(gamma_schedule).lower()
+        if self.gamma_schedule not in ("constant", "linear", "cosine"):
+            raise ValueError(
+                "neg_affinity_novelty.gamma_schedule must be "
+                "'constant', 'linear', or 'cosine'"
+            )
         self.sketch_dim = int(sketch_dim)
         if self.sketch_dim <= 0:
             raise ValueError("neg_affinity_novelty.sketch_dim must be > 0")
@@ -1395,6 +1413,21 @@ class NegAffinityNoveltyTerm(MaskerTerm):
 
         return self.sigma_rho_start + (self.sigma_rho_end - self.sigma_rho_start) * blend
 
+    def _get_gamma(self, epoch: int | None, total_epochs: int | None) -> float:
+        if self.gamma_start == self.gamma_end or self.gamma_schedule == "constant":
+            return self.gamma_start
+
+        if epoch is None or total_epochs is None or total_epochs <= 1:
+            return self.gamma_start
+
+        progress = min(max(float(epoch) / float(total_epochs - 1), 0.0), 1.0)
+        if self.gamma_schedule == "linear":
+            blend = progress
+        else:
+            blend = 0.5 * (1.0 - math.cos(math.pi * progress))
+
+        return self.gamma_start + (self.gamma_end - self.gamma_start) * blend
+
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
         del p_ign
 
@@ -1404,6 +1437,10 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         epoch = kw.get("epoch")
         total_epochs = kw.get("total_epochs")
         sigma_rho = self._get_sigma_rho(
+            None if epoch is None else int(epoch),
+            None if total_epochs is None else int(total_epochs),
+        )
+        gamma = self._get_gamma(
             None if epoch is None else int(epoch),
             None if total_epochs is None else int(total_epochs),
         )
@@ -1437,7 +1474,7 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         U_tgt = torch.log1p(self.alpha * ratio).mean()
         C_act = (p_ctx + p_tgt).mean()
 
-        coupling = self.gamma * math.log1p(self.alpha)
+        coupling = gamma * math.log1p(self.alpha)
         loss = -U_ctx - self.w_tgt * U_tgt + coupling * C_act
 
         # Effective rank via squared-eigenvalue participation ratio:
@@ -1479,7 +1516,14 @@ class NegAffinityNoveltyTerm(MaskerTerm):
             "affinity/coupling": coupling,
             "affinity/alpha": self.alpha,
             "affinity/w_tgt": self.w_tgt,
-            "affinity/gamma": self.gamma,
+            "affinity/gamma": gamma,
+            "affinity/gamma_start": self.gamma_start,
+            "affinity/gamma_end": self.gamma_end,
+            "affinity/gamma_schedule_id": {
+                "constant": 0.0,
+                "linear": 1.0,
+                "cosine": 2.0,
+            }[self.gamma_schedule],
             "affinity/sigma_rho": sigma_rho,
             "affinity/sigma_rho_start": self.sigma_rho_start,
             "affinity/sigma_rho_end": self.sigma_rho_end,

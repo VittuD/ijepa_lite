@@ -72,7 +72,8 @@ terms:
     weight: [0, 0]
     alpha: 4.0
     w_tgt: 1.0
-    gamma: 0.5
+    gamma: [0.5, 0.5]  # scalar or [start, end]; equal endpoints collapse to constant
+    gamma_schedule: constant  # constant | linear | cosine
     sketch_dim: 64
     eps: 1.0e-4
     sigma_rho: [1.0, 1.0]  # [start, end]; equal endpoints collapse to constant
@@ -84,6 +85,7 @@ terms:
 
 warmup_epochs: 0
 warmup_use_vanilla_multiblock: false
+warmup_train_masker_on_soft_assignments: false
 ntgt_min: 4
 nctx_min: 1
 max_total_hard: 0      # 0 = disabled; otherwise cap nctx + ntgt predictor tokens
