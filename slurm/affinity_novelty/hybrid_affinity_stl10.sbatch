@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-haff-stl10
+#SBATCH --job-name=ijepa-haff2-stl10
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -12,11 +12,12 @@
 #SBATCH --error=sbatch_logs/affinity_novelty/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# STL-10 hybrid feature-position affinity novelty pretraining.
-# Identical setup to affinity_novelty_stl10 but uses neg_hybrid_affinity_novelty
-# which multiplies the feature affinity by a fixed spatial affinity
-# A_spat[i,j] = exp(-||pos_i - pos_j||² / 2*sigma_pos²).
-# This provides non-zero intra-cluster gradient, preventing cluster-exhaustion.
+# STL-10 hybrid feature-position affinity novelty pretraining v2.
+# Uses neg_hybrid_affinity_novelty with column-normalised A_spat:
+# each column sums to 1 so center patches have no larger spatial pull
+# than edge patches, removing the position bias seen in v1.
+# sigma_pos=0.5 (constant): tight spatial neighbourhood, column-norm
+# prevents the center-bias that previously caused collapse at this value.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -41,7 +42,7 @@ mkdir -p sbatch_logs/affinity_novelty
 
 nvidia-smi -L
 
-EXP_NAME="hybrid_affinity_stl10"
+EXP_NAME="hybrid_affinity_stl10_v2_sp05"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -59,7 +60,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.neg_hybrid_affinity_novelty.alpha=4.0 \
       masking.latent.terms.neg_hybrid_affinity_novelty.w_tgt=1.0 \
       masking.latent.terms.neg_hybrid_affinity_novelty.gamma=0.5 \
-      masking.latent.terms.neg_hybrid_affinity_novelty.sigma_pos=2.0 \
+      masking.latent.terms.neg_hybrid_affinity_novelty.sigma_pos=0.5 \
       masking.latent.hard_assignment=gumbel \
       masking.latent.gumbel_tau=1.0 \
       masking.latent.warmup_epochs=0 \

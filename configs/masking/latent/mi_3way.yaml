@@ -93,7 +93,8 @@ terms:
     sigma_rho: [1.0, 1.0]
     sigma_rho_schedule: constant
     sigma_floor: 1.0e-6
-    sigma_pos: 2.0    # spatial bandwidth in patch-width units
+    sigma_pos: [2.0, 2.0]         # [start, end] spatial bandwidth in patch-width units; anneal large→small
+    sigma_pos_schedule: constant  # constant | linear | cosine
     sketch_seed: 0
     norm_eps: 1.0e-8
     eff_rank_every_steps: 50

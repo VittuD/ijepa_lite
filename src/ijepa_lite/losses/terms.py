@@ -1563,7 +1563,8 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
         sigma_rho: float | Sequence[float] = 1.0,
         sigma_rho_schedule: str = "constant",
         sigma_floor: float = 1e-6,
-        sigma_pos: float = 2.0,
+        sigma_pos: float | Sequence[float] = 2.0,
+        sigma_pos_schedule: str = "constant",
         sketch_seed: int = 0,
         norm_eps: float = 1e-8,
         eff_rank_every_steps: int = 50,
@@ -1610,9 +1611,24 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
                 "'constant', 'linear', or 'cosine'"
             )
         self.sigma_floor = float(sigma_floor)
-        self.sigma_pos = float(sigma_pos)
-        if self.sigma_pos <= 0.0:
-            raise ValueError("neg_hybrid_affinity_novelty.sigma_pos must be > 0")
+        if isinstance(sigma_pos, Sequence) and not isinstance(sigma_pos, (str, bytes)):
+            if len(sigma_pos) != 2:
+                raise ValueError(
+                    "neg_hybrid_affinity_novelty.sigma_pos must be a scalar or a [start, end] pair"
+                )
+            sigma_pos_start, sigma_pos_end = float(sigma_pos[0]), float(sigma_pos[1])
+        else:
+            sigma_pos_start = sigma_pos_end = float(sigma_pos)
+        if sigma_pos_start <= 0.0 or sigma_pos_end <= 0.0:
+            raise ValueError("neg_hybrid_affinity_novelty.sigma_pos endpoints must be > 0")
+        self.sigma_pos_start = sigma_pos_start
+        self.sigma_pos_end = sigma_pos_end
+        self.sigma_pos_schedule = str(sigma_pos_schedule).lower()
+        if self.sigma_pos_schedule not in ("constant", "linear", "cosine"):
+            raise ValueError(
+                "neg_hybrid_affinity_novelty.sigma_pos_schedule must be "
+                "'constant', 'linear', or 'cosine'"
+            )
         self.sketch_seed = int(sketch_seed)
         self.norm_eps = float(norm_eps)
         self.eff_rank_every_steps = max(int(eff_rank_every_steps), 1)
@@ -1627,10 +1643,9 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
             "_eff_rank_min", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
 
-        # Precompute fixed spatial affinity from 2D patch-grid positions.
-        # A_spat[i,j] = exp(-||pos_i - pos_j||² / 2σ_p²), shape (N, N).
-        # Registered as a non-persistent buffer so it moves with the module
-        # but is not saved in checkpoints (it can be reconstructed from sigma_pos).
+        # Precompute squared inter-patch distances on the 2D patch grid.
+        # A_spat is recomputed each forward at the scheduled sigma_pos value
+        # so we only store the fixed geometry here.
         grid_size = int(math.isqrt(int(num_patches)))
         if grid_size * grid_size != int(num_patches):
             raise ValueError(
@@ -1642,11 +1657,7 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
         gr, gc = torch.meshgrid(rows, cols, indexing="ij")
         pos = torch.stack([gr.reshape(-1), gc.reshape(-1)], dim=-1)  # (N, 2)
         d_pos_sq = ((pos.unsqueeze(0) - pos.unsqueeze(1)) ** 2).sum(-1)  # (N, N)
-        self.register_buffer(
-            "_spatial_A",
-            torch.exp(-d_pos_sq / (2.0 * self.sigma_pos ** 2)),
-            persistent=False,
-        )
+        self.register_buffer("_d_pos_sq", d_pos_sq, persistent=False)
 
     def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
         if (
@@ -1663,23 +1674,21 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
             self._sketch_R = R.to(device=device)
         return self._sketch_R
 
-    def _get_sigma_rho(self, epoch: int | None, total_epochs: int | None) -> float:
-        if self.sigma_rho_start == self.sigma_rho_end or self.sigma_rho_schedule == "constant":
-            return self.sigma_rho_start
+    def _schedule(
+        self,
+        start: float,
+        end: float,
+        kind: str,
+        epoch: int | None,
+        total_epochs: int | None,
+    ) -> float:
+        if start == end or kind == "constant":
+            return start
         if epoch is None or total_epochs is None or total_epochs <= 1:
-            return self.sigma_rho_start
+            return start
         progress = min(max(float(epoch) / float(total_epochs - 1), 0.0), 1.0)
-        blend = progress if self.sigma_rho_schedule == "linear" else 0.5 * (1.0 - math.cos(math.pi * progress))
-        return self.sigma_rho_start + (self.sigma_rho_end - self.sigma_rho_start) * blend
-
-    def _get_gamma(self, epoch: int | None, total_epochs: int | None) -> float:
-        if self.gamma_start == self.gamma_end or self.gamma_schedule == "constant":
-            return self.gamma_start
-        if epoch is None or total_epochs is None or total_epochs <= 1:
-            return self.gamma_start
-        progress = min(max(float(epoch) / float(total_epochs - 1), 0.0), 1.0)
-        blend = progress if self.gamma_schedule == "linear" else 0.5 * (1.0 - math.cos(math.pi * progress))
-        return self.gamma_start + (self.gamma_end - self.gamma_start) * blend
+        blend = progress if kind == "linear" else 0.5 * (1.0 - math.cos(math.pi * progress))
+        return start + (end - start) * blend
 
     def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
         del p_ign
@@ -1689,13 +1698,17 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
         device = z_hat.device
         epoch = kw.get("epoch")
         total_epochs = kw.get("total_epochs")
-        sigma_rho = self._get_sigma_rho(
-            None if epoch is None else int(epoch),
-            None if total_epochs is None else int(total_epochs),
+        ep = None if epoch is None else int(epoch)
+        te = None if total_epochs is None else int(total_epochs)
+
+        sigma_rho = self._schedule(
+            self.sigma_rho_start, self.sigma_rho_end, self.sigma_rho_schedule, ep, te
         )
-        gamma = self._get_gamma(
-            None if epoch is None else int(epoch),
-            None if total_epochs is None else int(total_epochs),
+        gamma = self._schedule(
+            self.gamma_start, self.gamma_end, self.gamma_schedule, ep, te
+        )
+        sigma_pos = self._schedule(
+            self.sigma_pos_start, self.sigma_pos_end, self.sigma_pos_schedule, ep, te
         )
 
         # Feature affinity via random sketch
@@ -1713,9 +1726,18 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
         A_feat = torch.exp(-d_sq / (2.0 * sigma_sq.view(B, 1, 1)))
         A_feat = A_feat.masked_fill(eye_mask, 0.0)
 
-        # Hybrid: multiply feature affinity by fixed spatial affinity.
-        # A_feat diagonal is already 0; A_spatial diagonal is 1; product is 0.
-        A = A_feat * self._spatial_A                                        # (B, N, N)
+        # Column-normalised spatial affinity.
+        # Each column sums to 1 (off-diagonal) so no patch has a larger
+        # total spatial pull just because it sits in the center of the grid.
+        A_spat_raw = torch.exp(
+            -self._d_pos_sq / (2.0 * sigma_pos ** 2)
+        )                                                                   # (N, N)
+        col_sum = A_spat_raw.sum(dim=0) - 1.0                              # subtract diagonal=1; (N,)
+        A_spat_norm = A_spat_raw / (col_sum.unsqueeze(0) + self.eps)       # (N, N)
+        A_spat_norm = A_spat_norm.masked_fill(eye_mask, 0.0)
+
+        # Hybrid: element-wise product of feature and normalised spatial affinities.
+        A = A_feat * A_spat_norm                                            # (B, N, N)
 
         Z = A.sum(dim=1) + self.eps                                         # (B, N)
         ctx_num = torch.einsum("bi,bij->bj", p_ctx.float(), A)
@@ -1759,8 +1781,8 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
             "haff/A_feat_mean_offdiag": float(
                 A_feat.detach().sum().item() / max(B * N_offdiag, 1)
             ),
-            "haff/A_spat_mean_offdiag": float(
-                (self._spatial_A.sum().item() - N) / max(N_offdiag, 1)
+            "haff/A_spat_norm_col_mean": float(
+                A_spat_norm.sum().item() / max(N_offdiag, 1)
             ),
             "haff/c_mean": float(c.detach().mean().item()),
             "haff/t_mean": float(t.detach().mean().item()),
@@ -1776,7 +1798,7 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
             "haff/w_tgt": self.w_tgt,
             "haff/gamma": gamma,
             "haff/sigma_rho": sigma_rho,
-            "haff/sigma_pos": self.sigma_pos,
+            "haff/sigma_pos": sigma_pos,
         }
         return loss, logs
 
