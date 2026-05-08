@@ -1,23 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-haff2-stl10
+#SBATCH --job-name=ijepa-haff-stl10
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/affinity_novelty/%x_%j.out
 #SBATCH --error=sbatch_logs/affinity_novelty/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# STL-10 hybrid feature-position affinity novelty pretraining v2.
-# Uses neg_hybrid_affinity_novelty with column-normalised A_spat:
-# each column sums to 1 so center patches have no larger spatial pull
-# than edge patches, removing the position bias seen in v1.
-# sigma_pos=0.5 (constant): tight spatial neighbourhood, column-norm
-# prevents the center-bias that previously caused collapse at this value.
+# STL-10 hybrid feature-position affinity novelty pretraining.
+# Uses neg_hybrid_affinity_novelty which multiplies the feature affinity by
+# a column-normalised spatial affinity A_spat[i,j] = exp(-||pos_i-pos_j||²
+# / 2*sigma_pos²) / Z_j, where Z_j normalises each column to sum 1.
+# Column normalisation removes center-patch position bias; sigma_pos=0.5
+# gives a tight spatial neighbourhood for intra-cluster gradient.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -42,7 +42,7 @@ mkdir -p sbatch_logs/affinity_novelty
 
 nvidia-smi -L
 
-EXP_NAME="hybrid_affinity_stl10_v2_sp05"
+EXP_NAME="hybrid_affinity_stl10"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -66,6 +66,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.warmup_epochs=0 \
       masking.latent.nctx_min=1 \
       masking.latent.ntgt_min=4 \
-      train.eval_every_epochs=5 \
+      train.eval_every_epochs=1 \
+      train.viz_enabled=true \
+      +train.viz_every_epochs=1 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
