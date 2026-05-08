@@ -223,6 +223,7 @@ def save_avg_score_heatmap(
     n_images: int,
     out_path: Path,
     patch_px: int = 40,
+    verbose: bool = True,
 ) -> None:
     """Single-panel heatmap: mean p_tgt per position."""
     gh, gw = score_sums.shape
@@ -254,9 +255,10 @@ def save_avg_score_heatmap(
             draw.rectangle([x0, y0_, x1, y1_], outline=(40, 40, 40))
 
     img.save(out_path)
-    print(f"  Saved score heatmap -> {out_path}  "
-          f"(n={n_images}, min={float(mean_scores.min()):.3f}, "
-          f"max={float(mean_scores.max()):.3f}, std={float(mean_scores.std()):.4f})")
+    if verbose:
+        print(f"  Saved score heatmap -> {out_path}  "
+              f"(n={n_images}, min={float(mean_scores.min()):.3f}, "
+              f"max={float(mean_scores.max()):.3f}, std={float(mean_scores.std()):.4f})")
 
 
 def save_class_score_heatmap(
@@ -269,6 +271,7 @@ def save_class_score_heatmap(
     patch_px: int = 32,
     label_w: int = 140,
     row_gap: int = 6,
+    verbose: bool = True,
 ) -> None:
     """Per-class soft score heatmap."""
     gh, gw = overall_sums.shape
@@ -294,8 +297,9 @@ def save_class_score_heatmap(
     n_min = min(class_n[c] for c in sorted_cls) if sorted_cls else 1
     p_expected = float(overall_sums.sum()) / max(overall_n, 1) / max(gh * gw, 1)
     null_std = _null_interclass_std(p_expected, n_min)
-    print(f"  Inter-class score std = {interclass_std:.4f}  "
-          f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
+    if verbose:
+        print(f"  Inter-class score std = {interclass_std:.4f}  "
+              f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
 
     total_w = label_w + panel_w
     total_h = header_h + len(rows) * row_stride - row_gap
@@ -331,8 +335,9 @@ def save_class_score_heatmap(
                                fill=col, outline=(40, 40, 40))
 
     img.save(out_path)
-    print(f"  Saved per-class score heatmap -> {out_path}  "
-          f"({len(sorted_cls)} classes, overall n={overall_n})")
+    if verbose:
+        print(f"  Saved per-class score heatmap -> {out_path}  "
+              f"({len(sorted_cls)} classes, overall n={overall_n})")
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +349,7 @@ def save_avg_3way_heatmap(
     n_images: int,
     out_path: Path,
     patch_px: int = 40,
+    verbose: bool = True,
 ) -> None:
     """Four-panel heatmap: mean p_ctx / p_tgt / p_ign / blended per position."""
     gh, gw = role_sums["ctx"].shape
@@ -405,7 +411,8 @@ def save_avg_3way_heatmap(
                            fill=col, outline=(40, 40, 40))
 
     img.save(out_path)
-    print(f"  Saved 3-way heatmap -> {out_path}  (n={n_images})")
+    if verbose:
+        print(f"  Saved 3-way heatmap -> {out_path}  (n={n_images})")
 
 
 def save_class_3way_heatmap(
@@ -418,6 +425,7 @@ def save_class_3way_heatmap(
     patch_px: int = 32,
     label_w: int = 140,
     row_gap: int = 6,
+    verbose: bool = True,
 ) -> None:
     """Per-class blended 3-way heatmap (ctx=blue, tgt=red, ign=grey)."""
     gh, gw = overall_sums["ctx"].shape
@@ -457,8 +465,9 @@ def save_class_3way_heatmap(
     # Null baseline: p_tgt ≈ 1/3 for 3-way uniform
     n_min = min(class_n[c] for c in sorted_cls) if sorted_cls else 1
     null_std = _null_interclass_std(1.0 / 3.0, n_min)
-    print(f"  Inter-class p_tgt std = {interclass_std:.4f}  "
-          f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
+    if verbose:
+        print(f"  Inter-class p_tgt std = {interclass_std:.4f}  "
+              f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
 
     total_w = label_w + panel_w
     total_h = header_h + len(rows) * row_stride - row_gap
@@ -498,8 +507,9 @@ def save_class_3way_heatmap(
                                fill=col, outline=(40, 40, 40))
 
     img.save(out_path)
-    print(f"  Saved per-class 3-way heatmap -> {out_path}  "
-          f"({len(sorted_cls)} classes, overall n={overall_n})")
+    if verbose:
+        print(f"  Saved per-class 3-way heatmap -> {out_path}  "
+              f"({len(sorted_cls)} classes, overall n={overall_n})")
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +602,7 @@ def visualize_split_multiblock(
     patch_size: int,
     image_size: int,
     batch_size: int = BATCH_SIZE,
+    verbose: bool = True,
 ) -> tuple:
     """Visualize multiblock masker (content-independent).
 
@@ -681,9 +692,11 @@ def visualize_split_multiblock(
 
             cells.append(make_cell(orig_np, assign_np, multiblock_np))
 
-        print(f"  {dataset_name}/{split}: {end}/{n}", end="\r")
+        if verbose:
+            print(f"  {dataset_name}/{split}: {end}/{n}", end="\r")
 
-    print()
+    if verbose:
+        print()
 
     if cells:
         cell_w, cell_h = cells[0].size
@@ -694,7 +707,8 @@ def visualize_split_multiblock(
             grid.paste(cell, (c * cell_w, r * cell_h))
         fname = out_dir / f"{dataset_name}_{split}_multiblock.png"
         grid.save(fname)
-        print(f"  Saved -> {fname}  [{len(cells)} images]")
+        if verbose:
+            print(f"  Saved -> {fname}  [{len(cells)} images]")
 
     return sums, cls_sums, cls_n
 
@@ -704,6 +718,7 @@ def save_avg_coverage_heatmap(
     n: int,
     path: Path,
     patch_px: int = 40,
+    verbose: bool = True,
 ) -> None:
     """Two-panel heatmap: ctx frequency | tgt frequency (cold→hot)."""
     gh, gw = sums["ctx"].shape
@@ -739,7 +754,8 @@ def save_avg_coverage_heatmap(
                                fill=col, outline=(40, 40, 40))
 
     img.save(path)
-    print(f"  Saved coverage heatmap -> {path}  (n={n})")
+    if verbose:
+        print(f"  Saved coverage heatmap -> {path}  (n={n})")
 
 
 def save_class_coverage_heatmap(
@@ -752,6 +768,7 @@ def save_class_coverage_heatmap(
     patch_px: int = 32,
     label_w: int = 140,
     row_gap: int = 6,
+    verbose: bool = True,
 ) -> None:
     """Per-class tgt coverage heatmap (should be uniform for geometric masker)."""
     gh, gw = sums["tgt"].shape
@@ -768,8 +785,9 @@ def save_class_coverage_heatmap(
             [cls_sums[c]["tgt"] / max(cls_n[c], 1) for c in sorted_cls]
         )
         interclass_std = float(class_means.std(axis=0).mean())
-    print(f"  Inter-class tgt std = {interclass_std:.4f}  "
-          f"(~0 expected for geometric/content-independent masker)")
+    if verbose:
+        print(f"  Inter-class tgt std = {interclass_std:.4f}  "
+              f"(~0 expected for geometric/content-independent masker)")
 
     rows = [("overall", sums["tgt"] / max(n, 1), n)] + [
         (class_names[c] if class_names and c < len(class_names) else str(c),
@@ -807,8 +825,9 @@ def save_class_coverage_heatmap(
                                fill=col, outline=(40, 40, 40))
 
     img.save(path)
-    print(f"  Saved per-class coverage heatmap -> {path}  "
-          f"({len(sorted_cls)} classes, overall n={n})")
+    if verbose:
+        print(f"  Saved per-class coverage heatmap -> {path}  "
+              f"({len(sorted_cls)} classes, overall n={n})")
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +840,7 @@ def save_avg_nway_heatmap(
     out_path: Path,
     num_tgt_blocks: int = 4,
     patch_px: int = 40,
+    verbose: bool = True,
 ) -> None:
     """(M+3)-panel heatmap: p_ctx, p_tgt_0..M-1, p_ign, winner."""
     M = num_tgt_blocks
@@ -885,7 +905,8 @@ def save_avg_nway_heatmap(
                            fill=col, outline=(40, 40, 40))
 
     img.save(out_path)
-    print(f"  Saved N-way heatmap -> {out_path}  (n={n_images})")
+    if verbose:
+        print(f"  Saved N-way heatmap -> {out_path}  (n={n_images})")
 
 
 def save_class_nway_heatmap(
@@ -899,6 +920,7 @@ def save_class_nway_heatmap(
     patch_px: int = 32,
     label_w: int = 140,
     row_gap: int = 6,
+    verbose: bool = True,
 ) -> None:
     """Per-class blended N-way heatmap (winner color at winning prob intensity)."""
     M = num_tgt_blocks
@@ -942,8 +964,9 @@ def save_class_nway_heatmap(
     n_min = min(class_n[c] for c in sorted_cls) if sorted_cls else 1
     p_tgt_total = M / (M + 2)
     null_std = _null_interclass_std(p_tgt_total, n_min)
-    print(f"  Inter-class p_tgt std = {interclass_std:.4f}  "
-          f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
+    if verbose:
+        print(f"  Inter-class p_tgt std = {interclass_std:.4f}  "
+              f"(null={null_std:.4f}; well above -> content-adaptive scoring)")
 
     total_w = label_w + panel_w
     total_h = header_h + len(rows) * row_stride - row_gap
@@ -982,8 +1005,9 @@ def save_class_nway_heatmap(
                                fill=col, outline=(40, 40, 40))
 
     img.save(out_path)
-    print(f"  Saved per-class N-way heatmap -> {out_path}  "
-          f"({len(sorted_cls)} classes, overall n={overall_n})")
+    if verbose:
+        print(f"  Saved per-class N-way heatmap -> {out_path}  "
+              f"({len(sorted_cls)} classes, overall n={overall_n})")
 
 
 # ---------------------------------------------------------------------------
@@ -1006,6 +1030,7 @@ def visualize_split(
     batch_size: int = BATCH_SIZE,
     k_tgt: Optional[int] = None,
     epoch: Optional[int] = None,
+    verbose: bool = True,
 ) -> tuple:
     """
     Run masker on ``n`` images from ``dataset`` and produce visualization grids.
@@ -1227,9 +1252,11 @@ def visualize_split(
 
             cells.append(make_cell(orig_np, mid_np, assign_np))
 
-        print(f"  {dataset_name}/{split}: {end}/{n}", end="\r")
+        if verbose:
+            print(f"  {dataset_name}/{split}: {end}/{n}", end="\r")
 
-    print()
+    if verbose:
+        print()
 
     # Numeric content-adaptivity report
     if all_p_tgt:
@@ -1241,10 +1268,11 @@ def visualize_split(
         # For soft assignments p is the mean target prob; with n_total images
         p_mean = float(p_cat.mean().item())
         null_score_std = _null_interclass_std(p_mean, n_total)
-        print(f"  marginal_score_std = {marginal_score_std:.4f}  "
-              f"(-> 0 = uniform marginal = no positional bias)")
-        print(f"  p_tgt_score_std    = {p_tgt_score_std:.4f}  "
-              f"(null={null_score_std:.4f}; well above -> content-adaptive)")
+        if verbose:
+            print(f"  marginal_score_std = {marginal_score_std:.4f}  "
+                  f"(-> 0 = uniform marginal = no positional bias)")
+            print(f"  p_tgt_score_std    = {p_tgt_score_std:.4f}  "
+                  f"(null={null_score_std:.4f}; well above -> content-adaptive)")
 
     # Assemble image grid
     if cells:
@@ -1259,8 +1287,9 @@ def visualize_split(
         grid.save(fname)
         nctx = int(mask_out.context_idx.shape[1])
         ntgt = int(mask_out.target_idx.shape[1])
-        print(f"  Saved -> {fname}   [{len(cells)} images, nctx={nctx} ntgt={ntgt} "
-              f"K/N={ntgt}/{N}={ntgt/N:.2f}]")
+        if verbose:
+            print(f"  Saved -> {fname}   [{len(cells)} images, nctx={nctx} ntgt={ntgt} "
+                  f"K/N={ntgt}/{N}={ntgt/N:.2f}]")
 
     if masker_type == "nway":
         return role_sums, class_role_sums, class_img_n, "nway"

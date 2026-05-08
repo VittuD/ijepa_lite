@@ -84,13 +84,6 @@ class VizCallback(Callback):
             self._enabled = False
             return
 
-        if self._viz_every == save_every:
-            cadence_msg = f"piggybacks on save_every={save_every}"
-        else:
-            cadence_msg = f"viz_every={self._viz_every} (save_every={save_every})"
-        print(f"[VizCallback] Enabled: {cadence_msg}, "
-              f"dataset={dataset_name}, n_images={int(getattr(vcfg, 'n_images', 100))}")
-
     def on_epoch_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
         if not self._enabled or not is_rank0():
             return
@@ -153,11 +146,13 @@ class VizCallback(Callback):
                 grid_cols=grid_cols,
                 patch_size=self._patch_size,
                 image_size=self._image_size,
+                verbose=False,
             )
 
             save_avg_coverage_heatmap(
                 sums, n_images,
                 out_dir / f"{dataset_name}_avg_coverage.png",
+                verbose=False,
             )
             if cls_sums:
                 save_class_coverage_heatmap(
@@ -165,6 +160,7 @@ class VizCallback(Callback):
                     cls_sums, cls_n,
                     class_names,
                     out_dir / f"{dataset_name}_per_class_coverage.png",
+                    verbose=False,
                 )
             print(f"[VizCallback] epoch={epoch}  output -> {out_dir}/")
             return
@@ -212,6 +208,7 @@ class VizCallback(Callback):
             image_size=self._image_size,
             k_tgt=k_tgt,
             epoch=epoch,
+            verbose=False,
         )
 
         if viz_type == "nway":
@@ -221,6 +218,7 @@ class VizCallback(Callback):
                 sums, n_images,
                 out_dir / f"{dataset_name}_avg_nway.png",
                 num_tgt_blocks=M,
+                verbose=False,
             )
             if cls_sums:
                 save_class_nway_heatmap(
@@ -229,11 +227,13 @@ class VizCallback(Callback):
                     class_names,
                     out_dir / f"{dataset_name}_per_class_nway.png",
                     num_tgt_blocks=M,
+                    verbose=False,
                 )
         elif viz_type == "3way" or viz_type is True:
             save_avg_3way_heatmap(
                 sums, n_images,
                 out_dir / f"{dataset_name}_avg_3way.png",
+                verbose=False,
             )
             if cls_sums:
                 save_class_3way_heatmap(
@@ -241,11 +241,13 @@ class VizCallback(Callback):
                     cls_sums, cls_n,
                     class_names,
                     out_dir / f"{dataset_name}_per_class_3way.png",
+                    verbose=False,
                 )
         else:
             save_avg_score_heatmap(
                 sums, n_images,
                 out_dir / f"{dataset_name}_avg_score.png",
+                verbose=False,
             )
             if cls_sums:
                 save_class_score_heatmap(
@@ -253,6 +255,7 @@ class VizCallback(Callback):
                     cls_sums, cls_n,
                     class_names,
                     out_dir / f"{dataset_name}_per_class_score.png",
+                    verbose=False,
                 )
 
         encoder.train()
