@@ -82,6 +82,21 @@ terms:
     sketch_seed: 0
     norm_eps: 1.0e-8
     eff_rank_every_steps: 50
+  neg_hybrid_affinity_novelty:
+    weight: [0, 0]
+    alpha: 4.0
+    w_tgt: 1.0
+    gamma: [0.5, 0.5]
+    gamma_schedule: constant
+    sketch_dim: 64
+    eps: 1.0e-4
+    sigma_rho: [1.0, 1.0]
+    sigma_rho_schedule: constant
+    sigma_floor: 1.0e-6
+    sigma_pos: 2.0    # spatial bandwidth in patch-width units
+    sketch_seed: 0
+    norm_eps: 1.0e-8
+    eff_rank_every_steps: 50
 
 warmup_epochs: 0
 warmup_use_vanilla_multiblock: false
