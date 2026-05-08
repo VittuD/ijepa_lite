@@ -136,6 +136,19 @@ def train(
             if warmup > 0:
                 _masker.set_progress(epoch / warmup)
 
+        # True only during vanilla-multiblock warmup epochs where the masker is
+        # NOT trained on its own soft assignments.  In that regime the masker
+        # backward produces exactly-zero gradients (0 * anchor.sum()), so we must
+        # not call scaler.step(masker_optimizer): Adam would increment its step
+        # counter without accumulating m/v, causing a ~3.16× LR overshoot on the
+        # first real gradient step after warmup ends.
+        _masker_in_warmup_no_train = (
+            _masker is not None
+            and getattr(_masker, "warmup_use_vanilla_multiblock", False)
+            and not getattr(_masker, "warmup_train_masker_on_soft_assignments", False)
+            and epoch < getattr(_masker, "warmup_epochs", 0)
+        )
+
         # ----------------------------------------------------------
         # Masker reset trigger: full wipe — weights, Adam state, LR
         # ----------------------------------------------------------
@@ -231,9 +244,10 @@ def train(
             is_masker_step = masker_step_every == 1 or next_step % masker_step_every == 0
 
             if masker_optimizer is not None:
-                # Separate optimizer path: skip masker step on non-masker steps
+                # Separate optimizer path: skip masker step on non-masker steps,
+                # and also skip during warmup-no-train to prevent Adam phantom steps.
                 scaler.step(optimizer)
-                if is_masker_step:
+                if is_masker_step and not _masker_in_warmup_no_train:
                     scaler.step(masker_optimizer)
             else:
                 # Shared optimizer path: zero masker grads on non-masker steps
