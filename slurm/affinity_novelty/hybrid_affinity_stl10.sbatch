@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-aff-wup-stl10
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_DEEPECHO
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/affinity_novelty/%x_%j.out
 #SBATCH --error=sbatch_logs/affinity_novelty/%x_%j.err
 
@@ -78,6 +78,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.warmup_train_masker_on_soft_assignments=true \
       masking.latent.nctx_min=1 \
       masking.latent.ntgt_min=4 \
-      train.eval_every_epochs=5 \
+      train.eval_every_epochs=1 \
+      train.viz_enabled=true \
+      +train.viz_every_epochs=1 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
