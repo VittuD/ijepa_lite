@@ -51,6 +51,10 @@ class VizCallback(Callback):
         if is_multiblock:
             from ijepa_lite.build import _build_collate_masker
             self._collateMasker = _build_collate_masker(cfg)
+        elif not hasattr(core, "get_viz_encoder"):
+            print("[VizCallback] Model does not expose get_viz_encoder() — disabling.")
+            self._enabled = False
+            return
 
         save_every = int(
             getattr(cfg.train, "save_every",
@@ -184,7 +188,7 @@ class VizCallback(Callback):
             return
         model = bundle["model"]
         core = unwrap_model(model)
-        encoder = core.target_encoder
+        encoder = core.get_viz_encoder()
         masker = core.latent_masker
 
         if masker is None:

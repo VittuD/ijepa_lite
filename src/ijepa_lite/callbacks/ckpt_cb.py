@@ -82,9 +82,12 @@ class CheckpointCallback(Callback):
         # last completed epoch (off-by-one fix).
         state_to_save["next_epoch"] = epoch + 1
 
-        ema_start = float(
-            state.get("_ema_start", float(getattr(cfg.model, "ema_momentum", [0.0])[0]))
+        ema_start = state.get(
+            "_ema_start",
+            float(getattr(cfg.model, "ema_momentum", [0.0])[0]),
         )
+        if ema_start is not None:
+            ema_start = float(ema_start)
 
         save_checkpoint(
             path=path,

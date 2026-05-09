@@ -122,12 +122,12 @@ class InlineEvalCallback(Callback):
 
         icfg = self._cfg_inline
 
-        # Extract target encoder from the live model (EMA, already frozen).
+        # Extract the representation encoder from the live model.
         bundle = state.get("_ckpt_bundle")
         if bundle is None:
             return
         model = bundle["model"]
-        encoder = unwrap_model(model).target_encoder
+        encoder = unwrap_model(model).get_eval_encoder()
 
         # Build a fresh head
         from ijepa_lite.engine.eval_linear import _build_head

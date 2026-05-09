@@ -1,0 +1,16 @@
+# @package loss
+#
+# JEPA token prediction with SIGReg regularization on full-view patch tokens.
+
+kind: smooth_l1
+normalize: false
+
+sigreg:
+  enabled: true
+  weight: 0.05
+  num_slices: 16
+  num_t: 16
+  t_max: 4.0
+  standardize: true
+  eps: 1e-6
+  projection_seed: 0

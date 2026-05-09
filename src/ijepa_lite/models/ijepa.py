@@ -40,7 +40,8 @@ class IJEPAModel(nn.Module):
     Args
     ----
     context_encoder : ViTTokens encoder for the context (online, trained via grad)
-    target_encoder  : ViTTokens encoder for the target (EMA of context, no grad)
+    target_encoder  : ViTTokens encoder for the target path. Required when
+                      ``target_mode="ema"`` and unused when ``target_mode="shared"``.
     predictor       : Predictor module
     loss_fn         : Token-level reconstruction loss
     ema_momentum    : Initial EMA momentum (updated by training loop)
@@ -49,12 +50,18 @@ class IJEPAModel(nn.Module):
     latent_masker   : Optional LatentMasker — when set, masking happens here on GPU.
     token_compressor: Required when latent_masker is set.  Compresses EMA tokens
                       before passing to the latent masker.
+    target_mode     : "ema" (default) or "shared". In shared mode the context
+                      encoder also produces the full-image target bank and the
+                      full-view path keeps gradients.
+    sigreg_loss     : Optional latent regularizer applied to full-view patch
+                      tokens. Expected to return ``(loss, logs)``.
+    sigreg_weight   : Weight applied to ``sigreg_loss`` when present.
     """
 
     def __init__(
         self,
         context_encoder: nn.Module,
-        target_encoder: nn.Module,
+        target_encoder: nn.Module | None,
         predictor: nn.Module,
         loss_fn: nn.Module,
         ema_momentum: float,
@@ -70,6 +77,9 @@ class IJEPAModel(nn.Module):
         ctx_loss_warmup_start: int = 0,
         ctx_loss_warmup_end: int = 0,
         grid_size: int = 0,
+        target_mode: str = "ema",
+        sigreg_loss: nn.Module | None = None,
+        sigreg_weight: float = 0.0,
     ) -> None:
         super().__init__()
 
@@ -80,12 +90,21 @@ class IJEPAModel(nn.Module):
                 "before passing them to the LatentMasker."
             )
 
+        target_mode = str(target_mode).lower()
+        if target_mode not in {"ema", "shared"}:
+            raise ValueError(f"Unsupported target_mode={target_mode!r}. Expected 'ema' or 'shared'.")
+        if target_mode == "ema" and target_encoder is None:
+            raise ValueError("target_encoder is required when target_mode='ema'.")
+
         self.context_encoder = context_encoder
         self.target_encoder = target_encoder
         self.predictor = predictor
         self.loss_fn = loss_fn
         self.ema_momentum = float(ema_momentum)
         self._mask_generator = mask_generator   # fallback only
+        self.target_mode = target_mode
+        self.sigreg_loss = sigreg_loss
+        self.sigreg_weight = float(sigreg_weight)
 
         self.predict_blocks_jointly = predict_blocks_jointly
 
@@ -101,8 +120,21 @@ class IJEPAModel(nn.Module):
         self.latent_masker = latent_masker
         self.token_compressor = token_compressor
 
-        for p in self.target_encoder.parameters():
-            p.requires_grad = False
+        if self.target_encoder is not None:
+            for p in self.target_encoder.parameters():
+                p.requires_grad = False
+
+    @property
+    def has_ema_target(self) -> bool:
+        return self.target_mode == "ema"
+
+    def get_eval_encoder(self) -> nn.Module:
+        if self.target_mode == "shared":
+            return self.context_encoder
+        return self.target_encoder
+
+    def get_viz_encoder(self) -> nn.Module:
+        return self.get_eval_encoder()
 
     # ------------------------------------------------------------------
     # EMA update — called by the training loop after each step
@@ -110,6 +142,8 @@ class IJEPAModel(nn.Module):
 
     @torch.no_grad()
     def update_target(self) -> None:
+        if not self.has_ema_target:
+            return
         ema_update(self.target_encoder, self.context_encoder, self.ema_momentum)
 
     # ------------------------------------------------------------------
@@ -153,10 +187,10 @@ class IJEPAModel(nn.Module):
         #
         # Deterministic path: tgt_tokens_all is produced here as usual.
         # ------------------------------------------------------------------
-        cached_ema_tokens: Optional[torch.Tensor] = None
+        cached_full_tokens: Optional[torch.Tensor] = None
 
         if self.latent_masker is not None:
-            mask_output, cached_ema_tokens = self._resolve_latent_masks(images, epoch=epoch)
+            mask_output, cached_full_tokens = self._resolve_latent_masks(images, epoch=epoch)
         else:
             mask_output = self._resolve_collate_masks(masks, images)
 
@@ -172,19 +206,16 @@ class IJEPAModel(nn.Module):
         d = ctx_tokens.shape[-1]
 
         # ------------------------------------------------------------------
-        # Step 3: Target token bank — reuse cached EMA tokens if available,
-        # otherwise run the target encoder now (deterministic masker path).
-        # Layer norm is applied in both cases.
+        # Step 3: Target token bank — reuse cached full-view tokens if available,
+        # otherwise run the appropriate full-view encoder now. Layer norm is
+        # applied in both cases so target semantics match the current vanilla path.
         # ------------------------------------------------------------------
-        if cached_ema_tokens is not None:
-            with torch.no_grad():
-                tgt_tokens_all = F.layer_norm(
-                    cached_ema_tokens, (cached_ema_tokens.shape[-1],)
-                )
+        if cached_full_tokens is not None:
+            full_tokens = cached_full_tokens
         else:
-            with torch.no_grad():
-                tgt_tokens_all = self.target_encoder(images)   # (B, N, D)
-                tgt_tokens_all = F.layer_norm(tgt_tokens_all, (tgt_tokens_all.shape[-1],))
+            full_tokens = self._encode_full_view_tokens(images)
+
+        tgt_tokens_all = F.layer_norm(full_tokens, (full_tokens.shape[-1],))
 
         # Optional encoder-agreement diagnostic (re-uses already-computed tensors)
         ctx_tokens_all: Optional[torch.Tensor] = None
@@ -237,6 +268,13 @@ class IJEPAModel(nn.Module):
             masker_aux = reconstruction_loss.new_zeros(())
             total_loss = reconstruction_loss
 
+        model_stats: dict[str, float] = {}
+        if self.sigreg_loss is not None and self.sigreg_weight > 0.0:
+            sigreg_val, sigreg_logs = self.sigreg_loss(full_tokens)
+            total_loss = total_loss + self.sigreg_weight * sigreg_val
+            model_stats.update(sigreg_logs)
+            model_stats["sigreg/weight"] = float(self.sigreg_weight)
+
         # ------------------------------------------------------------------
         # Step 5b: Context loss (V-JEPA 2.1-style visible token supervision)
         # ------------------------------------------------------------------
@@ -287,12 +325,19 @@ class IJEPAModel(nn.Module):
             "target": tgt_tokens.detach(),
             "patch_loss": patch_loss.detach(),   # (B, K) — for diagnostics / curriculum
             "mask_stats": mask_stats,
+            "model_stats": model_stats,
             "ctx_loss": ctx_loss_val,
         }
         if compute_agreement:
             out["ctx_tokens_all"] = ctx_tokens_all
             out["tgt_tokens_all"] = tgt_at_ctx
         return out
+
+    def _encode_full_view_tokens(self, images: torch.Tensor) -> torch.Tensor:
+        if self.target_mode == "shared":
+            return self.context_encoder(images)
+        with torch.no_grad():
+            return self.target_encoder(images)
 
     # ------------------------------------------------------------------
     # Private: context loss warmup
@@ -317,14 +362,16 @@ class IJEPAModel(nn.Module):
         self, images: torch.Tensor, epoch: Optional[int] = None
     ) -> tuple[MaskOutput, torch.Tensor]:
         """
-        Run EMA encoder → compress → latent masker.
+        Run full target path → compress → latent masker.
 
-        Returns (mask_output, ema_tokens) so the caller can reuse ema_tokens
-        as tgt_tokens_all without a second encoder forward.  The EMA encoder
+        Returns (mask_output, full_tokens) so the caller can reuse full_tokens
+        as tgt_tokens_all without a second encoder forward. The full target path
         sees the full image regardless of compressor mode — compression is
-        applied to its output, not its input — so ema_tokens is always (B, N, D)
+        applied to its output, not its input — so full_tokens is always (B, N, D)
         and is always valid as the target token bank.
 
+        In the current v1 integration, learned maskers remain tied to the EMA
+        target path; shared-target SIGReg runs only with deterministic maskers.
         The target encoder runs without gradients (frozen / EMA-updated).
         The compressor and latent masker run with gradients so their parameters
         receive signal from both the reconstruction loss (via aux_loss) and any
@@ -332,22 +379,22 @@ class IJEPAModel(nn.Module):
         """
         with torch.no_grad():
             if self.token_compressor.needs_cls:
-                cls_token, ema_tokens = self.target_encoder(images, return_cls=True)
+                cls_token, full_tokens = self.target_encoder(images, return_cls=True)
             else:
                 cls_token = None
-                ema_tokens = self.target_encoder(images)   # (B, N, D)
+                full_tokens = self.target_encoder(images)   # (B, N, D)
 
         # Compressor and latent masker are outside no_grad — grads flow normally.
-        compressed = self.token_compressor(ema_tokens, cls_token=cls_token)  # (B, M, D)
+        compressed = self.token_compressor(full_tokens, cls_token=cls_token)  # (B, M, D)
         forward_sig = inspect.signature(self.latent_masker.forward)
         latent_kwargs = {}
         if "epoch" in forward_sig.parameters:
             latent_kwargs["epoch"] = epoch
         if self.latent_masker.needs_full_tokens:
-            mask_output = self.latent_masker(compressed, ema_full=ema_tokens, **latent_kwargs)
+            mask_output = self.latent_masker(compressed, ema_full=full_tokens, **latent_kwargs)
         else:
             mask_output = self.latent_masker(compressed, **latent_kwargs)
-        return mask_output, ema_tokens
+        return mask_output, full_tokens
 
     def _resolve_collate_masks(
         self,

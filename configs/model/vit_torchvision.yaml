@@ -6,5 +6,6 @@ num_heads: 6
 depth: 8
 
 ema_momentum: [0.996, 0.996]   # [start, end]; set end > start for linear warmup to 1.0
+target_mode: ema               # ema | shared
 remove_head: true
 pos_embed_kind: learned        # "learned" or "sincos" — applies to encoder, predictor, and maskers

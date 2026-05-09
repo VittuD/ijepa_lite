@@ -18,6 +18,7 @@ from ijepa_lite.data.transforms import (
 )
 from ijepa_lite.engine.checkpoint import load_checkpoint_if_available, load_model_weights
 from ijepa_lite.losses.rd_loss import RateDistSurpriseLoss
+from ijepa_lite.losses.sigreg import SIGRegLoss
 from ijepa_lite.losses.vanilla import VanillaTokenLoss
 from ijepa_lite.masking.base import CollateMasker, LatentMasker
 from ijepa_lite.masking.block_mask import BlockMaskGenerator
@@ -322,14 +323,37 @@ def _build_loss(cfg) -> VanillaTokenLoss:
     return VanillaTokenLoss(normalize=normalize, kind=kind)
 
 
+def _build_sigreg_loss(cfg) -> SIGRegLoss | None:
+    sigreg_cfg = getattr(getattr(cfg, "loss", None), "sigreg", None)
+    if sigreg_cfg is None:
+        return None
+    if not bool(getattr(sigreg_cfg, "enabled", False)):
+        return None
+
+    return SIGRegLoss(
+        num_slices=int(getattr(sigreg_cfg, "num_slices", 16)),
+        num_t=int(getattr(sigreg_cfg, "num_t", 16)),
+        t_max=float(getattr(sigreg_cfg, "t_max", 4.0)),
+        standardize=bool(getattr(sigreg_cfg, "standardize", True)),
+        eps=float(getattr(sigreg_cfg, "eps", 1e-6)),
+        projection_seed=int(getattr(sigreg_cfg, "projection_seed", 0)),
+    )
+
+
 # ------------------------------------------------------------------
 # Pretrain model
 # ------------------------------------------------------------------
 
 def build_pretrain_model(cfg) -> torch.nn.Module:
     context = build_torchvision_vit_tokens(cfg.model)
-    target = build_torchvision_vit_tokens(cfg.model)
-    target.load_state_dict(context.state_dict(), strict=True)
+    target_mode = str(getattr(cfg.model, "target_mode", "ema")).lower()
+    if target_mode == "ema":
+        target = build_torchvision_vit_tokens(cfg.model)
+        target.load_state_dict(context.state_dict(), strict=True)
+    elif target_mode == "shared":
+        target = None
+    else:
+        raise ValueError(f"Unsupported model.target_mode={target_mode!r}")
 
     num_patches = (int(cfg.model.image_size) // int(cfg.model.patch_size)) ** 2
 
@@ -348,10 +372,26 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
 
     loss_fn = _build_loss(cfg)
 
-    ema_m = float(cfg.model.ema_momentum[0])
+    ema_m = float(getattr(cfg.model, "ema_momentum", [0.0, 0.0])[0])
 
     compressor = _build_compressor(cfg)
     latent_masker = _build_latent_masker(cfg, compressor)
+    if target_mode == "shared" and latent_masker is not None:
+        raise ValueError(
+            "target_mode='shared' is not yet supported with masking.latent.*. "
+            "Use deterministic masking for the initial SIGReg integration."
+        )
+
+    sigreg_loss = _build_sigreg_loss(cfg)
+    sigreg_weight = float(getattr(getattr(cfg.loss, "sigreg", None), "weight", 0.0))
+    if target_mode != "shared" and sigreg_loss is not None and sigreg_weight > 0.0:
+        raise ValueError(
+            "loss.sigreg is currently supported only with model.target_mode='shared'."
+        )
+    if target_mode == "shared" and (sigreg_loss is None or sigreg_weight <= 0.0):
+        raise ValueError(
+            "target_mode='shared' requires loss.sigreg.enabled=true and loss.sigreg.weight > 0."
+        )
 
     # Context loss config (V-JEPA 2.1-style visible token supervision).
     ctx_cfg = getattr(cfg, "ctx_loss", None)
@@ -375,6 +415,9 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         token_compressor=compressor,
         predict_blocks_jointly=bool(getattr(cfg.model, "predict_blocks_jointly", True)),
         grid_size=int(cfg.model.image_size) // int(cfg.model.patch_size),
+        target_mode=target_mode,
+        sigreg_loss=sigreg_loss,
+        sigreg_weight=sigreg_weight,
         **ctx_kw,
     )
 
@@ -603,12 +646,21 @@ def build_linear_probe_model(cfg) -> torch.nn.Module:
             else payload
         )
 
-        prefer = str(getattr(cfg.task, "encoder", "target")).lower()
-        prefix = (
-            "target_encoder." if prefer in ("target", "ema") else "context_encoder."
-        )
+        prefer = str(getattr(cfg.task, "encoder", "auto")).lower()
+        if prefer == "auto":
+            prefixes = ("target_encoder.", "context_encoder.", "encoder.")
+        elif prefer in ("target", "ema"):
+            prefixes = ("target_encoder.", "context_encoder.", "encoder.")
+        elif prefer in ("context", "shared"):
+            prefixes = ("context_encoder.", "encoder.", "target_encoder.")
+        else:
+            raise ValueError(f"Unknown task.encoder={prefer!r}")
 
-        enc_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+        enc_sd = {}
+        for prefix in prefixes:
+            enc_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+            if enc_sd:
+                break
         if not enc_sd:
             enc_sd = sd
 

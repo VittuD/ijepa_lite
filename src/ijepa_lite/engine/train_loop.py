@@ -69,15 +69,15 @@ def train(
     if resumed_state and resumed_state.get("ema_start") is not None:
         ema_start = float(resumed_state["ema_start"])
     else:
-        ema_start = float(cfg.model.ema_momentum[0])
+        ema_start = float(getattr(cfg.model, "ema_momentum", [0.0, 0.0])[0])
 
-    ema_end = float(cfg.model.ema_momentum[1])
+    ema_end = float(getattr(cfg.model, "ema_momentum", [ema_start, ema_start])[1])
 
     # ------------------------------------------------------------------
     # Provide runtime objects to callbacks via PRIVATE state keys.
     # These keys are intentionally filtered out by CheckpointCallback when saving.
     # ------------------------------------------------------------------
-    state["_ema_start"] = float(ema_start)
+    state["_ema_start"] = float(ema_start) if getattr(core := unwrap_model(model), "has_ema_target", False) else None
     state["_ckpt_bundle"] = {
         "model": model,
         "optimizer": optimizer,
@@ -87,7 +87,6 @@ def train(
         "masker_scheduler": masker_scheduler,
     }
 
-    core = unwrap_model(model)
     callbacks.on_run_start(cfg=cfg, state=state, model=core)
     # Rank-0 does more work in on_run_start (wandb.init, dataset loads, etc.).
     # Without this barrier the other ranks can reach loss.backward() → DDP
@@ -279,12 +278,13 @@ def train(
             # ----------------------------------------------------------
             # EMA linear schedule + target encoder update
             # ----------------------------------------------------------
-            core.ema_momentum = _linear_ema_momentum(
-                ema_start, ema_end, state["global_step"], total_steps
-            )
-            core.update_target()
-            if _masker is not None and hasattr(_masker, "set_ema_decay"):
-                _masker.set_ema_decay(core.ema_momentum)
+            if core.has_ema_target:
+                core.ema_momentum = _linear_ema_momentum(
+                    ema_start, ema_end, state["global_step"], total_steps
+                )
+                core.update_target()
+                if _masker is not None and hasattr(_masker, "set_ema_decay"):
+                    _masker.set_ema_decay(core.ema_momentum)
             if _masker is not None and hasattr(_masker, "set_step"):
                 _masker.set_step(state["global_step"], total_steps)
 
@@ -325,6 +325,8 @@ def train(
                         extra[k] = v  # numpy array — passed through to WandbCallback
                     else:
                         extra[k] = float(v)
+                for k, v in out.get("model_stats", {}).items():
+                    extra[k] = float(v)
 
                 if gnorm is not None:
                     extra["train/grad_norm"] = gnorm
@@ -334,10 +336,11 @@ def train(
                     extra["train/masker_grad_norm"] = masker_gnorm
 
                 if is_rank0():
-                    extra.update(
-                        ema_param_metrics(core.target_encoder, core.context_encoder)
-                    )
-                    extra["ema/momentum"] = float(core.ema_momentum)
+                    if core.has_ema_target:
+                        extra.update(
+                            ema_param_metrics(core.target_encoder, core.context_encoder)
+                        )
+                        extra["ema/momentum"] = float(core.ema_momentum)
 
                     if _do_wd_sched:
                         extra["train/weight_decay"] = float(

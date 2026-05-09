@@ -3,10 +3,13 @@ name: linear_probe
 # Path to a pretraining checkpoint produced by this repo (checkpoints/last.pt in rank0 dir)
 pretrained_ckpt: null
 
-# Which encoder weights to use from the JEPA checkpoint
-# - context: online encoder
-# - target: EMA encoder
-encoder: target
+# Which encoder weights to use from the pretrain checkpoint
+# - auto: prefer EMA target for vanilla checkpoints, otherwise fall back to the
+#   shared/context encoder path used by SIGReg checkpoints
+# - context: online/shared encoder
+# - target: EMA encoder when present
+# - shared: alias for the shared/context encoder path
+encoder: auto
 
 # Feature pooling from patch tokens
 pool: mean   # mean | cls (cls not available in current vit wrapper)
