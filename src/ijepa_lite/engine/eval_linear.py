@@ -48,6 +48,7 @@ def _build_head(embed_dim: int, num_classes: int, cfg_head) -> nn.Module:
         type:       "linear" | "mlp"   (default: "linear")
         hidden_dim: int                (default: embed_dim, only for mlp)
         num_layers: int                (default: 1, only for mlp — number of hidden layers)
+        dropout:    float              (default: 0.0, only for mlp)
     """
     head_type = str(getattr(cfg_head, "type", "linear")).lower() if cfg_head else "linear"
 
@@ -57,6 +58,7 @@ def _build_head(embed_dim: int, num_classes: int, cfg_head) -> nn.Module:
     if head_type == "mlp":
         hidden_dim = int(getattr(cfg_head, "hidden_dim", embed_dim))
         num_layers = int(getattr(cfg_head, "num_layers", 1))
+        dropout = float(getattr(cfg_head, "dropout", 0.0))
 
         layers: list[nn.Module] = []
         in_dim = embed_dim
@@ -66,6 +68,8 @@ def _build_head(embed_dim: int, num_classes: int, cfg_head) -> nn.Module:
                 nn.BatchNorm1d(hidden_dim),
                 nn.ReLU(inplace=True),
             ])
+            if dropout > 0.0:
+                layers.append(nn.Dropout(p=dropout))
             in_dim = hidden_dim
         layers.append(nn.Linear(in_dim, num_classes))
         return nn.Sequential(*layers)
@@ -225,6 +229,10 @@ def linear_probe_eval(
     # ------------------------------------------------------------------
     state = {"epoch": 0, "global_step": 0, "best_acc1": 0.0}
     log_every = int(getattr(cfg.train, "log_every", 50))
+    early_stop_patience = int(getattr(cfg.train, "early_stop_patience", 0))
+    early_stop_min_epochs = int(getattr(cfg.train, "early_stop_min_epochs", 0))
+    early_stop_min_delta = float(getattr(cfg.train, "early_stop_min_delta", 0.0))
+    no_improve_epochs = 0
 
     callbacks.on_run_start(cfg=cfg, state=state, model=unwrap_model(model))
 
@@ -302,6 +310,7 @@ def linear_probe_eval(
 
         val_loss = (val_loss_sum / val_total.clamp(min=1.0)).item()
         val_acc1 = (val_correct / val_total.clamp(min=1.0)).item()
+        improved = val_acc1 > float(state["best_acc1"]) + early_stop_min_delta
 
         if is_rank0():
             callbacks.on_epoch_end(
@@ -326,11 +335,33 @@ def linear_probe_eval(
                 "epoch": epoch,
             }
 
-            if val_acc1 > float(state["best_acc1"]):
+            if improved:
                 state["best_acc1"] = float(val_acc1)
+                no_improve_epochs = 0
                 torch.save(payload, os.path.join(ckpt_dir, "linear_probe_best.pt"))
+            else:
+                no_improve_epochs += 1
 
             torch.save(payload, os.path.join(ckpt_dir, "linear_probe_last.pt"))
+
+        should_stop = (
+            early_stop_patience > 0
+            and (epoch + 1) >= early_stop_min_epochs
+            and no_improve_epochs >= early_stop_patience
+        )
+        stop_tensor = torch.tensor(
+            1 if should_stop else 0,
+            device=device,
+            dtype=torch.long,
+        )
+        stop_tensor = all_reduce_sum(stop_tensor)
+        if stop_tensor.item() > 0:
+            if is_rank0():
+                print(
+                    "[linear_probe_eval] early stopping triggered at "
+                    f"epoch={epoch} after {no_improve_epochs} non-improving epochs."
+                )
+            break
 
     if is_rank0():
         callbacks.on_run_end(cfg=cfg, state=state)

@@ -1,13 +1,13 @@
 # @package _global_
 #
-# VOC semantic-segmentation probe for the IN1K 96x96 / ps8 vanilla-multiblock
-# checkpoint. Uses the same frozen-encoder MLP head shape as the downstream
-# classification probe, applied independently to each patch token.
+# Early-stopped downstream MLP probe for the IN1K 96x96 / ps8
+# vanilla-multiblock checkpoint. This is the reduced-capacity, regularized
+# follow-up to the 500-epoch probe sweep.
 
 defaults:
-  - /task: segmentation_probe
+  - /task: linear_probe
   - /model: vit_torchvision
-  - /data: vocseg
+  - /data: food101
   - /train: eval_linear
   - _self_
 
@@ -23,23 +23,26 @@ model:
 
 data:
   root: ${oc.env:FAST,/scratch}/datasets/
-  batch_size: 128
+  batch_size: 256
   num_workers: 4
-  download: true
+  download: false
 
 task:
   head:
     type: mlp
-    hidden_dim: 384
+    hidden_dim: 192
     num_layers: 1
+    dropout: 0.2
   sched:
     name: step
     step_size: 40
     gamma: 0.1
   pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
-  ignore_index: 255
 
 train:
   epochs: 100
   lr: 0.1
-  weight_decay: 0.0
+  weight_decay: 0.001
+  early_stop_patience: 12
+  early_stop_min_epochs: 20
+  early_stop_min_delta: 0.0

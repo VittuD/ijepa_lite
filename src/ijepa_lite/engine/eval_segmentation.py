@@ -154,6 +154,10 @@ def segmentation_probe_eval(
 
     state = {"epoch": 0, "global_step": 0, "best_miou": 0.0}
     log_every = int(getattr(cfg.train, "log_every", 50))
+    early_stop_patience = int(getattr(cfg.train, "early_stop_patience", 0))
+    early_stop_min_epochs = int(getattr(cfg.train, "early_stop_min_epochs", 0))
+    early_stop_min_delta = float(getattr(cfg.train, "early_stop_min_delta", 0.0))
+    no_improve_epochs = 0
 
     callbacks.on_run_start(cfg=cfg, state=state, model=unwrap_model(model))
 
@@ -225,6 +229,7 @@ def segmentation_probe_eval(
 
         val_loss = (val_loss_sum / val_items.clamp(min=1)).item()
         val_miou, val_pixel_acc = _miou_and_pixel_acc(val_conf)
+        improved = val_miou > float(state["best_miou"]) + early_stop_min_delta
 
         if is_rank0():
             callbacks.on_epoch_end(
@@ -251,11 +256,33 @@ def segmentation_probe_eval(
                 "epoch": epoch,
             }
 
-            if val_miou > float(state["best_miou"]):
+            if improved:
                 state["best_miou"] = float(val_miou)
+                no_improve_epochs = 0
                 torch.save(payload, os.path.join(ckpt_dir, "segmentation_probe_best.pt"))
+            else:
+                no_improve_epochs += 1
 
             torch.save(payload, os.path.join(ckpt_dir, "segmentation_probe_last.pt"))
+
+        should_stop = (
+            early_stop_patience > 0
+            and (epoch + 1) >= early_stop_min_epochs
+            and no_improve_epochs >= early_stop_patience
+        )
+        stop_tensor = torch.tensor(
+            1 if should_stop else 0,
+            device=device,
+            dtype=torch.long,
+        )
+        stop_tensor = all_reduce_sum(stop_tensor)
+        if stop_tensor.item() > 0:
+            if is_rank0():
+                print(
+                    "[segmentation_probe_eval] early stopping triggered at "
+                    f"epoch={epoch} after {no_improve_epochs} non-improving epochs."
+                )
+            break
 
     if is_rank0():
         callbacks.on_run_end(cfg=cfg, state=state)
