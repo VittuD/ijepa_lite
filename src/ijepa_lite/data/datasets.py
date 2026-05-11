@@ -86,6 +86,8 @@ class HFClassificationDataset(Dataset):
         sample = self.ds[idx]
         img = sample[self.image_field]
         target = int(sample[self.label_field])
+        if hasattr(img, "convert"):
+            img = img.convert("RGB")
         if self.transform is not None:
             img = self.transform(img)
         return img, target
