@@ -59,3 +59,14 @@ class SupervisedCollate:
         images = torch.stack(imgs, dim=0)
         y = torch.tensor(labels, dtype=torch.long)
         return {"images": images, "labels": y}
+
+
+class SegmentationCollate:
+    def __call__(self, batch: List[Any]) -> Dict[str, torch.Tensor]:
+        imgs, masks = [], []
+        for item in batch:
+            imgs.append(item[0])
+            masks.append(item[1])
+        images = torch.stack(imgs, dim=0)
+        seg_masks = torch.stack(masks, dim=0).long()
+        return {"images": images, "masks": seg_masks}

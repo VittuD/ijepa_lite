@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import random
+
+import numpy as np
+import torch
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms import functional as TF
 
 
 def build_pretrain_transform(cfg):
@@ -39,3 +45,64 @@ def build_linear_probe_transforms(cfg):
         ]
     )
     return train_tfm, val_tfm
+
+
+class SegmentationPairTransform:
+    def __init__(self, image_size: int, train: bool) -> None:
+        self.image_size = int(image_size)
+        self.train = bool(train)
+        self.mean = (0.485, 0.456, 0.406)
+        self.std = (0.229, 0.224, 0.225)
+
+    def __call__(self, image, mask):
+        if self.train:
+            i, j, h, w = transforms.RandomResizedCrop.get_params(
+                image, scale=(0.3, 1.0), ratio=(3 / 4, 4 / 3)
+            )
+            image = TF.resized_crop(
+                image,
+                i,
+                j,
+                h,
+                w,
+                size=[self.image_size, self.image_size],
+                interpolation=InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            mask = TF.resized_crop(
+                mask,
+                i,
+                j,
+                h,
+                w,
+                size=[self.image_size, self.image_size],
+                interpolation=InterpolationMode.NEAREST,
+            )
+            if random.random() < 0.5:
+                image = TF.hflip(image)
+                mask = TF.hflip(mask)
+        else:
+            image = TF.resize(
+                image,
+                [self.image_size, self.image_size],
+                interpolation=InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            mask = TF.resize(
+                mask,
+                [self.image_size, self.image_size],
+                interpolation=InterpolationMode.NEAREST,
+            )
+
+        image = TF.to_tensor(image)
+        image = TF.normalize(image, mean=self.mean, std=self.std)
+        mask = torch.from_numpy(np.array(mask, dtype=np.int64))
+        return image, mask
+
+
+def build_segmentation_transforms(cfg):
+    image_size = int(cfg.model.image_size)
+    return (
+        SegmentationPairTransform(image_size=image_size, train=True),
+        SegmentationPairTransform(image_size=image_size, train=False),
+    )

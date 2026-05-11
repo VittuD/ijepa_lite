@@ -1,0 +1,14 @@
+name: vocseg
+root: data
+
+year: "2012"
+train_split: train
+val_split: val
+
+download: true
+
+batch_size: 128
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+persistent_workers: true

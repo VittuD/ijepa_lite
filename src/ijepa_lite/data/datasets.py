@@ -37,6 +37,60 @@ class HFImageNet128(Dataset):
         return img, y
 
 
+class HFClassificationDataset(Dataset):
+    """
+    Thin wrapper for Hugging Face image classification datasets.
+
+    Supports either:
+    - loading directly from a Hub dataset id, or
+    - loading from a local dataset-repo snapshot copied into the shared root.
+    """
+
+    def __init__(
+        self,
+        split: str,
+        transform=None,
+        repo_id: Optional[str] = None,
+        local_dir: Optional[str] = None,
+        subset: Optional[str] = None,
+        image_field: str = "image",
+        label_field: str = "label",
+        cache_dir: Optional[str] = None,
+    ) -> None:
+        local_path = Path(local_dir) if local_dir is not None else None
+        source = str(local_path) if local_path is not None and local_path.exists() else repo_id
+        if source is None:
+            raise ValueError(
+                "HFClassificationDataset requires either an existing local_dir or a repo_id."
+            )
+
+        kwargs = {}
+        if subset is not None:
+            kwargs["name"] = subset
+        if source == repo_id and cache_dir is not None:
+            kwargs["cache_dir"] = cache_dir
+
+        self.ds = load_dataset(source, split=split, **kwargs)
+        self.transform = transform
+        self.image_field = image_field
+        self.label_field = label_field
+
+        label_feature = self.ds.features[label_field]
+        self.classes = list(getattr(label_feature, "names", []))
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        sample = self.ds[idx]
+        img = sample[self.image_field]
+        target = int(sample[self.label_field])
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, target
+
+
 class SUN397Split(Dataset):
     """
     Deterministic train/val/test split wrapper around torchvision SUN397.
@@ -315,6 +369,22 @@ def _build_dataset_local(cfg, split: str, transform):
         )
 
     if name == "sun397":
+        backend = str(getattr(cfg, "backend", "hf")).lower()
+        if backend == "hf":
+            return HFClassificationDataset(
+                split=split,
+                transform=transform,
+                repo_id=str(getattr(cfg, "hf_repo_id", "tanganke/sun397")),
+                local_dir=str(getattr(cfg, "hf_local_dir", f"{root}/sun397_hf")),
+                subset=getattr(cfg, "hf_subset", None),
+                image_field=str(getattr(cfg, "hf_image_field", "image")),
+                label_field=str(getattr(cfg, "hf_label_field", "label")),
+                cache_dir=root,
+            )
+        if backend != "torchvision":
+            raise ValueError(
+                f"Unknown sun397 backend='{backend}'. Expected: hf|torchvision."
+            )
         return SUN397Split(
             root=root,
             split=split,
@@ -325,6 +395,22 @@ def _build_dataset_local(cfg, split: str, transform):
         )
 
     if name == "fairface":
+        backend = str(getattr(cfg, "backend", "hf")).lower()
+        if backend == "hf":
+            return HFClassificationDataset(
+                split=split,
+                transform=transform,
+                repo_id=str(getattr(cfg, "hf_repo_id", "HuggingFaceM4/FairFace")),
+                local_dir=str(getattr(cfg, "hf_local_dir", f"{root}/fairface_hf")),
+                subset=str(getattr(cfg, "hf_subset", "0.25")),
+                image_field=str(getattr(cfg, "hf_image_field", "image")),
+                label_field=str(getattr(cfg, "target_attr", "race")),
+                cache_dir=root,
+            )
+        if backend != "local_csv":
+            raise ValueError(
+                f"Unknown fairface backend='{backend}'. Expected: hf|local_csv."
+            )
         return FairFaceDataset(
             root=root,
             split=split,
@@ -398,6 +484,15 @@ def _maybe_download_dataset(cfg, split: str, transform) -> None:
         )
         return
 
+    if name == "vocseg":
+        tv_datasets.VOCSegmentation(
+            root=root,
+            year=str(getattr(cfg, "year", "2012")),
+            image_set=str(split),
+            download=True,
+        )
+        return
+
     if name == "dtd":
         tv_datasets.DTD(
             root=root,
@@ -409,6 +504,8 @@ def _maybe_download_dataset(cfg, split: str, transform) -> None:
         return
 
     if name == "sun397":
+        if str(getattr(cfg, "backend", "hf")).lower() == "hf":
+            return
         tv_datasets.SUN397(root=root, download=True)
         return
 
@@ -428,3 +525,31 @@ def build_dataset(cfg, split: str, transform):
 
     barrier()
     return _build_dataset_local(cfg=cfg, split=split, transform=transform)
+
+
+def build_segmentation_dataset(cfg, split: str, transforms):
+    name = str(cfg.name).lower()
+    root = str(cfg.root)
+    download = bool(getattr(cfg, "download", True))
+
+    if name != "vocseg":
+        raise ValueError(
+            f"Unknown segmentation dataset name={name}. Add it to build_segmentation_dataset()."
+        )
+
+    if split not in ("train", "trainval", "val"):
+        raise ValueError(
+            f"Unknown split='{split}' for vocseg. Expected: train|trainval|val."
+        )
+
+    if download and is_rank0():
+        _maybe_download_dataset(cfg=cfg, split=split, transform=None)
+
+    barrier()
+    return tv_datasets.VOCSegmentation(
+        root=root,
+        year=str(getattr(cfg, "year", "2012")),
+        image_set=str(split),
+        download=False,
+        transforms=transforms,
+    )

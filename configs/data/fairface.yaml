@@ -1,13 +1,18 @@
 name: fairface
 root: data
 
+backend: hf
+hf_repo_id: HuggingFaceM4/FairFace
+hf_local_dir: ${.root}/fairface_hf
+hf_subset: "0.25"
+hf_image_field: image
+
 train_split: train
-val_split: val
+val_split: validation
 
 target_attr: race
-# Assumes the extracted FairFace files live under the same dataset root used for
-# STL10/DTD/Food101, e.g. data/fairface_label_train.csv and
-# data/fairface-img-margin025-trainval/.
+# Default path assumes a local Hugging Face dataset snapshot under the shared
+# dataset root, e.g. data/fairface_hf/ copied over from a local machine.
 image_dirname: fairface-img-margin025-trainval
 train_csv: fairface_label_train.csv
 val_csv: fairface_label_val.csv
