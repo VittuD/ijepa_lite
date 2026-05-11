@@ -1,0 +1,44 @@
+# @package _global_
+#
+# Linear-probe downstream eval for the IN1K 96x96 / ps8 vanilla-multiblock
+# checkpoint. The dataset config is intended to be swapped at launch time
+# (e.g. data=cifar100, data=dtd, data=sun397, data=food101, data=fairface).
+
+defaults:
+  - /task: linear_probe
+  - /model: vit_torchvision
+  - /data: food101
+  - /train: eval_linear
+  - _self_
+
+compile: true
+
+model:
+  arch: vit_small_16
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+
+data:
+  root: ${oc.env:FAST,/scratch}/datasets/
+  batch_size: 256
+  num_workers: 4
+  download: false
+
+task:
+  head:
+    type: mlp
+    hidden_dim: 384
+    num_layers: 1
+  sched:
+    name: step
+    step_size: 150
+    gamma: 0.1
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
+
+train:
+  epochs: 500
+  lr: 0.1
+  weight_decay: 0.0

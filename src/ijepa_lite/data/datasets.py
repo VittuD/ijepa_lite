@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import csv
+import random
+from pathlib import Path
 from typing import Optional
 
 from datasets import load_dataset
+from PIL import Image
 from torch.utils.data import ConcatDataset, Dataset
 from torchvision import datasets as tv_datasets
 
@@ -33,10 +37,318 @@ class HFImageNet128(Dataset):
         return img, y
 
 
-def _maybe_download_dataset(name: str, root: str, split: str, transform) -> None:
+class SUN397Split(Dataset):
+    """
+    Deterministic train/val/test split wrapper around torchvision SUN397.
+
+    torchvision exposes the full SUN397 dataset but not a built-in probe split,
+    so we keep loading/parsing in torchvision and only add a reproducible split
+    partition here.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform=None,
+        train_ratio: float = 0.8,
+        val_ratio: float = 0.1,
+        split_seed: int = 0,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for sun397. Expected: train|val|test."
+            )
+        if train_ratio <= 0.0 or val_ratio < 0.0 or (train_ratio + val_ratio) >= 1.0:
+            raise ValueError(
+                "sun397 requires 0 < train_ratio, 0 <= val_ratio, "
+                "and train_ratio + val_ratio < 1."
+            )
+
+        base = tv_datasets.SUN397(root=root, download=False)
+        pairs = sorted(
+            zip(base._image_files, base._labels),
+            key=lambda pair: str(pair[0]),
+        )
+
+        indices = list(range(len(pairs)))
+        random.Random(split_seed).shuffle(indices)
+
+        n_total = len(indices)
+        n_train = int(n_total * train_ratio)
+        n_val = int(n_total * val_ratio)
+
+        if split == "train":
+            selected = indices[:n_train]
+        elif split == "val":
+            selected = indices[n_train : n_train + n_val]
+        else:
+            selected = indices[n_train + n_val :]
+
+        self.samples = [pairs[i] for i in selected]
+        self.transform = transform
+        self.loader = base.loader
+        self.classes = list(base.classes)
+        self.class_to_idx = dict(base.class_to_idx)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, target = self.samples[idx]
+        img = self.loader(path)
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, int(target)
+
+
+class FairFaceDataset(Dataset):
+    """
+    CSV-backed FairFace loader for downstream eval.
+
+    FairFace is distributed as image folders plus label CSVs rather than a
+    torchvision dataset class, so we implement the thin wrapper here.
+    """
+
+    _CANONICAL_CLASSES = {
+        "gender": ["Male", "Female"],
+        "race": [
+            "White",
+            "Black",
+            "Latino_Hispanic",
+            "East Asian",
+            "Southeast Asian",
+            "Indian",
+            "Middle Eastern",
+        ],
+        "age": [
+            "0-2",
+            "3-9",
+            "10-19",
+            "20-29",
+            "30-39",
+            "40-49",
+            "50-59",
+            "60-69",
+            "70+",
+        ],
+    }
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform=None,
+        target_attr: str = "race",
+        image_dirname: str = "fairface-img-margin025-trainval",
+        train_csv: str = "fairface_label_train.csv",
+        val_csv: str = "fairface_label_val.csv",
+        csv_dir: Optional[str] = None,
+        image_root: Optional[str] = None,
+    ) -> None:
+        target_attr = str(target_attr)
+        if split not in ("train", "val"):
+            raise ValueError(
+                f"Unknown split='{split}' for fairface. Expected: train|val."
+            )
+        if target_attr not in self._CANONICAL_CLASSES:
+            raise ValueError(
+                "fairface target_attr must be one of: "
+                + ", ".join(sorted(self._CANONICAL_CLASSES))
+            )
+
+        root_path = Path(root)
+        csv_root = Path(csv_dir) if csv_dir is not None else root_path
+        images_root = (
+            Path(image_root) if image_root is not None else root_path / image_dirname
+        )
+        csv_name = train_csv if split == "train" else val_csv
+        csv_path = csv_root / csv_name
+
+        self.transform = transform
+        self.target_attr = target_attr
+        self.classes = list(self._CANONICAL_CLASSES[target_attr])
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+        self.samples = []
+
+        with csv_path.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rel_path = row.get("file")
+                if not rel_path:
+                    raise ValueError(
+                        f"fairface csv '{csv_path}' is missing the required 'file' column."
+                    )
+                raw_label = row.get(target_attr)
+                if raw_label is None:
+                    raise ValueError(
+                        f"fairface csv '{csv_path}' is missing the required "
+                        f"'{target_attr}' column."
+                    )
+                label = self._canonicalize_label(target_attr, raw_label)
+                self.samples.append(
+                    (images_root / rel_path, self.class_to_idx[label])
+                )
+
+    @staticmethod
+    def _canonicalize_label(target_attr: str, raw_label: str) -> str:
+        canonical = {
+            label.lower().replace("_", " ").strip(): label
+            for label in FairFaceDataset._CANONICAL_CLASSES[target_attr]
+        }
+        key = raw_label.lower().replace("_", " ").strip()
+        if key not in canonical:
+            raise ValueError(
+                f"Unknown fairface {target_attr} label '{raw_label}'. "
+                f"Expected one of: {FairFaceDataset._CANONICAL_CLASSES[target_attr]}"
+            )
+        return canonical[key]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, target = self.samples[idx]
+        img = Image.open(path).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, target
+
+
+def _build_dataset_local(cfg, split: str, transform):
+    name = str(cfg.name).lower()
+    root = str(cfg.root)
+
+    if name == "cifar10":
+        if split not in ("train", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for cifar10. Expected: train|test."
+            )
+        return tv_datasets.CIFAR10(
+            root=root,
+            train=(split == "train"),
+            download=False,
+            transform=transform,
+        )
+
+    if name == "cifar100":
+        if split not in ("train", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for cifar100. Expected: train|test."
+            )
+        return tv_datasets.CIFAR100(
+            root=root,
+            train=(split == "train"),
+            download=False,
+            transform=transform,
+        )
+
+    if name == "imagenet":
+        if split not in ("train", "val"):
+            raise ValueError(
+                f"Unknown split='{split}' for imagenet. Expected: train|val."
+            )
+        leaf = "train" if split == "train" else "val"
+        return tv_datasets.ImageFolder(root=f"{root}/{leaf}", transform=transform)
+
+    if name == "stl10":
+        if split not in ("train", "test", "unlabeled", "train+unlabeled"):
+            raise ValueError(
+                "Unknown split='{split}' for stl10. Expected: "
+                "train|test|unlabeled|train+unlabeled.".format(split=split)
+            )
+        if split == "train+unlabeled":
+            return ConcatDataset(
+                [
+                    tv_datasets.STL10(
+                        root=root,
+                        split="train",
+                        download=False,
+                        transform=transform,
+                    ),
+                    tv_datasets.STL10(
+                        root=root,
+                        split="unlabeled",
+                        download=False,
+                        transform=transform,
+                    ),
+                ]
+            )
+        return tv_datasets.STL10(
+            root=root,
+            split=split,
+            download=False,
+            transform=transform,
+        )
+
+    if name == "imagenet_128":
+        if split not in ("train", "validation", "test"):
+            raise ValueError(
+                "Unknown split='{split}' for imagenet_128. Expected: "
+                "train|validation|test.".format(split=split)
+            )
+        return HFImageNet128(split=split, transform=transform, cache_dir=root)
+
+    if name == "food101":
+        if split not in ("train", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for food101. Expected: train|test."
+            )
+        return tv_datasets.Food101(
+            root=root,
+            split=split,
+            download=False,
+            transform=transform,
+        )
+
+    if name == "dtd":
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for dtd. Expected: train|val|test."
+            )
+        return tv_datasets.DTD(
+            root=root,
+            split=split,
+            partition=int(getattr(cfg, "partition", 1)),
+            download=False,
+            transform=transform,
+        )
+
+    if name == "sun397":
+        return SUN397Split(
+            root=root,
+            split=split,
+            transform=transform,
+            train_ratio=float(getattr(cfg, "train_ratio", 0.8)),
+            val_ratio=float(getattr(cfg, "val_ratio", 0.1)),
+            split_seed=int(getattr(cfg, "split_seed", 0)),
+        )
+
+    if name == "fairface":
+        return FairFaceDataset(
+            root=root,
+            split=split,
+            transform=transform,
+            target_attr=str(getattr(cfg, "target_attr", "race")),
+            image_dirname=str(
+                getattr(cfg, "image_dirname", "fairface-img-margin025-trainval")
+            ),
+            train_csv=str(getattr(cfg, "train_csv", "fairface_label_train.csv")),
+            val_csv=str(getattr(cfg, "val_csv", "fairface_label_val.csv")),
+            csv_dir=getattr(cfg, "csv_dir", None),
+            image_root=getattr(cfg, "image_root", None),
+        )
+
+    raise ValueError(f"Unknown dataset name={name}")
+
+
+def _maybe_download_dataset(cfg, split: str, transform) -> None:
     """
     Ensure dataset files exist on disk (rank0 only).
     """
+    name = str(cfg.name).lower()
+    root = str(cfg.root)
+
     if name == "cifar10":
         tv_datasets.CIFAR10(
             root=root,
@@ -78,74 +390,41 @@ def _maybe_download_dataset(name: str, root: str, split: str, transform) -> None
         return
 
     if name == "food101":
-        tv_datasets.Food101(root=root, split=split, download=True, transform=transform)
+        tv_datasets.Food101(
+            root=root,
+            split=split,
+            download=True,
+            transform=transform,
+        )
+        return
+
+    if name == "dtd":
+        tv_datasets.DTD(
+            root=root,
+            split=split,
+            partition=int(getattr(cfg, "partition", 1)),
+            download=True,
+            transform=transform,
+        )
+        return
+
+    if name == "sun397":
+        tv_datasets.SUN397(root=root, download=True)
+        return
+
+    if name == "fairface":
+        # No built-in download path; user should provide the extracted files.
         return
 
     raise ValueError(f"Unknown dataset name={name}")
 
 
 def build_dataset(cfg, split: str, transform):
-    name = str(cfg.name)
-    root = str(cfg.root)
+    name = str(cfg.name).lower()
     download = bool(getattr(cfg, "download", True))
 
-    specs = {
-        "cifar10": (
-            ("train", "test"),
-            lambda r, s, t: tv_datasets.CIFAR10(
-                root=r, train=(s == "train"), download=False, transform=t
-            ),
-        ),
-        "cifar100": (
-            ("train", "test"),
-            lambda r, s, t: tv_datasets.CIFAR100(
-                root=r, train=(s == "train"), download=False, transform=t
-            ),
-        ),
-        "imagenet": (
-            ("train", "val"),
-            lambda r, s, t: tv_datasets.ImageFolder(
-                root=f"{r}/{'train' if s == 'train' else 'val'}", transform=t
-            ),
-        ),
-        "stl10": (
-            ("train", "test", "unlabeled", "train+unlabeled"),
-            lambda r, s, t: (
-                ConcatDataset(
-                    [
-                        tv_datasets.STL10(
-                            root=r, split="train", download=False, transform=t
-                        ),
-                        tv_datasets.STL10(
-                            root=r, split="unlabeled", download=False, transform=t
-                        ),
-                    ]
-                )
-                if s == "train+unlabeled"
-                else tv_datasets.STL10(root=r, split=s, download=False, transform=t)
-            ),
-        ),
-        "imagenet_128": (
-            ("train", "validation", "test"),
-            lambda r, s, t: HFImageNet128(split=s, transform=t, cache_dir=r),
-        ),
-        "food101": (
-            ("train", "test"),
-            lambda r, s, t: tv_datasets.Food101(root=r, split=s, download=False, transform=t),
-        ),
-    }
-
-    if name not in specs:
-        raise ValueError(f"Unknown dataset name={name}")
-
-    valid_splits, builder = specs[name]
-    if split not in valid_splits:
-        raise ValueError(
-            f"Unknown split='{split}' for {name}. Expected: {'|'.join(valid_splits)}."
-        )
-
     if download and is_rank0():
-        _maybe_download_dataset(name=name, root=root, split=split, transform=transform)
+        _maybe_download_dataset(cfg=cfg, split=split, transform=transform)
 
     barrier()
-    return builder(root, split, transform)
+    return _build_dataset_local(cfg=cfg, split=split, transform=transform)

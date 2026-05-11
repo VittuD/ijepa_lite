@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import torch
@@ -9,23 +10,22 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, DataLoader as _TDL, TensorDataset
 
 from ijepa_lite.callbacks.base import Callback
+from ijepa_lite.data.datasets import _build_dataset_local
 from ijepa_lite.engine.eval_linear import _extract_features
 from ijepa_lite.utils.dist import is_rank0, unwrap_model
 
 
-def _build_dataset_local(name: str, root: str, split: str, transform):
-    """Build a dataset directly — no barrier(), safe for rank-0-only use."""
-    from torchvision import datasets as tv_datasets
-
-    if name == "stl10":
-        return tv_datasets.STL10(root=root, split=split, download=False, transform=transform)
-    if name == "cifar10":
-        return tv_datasets.CIFAR10(root=root, train=(split == "train"), download=False, transform=transform)
-    if name == "cifar100":
-        return tv_datasets.CIFAR100(root=root, train=(split == "train"), download=False, transform=transform)
-    if name == "food101":
-        return tv_datasets.Food101(root=root, split=split, download=False, transform=transform)
-    raise ValueError(f"InlineEvalCallback: unsupported dataset '{name}'")
+def _infer_num_classes_local(dataset, configured: Any) -> int:
+    if configured is not None:
+        return int(configured)
+    if hasattr(dataset, "classes"):
+        return len(dataset.classes)
+    if hasattr(dataset, "class_to_idx"):
+        return len(dataset.class_to_idx)
+    raise ValueError(
+        "InlineEvalCallback could not infer num_classes from the dataset. "
+        "Set train.inline_eval.num_classes explicitly."
+    )
 
 
 class InlineEvalCallback(Callback):
@@ -71,7 +71,6 @@ class InlineEvalCallback(Callback):
         dataset_name = str(getattr(icfg, "dataset", "stl10"))
         train_split = str(getattr(icfg, "train_split", "train"))
         val_split = str(getattr(icfg, "val_split", "test"))
-        self._num_classes = int(getattr(icfg, "num_classes", 10))
         batch_size = int(getattr(icfg, "batch_size", 256))
         num_workers = int(getattr(icfg, "num_workers", 4))
 
@@ -81,8 +80,28 @@ class InlineEvalCallback(Callback):
 
         from ijepa_lite.data.collate import SupervisedCollate
 
-        ds_train = _build_dataset_local(dataset_name, data_root, train_split, train_tfm)
-        ds_val = _build_dataset_local(dataset_name, data_root, val_split, val_tfm)
+        dataset_cfg = SimpleNamespace(
+            name=dataset_name,
+            root=data_root,
+            partition=getattr(icfg, "partition", 1),
+            train_ratio=getattr(icfg, "train_ratio", 0.8),
+            val_ratio=getattr(icfg, "val_ratio", 0.1),
+            split_seed=getattr(icfg, "split_seed", 0),
+            target_attr=getattr(icfg, "target_attr", "race"),
+            image_dirname=getattr(
+                icfg, "image_dirname", "fairface-img-margin025-trainval"
+            ),
+            train_csv=getattr(icfg, "train_csv", "fairface_label_train.csv"),
+            val_csv=getattr(icfg, "val_csv", "fairface_label_val.csv"),
+            csv_dir=getattr(icfg, "csv_dir", None),
+            image_root=getattr(icfg, "image_root", None),
+        )
+
+        ds_train = _build_dataset_local(dataset_cfg, train_split, train_tfm)
+        ds_val = _build_dataset_local(dataset_cfg, val_split, val_tfm)
+        self._num_classes = _infer_num_classes_local(
+            ds_train, getattr(icfg, "num_classes", None)
+        )
 
         collate = SupervisedCollate()
 

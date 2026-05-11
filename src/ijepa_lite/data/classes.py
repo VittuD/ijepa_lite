@@ -24,12 +24,25 @@ def infer_num_classes(cfg, ds_train=None) -> int:
         "cifar10": 10,
         "cifar100": 100,
         "stl10": 10,
+        "food101": 101,
+        "dtd": 47,
+        "sun397": 397,
         "imagenet100": 100,
         "imagenet": 1000,  # imagenet1k on disk (ImageFolder)
         "imagenet_128": 1000,  # alias for the HF 128x128 version
     }
     if name in mapping:
         return mapping[name]
+
+    if name == "fairface":
+        target_attr = str(getattr(cfg.data, "target_attr", "race")).lower()
+        fairface_mapping = {
+            "race": 7,
+            "gender": 2,
+            "age": 9,
+        }
+        if target_attr in fairface_mapping:
+            return fairface_mapping[target_attr]
 
     raise ValueError(
         f"Unknown dataset '{name}'. Add it to infer_num_classes() or set task.num_classes."
