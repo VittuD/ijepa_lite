@@ -274,6 +274,9 @@ class IJEPAModel(nn.Module):
             total_loss = total_loss + self.sigreg_weight * sigreg_val
             model_stats.update(sigreg_logs)
             model_stats["sigreg/weight"] = float(self.sigreg_weight)
+            model_stats["sigreg/loss_weighted"] = float(
+                (self.sigreg_weight * sigreg_val).detach().item()
+            )
 
         # ------------------------------------------------------------------
         # Step 5b: Context loss (V-JEPA 2.1-style visible token supervision)
