@@ -30,11 +30,15 @@ class EppsPulley1D(nn.Module):
         self.num_t = int(num_t)
         self.t_max = float(t_max)
         self.register_buffer("_t", torch.empty(0), persistent=False)
+        self.register_buffer("_phi", torch.empty(0), persistent=False)
         self.register_buffer("_weights", torch.empty(0), persistent=False)
 
-    def _get_grid(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def _get_grid(
+        self, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if (
             self._t.numel() == 0
+            or self._phi.numel() == 0
             or self._weights.numel() == 0
             or self._t.device != device
         ):
@@ -44,19 +48,23 @@ class EppsPulley1D(nn.Module):
                 steps=self.num_t + 1,
                 device=device,
                 dtype=torch.float32,
-            )[1:]
+            )
             dt = self.t_max / float(self.num_t)
-            weights = torch.full_like(t, dt)
+            weights = torch.full_like(t, 2.0 * dt)
+            weights[0] = dt
+            weights[-1] = dt
+            phi = torch.exp(-0.5 * t.square())
             self._t = t
-            self._weights = weights
-        return self._t, self._weights
+            self._phi = phi
+            self._weights = weights * phi
+        return self._t, self._phi, self._weights
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if x.ndim != 2:
             raise ValueError(f"Expected x to have shape (N, S), got {tuple(x.shape)}")
 
         x = x.float()
-        t, weights = self._get_grid(x.device)
+        t, phi_normal, weights = self._get_grid(x.device)
 
         xt = x.unsqueeze(-1) * t.view(1, 1, -1)  # (N, S, T)
         cos_local = torch.cos(xt).sum(dim=0)  # (S, T)
@@ -69,11 +77,48 @@ class EppsPulley1D(nn.Module):
 
         cos_mean = cos_sum / n_total
         sin_mean = sin_sum / n_total
-        phi_normal = torch.exp(-0.5 * t.square()).view(1, -1)  # (1, T)
 
-        err = (cos_mean - phi_normal).square() + sin_mean.square()
-        stat_per_slice = n_total * (err * weights.view(1, -1)).sum(dim=-1)  # (S,)
+        err = (cos_mean - phi_normal.view(1, -1)).square() + sin_mean.square()
+        stat_per_slice = n_total * (err @ weights)  # (S,)
         return stat_per_slice, n_total
+
+
+class SIGRegProjector(nn.Module):
+    """
+    BatchNorm MLP projector matching the LeJEPA-style projected regularization path.
+
+    The input is flattened to (B*N, D), projected, then reshaped back to (B, N, Dp).
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 2048,
+        output_dim: int = 512,
+    ) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, output_dim),
+            nn.BatchNorm1d(output_dim),
+        )
+
+    def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+        if patch_tokens.ndim != 3:
+            raise ValueError(
+                "SIGRegProjector expects patch tokens with shape (B, N, D); "
+                f"got {tuple(patch_tokens.shape)}"
+            )
+
+        b, n, _ = patch_tokens.shape
+        z = patch_tokens.reshape(b * n, -1)
+        z = self.net(z)
+        return z.reshape(b, n, -1)
 
 
 class SIGRegLoss(nn.Module):
@@ -86,12 +131,16 @@ class SIGRegLoss(nn.Module):
 
     def __init__(
         self,
+        input_dim: int,
         num_slices: int = 16,
         num_t: int = 16,
         t_max: float = 4.0,
-        standardize: bool = True,
+        standardize: bool = False,
         eps: float = 1e-6,
         projection_seed: int = 0,
+        projector_hidden_dim: int = 2048,
+        projector_output_dim: int = 512,
+        use_projector: bool = True,
     ) -> None:
         super().__init__()
         if num_slices <= 0:
@@ -101,25 +150,16 @@ class SIGRegLoss(nn.Module):
         self.eps = float(eps)
         self.projection_seed = int(projection_seed)
         self.ep_test = EppsPulley1D(num_t=num_t, t_max=t_max)
-        self.register_buffer("_projection", torch.empty(0), persistent=False)
-
-    def _get_projection(self, dim: int, device: torch.device) -> torch.Tensor:
-        if (
-            self._projection.numel() == 0
-            or self._projection.shape != (self.num_slices, dim)
-            or self._projection.device != device
-        ):
-            gen = torch.Generator(device="cpu")
-            gen.manual_seed(self.projection_seed)
-            proj = torch.randn(
-                self.num_slices,
-                dim,
-                generator=gen,
-                dtype=torch.float32,
+        self.projector = (
+            SIGRegProjector(
+                input_dim=input_dim,
+                hidden_dim=int(projector_hidden_dim),
+                output_dim=int(projector_output_dim),
             )
-            proj = F.normalize(proj, dim=-1, eps=self.eps)
-            self._projection = proj.to(device=device)
-        return self._projection
+            if bool(use_projector)
+            else nn.Identity()
+        )
+        self.register_buffer("_global_step", torch.zeros((), dtype=torch.long), persistent=False)
 
     def _standardize_tokens(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         local_count = torch.tensor(float(z.shape[0]), device=z.device)
@@ -136,6 +176,20 @@ class SIGRegLoss(nn.Module):
         z_std = (z - mean) / var.sqrt()
         return z_std, var.sqrt().mean()
 
+    def _sample_projection(self, dim: int, device: torch.device) -> torch.Tensor:
+        seed = int(self.projection_seed + int(self._global_step.item()))
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(seed)
+        proj = torch.randn(
+            self.num_slices,
+            dim,
+            generator=gen,
+            dtype=torch.float32,
+        )
+        proj = F.normalize(proj, dim=-1, eps=self.eps)
+        self._global_step.add_(1)
+        return proj.to(device=device)
+
     def forward(self, patch_tokens: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
         if patch_tokens.ndim != 3:
             raise ValueError(
@@ -143,14 +197,20 @@ class SIGRegLoss(nn.Module):
                 f"got {tuple(patch_tokens.shape)}"
             )
 
-        z = patch_tokens.float().reshape(-1, patch_tokens.shape[-1])  # (B*N, D)
-        pre_std_mean = z.std(dim=0, correction=0).mean()
+        raw_tokens = patch_tokens.float()
+        raw_std_mean = raw_tokens.reshape(-1, raw_tokens.shape[-1]).std(
+            dim=0, correction=0
+        ).mean()
 
-        post_std_mean = pre_std_mean
+        proj_tokens = self.projector(raw_tokens)
+        z = proj_tokens.float().reshape(-1, proj_tokens.shape[-1])  # (B*N, D_proj)
+        proj_std_mean = z.std(dim=0, correction=0).mean()
+
+        post_std_mean = proj_std_mean
         if self.standardize:
             z, post_std_mean = self._standardize_tokens(z)
 
-        proj = self._get_projection(z.shape[-1], z.device)  # (S, D)
+        proj = self._sample_projection(z.shape[-1], z.device)  # (S, D)
         projected = z @ proj.transpose(0, 1)  # (B*N, S)
 
         stat_per_slice, n_total = self.ep_test(projected)
@@ -161,7 +221,8 @@ class SIGRegLoss(nn.Module):
             "sigreg/stat_mean": float(stat_per_slice.detach().mean().item()),
             "sigreg/stat_max": float(stat_per_slice.detach().amax().item()),
             "sigreg/num_samples": float(n_total.detach().item()),
-            "sigreg/pre_token_std_mean": float(pre_std_mean.detach().item()),
+            "sigreg/pre_token_std_mean": float(raw_std_mean.detach().item()),
             "sigreg/post_token_std_mean": float(post_std_mean.detach().item()),
+            "sigreg/proj_token_std_mean": float(proj_std_mean.detach().item()),
         }
         return loss, logs

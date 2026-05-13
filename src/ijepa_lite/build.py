@@ -332,12 +332,16 @@ def _build_sigreg_loss(cfg) -> SIGRegLoss | None:
         return None
 
     return SIGRegLoss(
+        input_dim=int(cfg.model.embed_dim),
         num_slices=int(getattr(sigreg_cfg, "num_slices", 16)),
         num_t=int(getattr(sigreg_cfg, "num_t", 16)),
         t_max=float(getattr(sigreg_cfg, "t_max", 4.0)),
-        standardize=bool(getattr(sigreg_cfg, "standardize", True)),
+        standardize=bool(getattr(sigreg_cfg, "standardize", False)),
         eps=float(getattr(sigreg_cfg, "eps", 1e-6)),
         projection_seed=int(getattr(sigreg_cfg, "projection_seed", 0)),
+        projector_hidden_dim=int(getattr(sigreg_cfg, "projector_hidden_dim", 2048)),
+        projector_output_dim=int(getattr(sigreg_cfg, "projector_output_dim", 512)),
+        use_projector=bool(getattr(sigreg_cfg, "use_projector", True)),
     )
 
 

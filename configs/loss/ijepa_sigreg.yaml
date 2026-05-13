@@ -8,9 +8,12 @@ normalize: false
 sigreg:
   enabled: true
   weight: 0.05
-  num_slices: 16
+  num_slices: 512
   num_t: 16
   t_max: 4.0
-  standardize: true
+  standardize: false
   eps: 1e-6
   projection_seed: 0
+  use_projector: true
+  projector_hidden_dim: 2048
+  projector_output_dim: 512
