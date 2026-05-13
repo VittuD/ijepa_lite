@@ -7,7 +7,8 @@ normalize: false
 
 sigreg:
   enabled: true
-  weight: 0.05
+  weight: 0.05  # scalar or [start, end]
+  weight_schedule: constant  # constant | linear | cosine
   num_slices: 512
   num_t: 16
   t_max: 4.0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any, Dict, Optional
 
 import torch
@@ -388,12 +389,21 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         )
 
     sigreg_loss = _build_sigreg_loss(cfg)
-    sigreg_weight = float(getattr(getattr(cfg.loss, "sigreg", None), "weight", 0.0))
-    if target_mode != "shared" and sigreg_loss is not None and sigreg_weight > 0.0:
+    sigreg_weight = getattr(getattr(cfg.loss, "sigreg", None), "weight", 0.0)
+    if isinstance(sigreg_weight, Sequence) and not isinstance(sigreg_weight, (str, bytes)):
+        if len(sigreg_weight) != 2:
+            raise ValueError(
+                "loss.sigreg.weight must be a scalar or a [start, end] pair."
+            )
+        sigreg_weight_max = max(float(sigreg_weight[0]), float(sigreg_weight[1]))
+    else:
+        sigreg_weight_max = float(sigreg_weight)
+
+    if target_mode != "shared" and sigreg_loss is not None and sigreg_weight_max > 0.0:
         raise ValueError(
             "loss.sigreg is currently supported only with model.target_mode='shared'."
         )
-    if target_mode == "shared" and (sigreg_loss is None or sigreg_weight <= 0.0):
+    if target_mode == "shared" and (sigreg_loss is None or sigreg_weight_max <= 0.0):
         raise ValueError(
             "target_mode='shared' requires loss.sigreg.enabled=true and loss.sigreg.weight > 0."
         )
@@ -423,6 +433,10 @@ def build_pretrain_model(cfg) -> torch.nn.Module:
         target_mode=target_mode,
         sigreg_loss=sigreg_loss,
         sigreg_weight=sigreg_weight,
+        sigreg_weight_schedule=str(
+            getattr(getattr(cfg.loss, "sigreg", None), "weight_schedule", "constant")
+        ),
+        total_epochs=int(cfg.train.epochs),
         **ctx_kw,
     )
 

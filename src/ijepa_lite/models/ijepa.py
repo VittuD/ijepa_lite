@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import math
+from collections.abc import Sequence
 from typing import Dict, Optional
 
 import torch
@@ -79,7 +81,9 @@ class IJEPAModel(nn.Module):
         grid_size: int = 0,
         target_mode: str = "ema",
         sigreg_loss: nn.Module | None = None,
-        sigreg_weight: float = 0.0,
+        sigreg_weight: float | Sequence[float] = 0.0,
+        sigreg_weight_schedule: str = "constant",
+        total_epochs: int = 0,
     ) -> None:
         super().__init__()
 
@@ -104,7 +108,26 @@ class IJEPAModel(nn.Module):
         self._mask_generator = mask_generator   # fallback only
         self.target_mode = target_mode
         self.sigreg_loss = sigreg_loss
-        self.sigreg_weight = float(sigreg_weight)
+        if isinstance(sigreg_weight, Sequence) and not isinstance(sigreg_weight, (str, bytes)):
+            if len(sigreg_weight) != 2:
+                raise ValueError(
+                    "sigreg_weight must be a scalar or a [start, end] pair."
+                )
+            sigreg_weight_start = float(sigreg_weight[0])
+            sigreg_weight_end = float(sigreg_weight[1])
+        else:
+            sigreg_weight_start = float(sigreg_weight)
+            sigreg_weight_end = float(sigreg_weight)
+        if sigreg_weight_start < 0.0 or sigreg_weight_end < 0.0:
+            raise ValueError("sigreg_weight endpoints must be >= 0.")
+        self.sigreg_weight_start = sigreg_weight_start
+        self.sigreg_weight_end = sigreg_weight_end
+        self.sigreg_weight_schedule = str(sigreg_weight_schedule).lower()
+        if self.sigreg_weight_schedule not in {"constant", "linear", "cosine"}:
+            raise ValueError(
+                "sigreg_weight_schedule must be 'constant', 'linear', or 'cosine'."
+            )
+        self.total_epochs = int(total_epochs)
 
         self.predict_blocks_jointly = predict_blocks_jointly
 
@@ -137,12 +160,34 @@ class IJEPAModel(nn.Module):
         return self.get_eval_encoder()
 
     def _uses_projected_prediction_space(self) -> bool:
-        return self.sigreg_loss is not None and self.sigreg_weight > 0.0
+        return self.sigreg_loss is not None and max(
+            self.sigreg_weight_start, self.sigreg_weight_end
+        ) > 0.0
 
     def _project_prediction_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
         if not self._uses_projected_prediction_space():
             return tokens
         return self.sigreg_loss.project_tokens(tokens)
+
+    def _get_sigreg_weight(self, epoch: int | None) -> float:
+        if (
+            self.sigreg_weight_start == self.sigreg_weight_end
+            or self.sigreg_weight_schedule == "constant"
+        ):
+            return self.sigreg_weight_start
+
+        if epoch is None or self.total_epochs <= 1:
+            return self.sigreg_weight_start
+
+        progress = min(max(float(epoch) / float(self.total_epochs - 1), 0.0), 1.0)
+        if self.sigreg_weight_schedule == "linear":
+            blend = progress
+        else:
+            blend = 0.5 * (1.0 - math.cos(math.pi * progress))
+
+        return self.sigreg_weight_start + (
+            self.sigreg_weight_end - self.sigreg_weight_start
+        ) * blend
 
     # ------------------------------------------------------------------
     # EMA update — called by the training loop after each step
@@ -281,15 +326,23 @@ class IJEPAModel(nn.Module):
             total_loss = reconstruction_loss
 
         model_stats: dict[str, float] = {}
-        if self.sigreg_loss is not None and self.sigreg_weight > 0.0:
+        sigreg_weight = self._get_sigreg_weight(epoch)
+        if self.sigreg_loss is not None and sigreg_weight > 0.0:
             sigreg_val, sigreg_logs = self.sigreg_loss.forward_projected(
                 tgt_tokens_all, full_tokens
             )
-            total_loss = total_loss + self.sigreg_weight * sigreg_val
+            total_loss = total_loss + sigreg_weight * sigreg_val
             model_stats.update(sigreg_logs)
-            model_stats["sigreg/weight"] = float(self.sigreg_weight)
+            model_stats["sigreg/weight"] = float(sigreg_weight)
+            model_stats["sigreg/weight_start"] = float(self.sigreg_weight_start)
+            model_stats["sigreg/weight_end"] = float(self.sigreg_weight_end)
+            model_stats["sigreg/weight_schedule_id"] = {
+                "constant": 0.0,
+                "linear": 1.0,
+                "cosine": 2.0,
+            }[self.sigreg_weight_schedule]
             model_stats["sigreg/loss_weighted"] = float(
-                (self.sigreg_weight * sigreg_val).detach().item()
+                (sigreg_weight * sigreg_val).detach().item()
             )
 
         # ------------------------------------------------------------------
@@ -346,8 +399,8 @@ class IJEPAModel(nn.Module):
             "model_stats": model_stats,
             "ctx_loss": ctx_loss_val,
         }
-        if self.sigreg_loss is not None and self.sigreg_weight > 0.0:
-            out["sigreg_loss_weighted"] = self.sigreg_weight * sigreg_val
+        if self.sigreg_loss is not None and sigreg_weight > 0.0:
+            out["sigreg_loss_weighted"] = sigreg_weight * sigreg_val
         if compute_agreement:
             out["ctx_tokens_all"] = ctx_tokens_all
             out["tgt_tokens_all"] = tgt_at_ctx
