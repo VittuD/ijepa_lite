@@ -358,8 +358,6 @@ def train(
                         "train/epoch": float(epoch),
                         **extra,
                     }
-                    if "sigreg/loss" in extra:
-                        metrics["train/sigreg_loss"] = float(extra["sigreg/loss"])
                     if "sigreg/loss_weighted" in extra:
                         metrics["train/sigreg_loss_weighted"] = float(
                             extra["sigreg/loss_weighted"]
