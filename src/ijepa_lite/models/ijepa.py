@@ -346,6 +346,8 @@ class IJEPAModel(nn.Module):
             "model_stats": model_stats,
             "ctx_loss": ctx_loss_val,
         }
+        if self.sigreg_loss is not None and self.sigreg_weight > 0.0:
+            out["sigreg_loss_weighted"] = self.sigreg_weight * sigreg_val
         if compute_agreement:
             out["ctx_tokens_all"] = ctx_tokens_all
             out["tgt_tokens_all"] = tgt_at_ctx

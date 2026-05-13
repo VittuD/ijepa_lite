@@ -21,6 +21,17 @@ from ijepa_lite.utils.metrics import (
 )
 
 
+def _grad_norm_from_grads(grads, norm_type: float = 2.0) -> float:
+    grads = [g for g in grads if g is not None]
+    if not grads:
+        return 0.0
+    device = grads[0].device
+    total = torch.zeros((), device=device)
+    for g in grads:
+        total += g.detach().pow(norm_type).sum()
+    return float(total.pow(1.0 / norm_type).item())
+
+
 def _linear_ema_momentum(
     start_m: float, end_m: float, step: int, total_steps: int
 ) -> float:
@@ -209,6 +220,30 @@ def train(
                 out = model(images, masks=masks, compute_agreement=do_log, compute_mask_metrics=do_log, epoch=epoch)
                 loss = out["loss"]
 
+            rec_encoder_gnorm = None
+            sigreg_encoder_gnorm = None
+            if do_log:
+                encoder_params = [
+                    p for p in core.context_encoder.parameters() if p.requires_grad
+                ]
+                rec_grads = torch.autograd.grad(
+                    out["reconstruction_loss"],
+                    encoder_params,
+                    retain_graph=True,
+                    allow_unused=True,
+                )
+                rec_encoder_gnorm = _grad_norm_from_grads(rec_grads)
+
+                sigreg_term = out.get("sigreg_loss_weighted")
+                if sigreg_term is not None:
+                    sigreg_grads = torch.autograd.grad(
+                        sigreg_term,
+                        encoder_params,
+                        retain_graph=True,
+                        allow_unused=True,
+                    )
+                    sigreg_encoder_gnorm = _grad_norm_from_grads(sigreg_grads)
+
             scaler.scale(loss).backward()
             state["global_step"] = next_step
 
@@ -334,6 +369,10 @@ def train(
                     extra["train/base_grad_norm"] = base_gnorm
                 if masker_gnorm is not None:
                     extra["train/masker_grad_norm"] = masker_gnorm
+                if rec_encoder_gnorm is not None:
+                    extra["train/rec_encoder_grad_norm"] = rec_encoder_gnorm
+                if sigreg_encoder_gnorm is not None:
+                    extra["train/sigreg_encoder_grad_norm"] = sigreg_encoder_gnorm
 
                 if is_rank0():
                     if core.has_ema_target:

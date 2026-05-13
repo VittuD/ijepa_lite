@@ -209,11 +209,12 @@ class SIGRegLoss(nn.Module):
         projected = z @ proj.transpose(0, 1)  # (B*N, S)
 
         stat_per_slice, n_total = self.ep_test(projected)
-        loss = stat_per_slice.mean()
+        stat_mean = stat_per_slice.mean()
+        loss = stat_mean / n_total.clamp(min=1.0)
 
         logs = {
             "sigreg/loss": float(loss.detach().item()),
-            "sigreg/stat_mean": float(stat_per_slice.detach().mean().item()),
+            "sigreg/stat_mean": float(stat_mean.detach().item()),
             "sigreg/stat_max": float(stat_per_slice.detach().amax().item()),
             "sigreg/num_samples": float(n_total.detach().item()),
             "sigreg/pre_token_std_mean": float(raw_std_mean.detach().item()),
