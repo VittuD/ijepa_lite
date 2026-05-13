@@ -109,16 +109,16 @@ class SIGRegProjector(nn.Module):
         )
 
     def forward(self, patch_tokens: torch.Tensor) -> torch.Tensor:
-        if patch_tokens.ndim != 3:
+        if patch_tokens.ndim < 2:
             raise ValueError(
-                "SIGRegProjector expects patch tokens with shape (B, N, D); "
+                "SIGRegProjector expects tokens with shape (..., D); "
                 f"got {tuple(patch_tokens.shape)}"
             )
 
-        b, n, _ = patch_tokens.shape
-        z = patch_tokens.reshape(b * n, -1)
+        leading_shape = patch_tokens.shape[:-1]
+        z = patch_tokens.reshape(-1, patch_tokens.shape[-1])
         z = self.net(z)
-        return z.reshape(b, n, -1)
+        return z.reshape(*leading_shape, -1)
 
 
 class SIGRegLoss(nn.Module):
@@ -190,20 +190,15 @@ class SIGRegLoss(nn.Module):
         self._global_step.add_(1)
         return proj.to(device=device)
 
-    def forward(self, patch_tokens: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        if patch_tokens.ndim != 3:
-            raise ValueError(
-                "SIGRegLoss expects patch tokens with shape (B, N, D); "
-                f"got {tuple(patch_tokens.shape)}"
-            )
+    def project_tokens(self, patch_tokens: torch.Tensor) -> torch.Tensor:
+        return self.projector(patch_tokens.float())
 
-        raw_tokens = patch_tokens.float()
-        raw_std_mean = raw_tokens.reshape(-1, raw_tokens.shape[-1]).std(
-            dim=0, correction=0
-        ).mean()
-
-        proj_tokens = self.projector(raw_tokens)
-        z = proj_tokens.float().reshape(-1, proj_tokens.shape[-1])  # (B*N, D_proj)
+    def _loss_from_projected(
+        self,
+        projected_tokens: torch.Tensor,
+        raw_std_mean: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        z = projected_tokens.float().reshape(-1, projected_tokens.shape[-1])  # (B*N, D_proj)
         proj_std_mean = z.std(dim=0, correction=0).mean()
 
         post_std_mean = proj_std_mean
@@ -226,3 +221,27 @@ class SIGRegLoss(nn.Module):
             "sigreg/proj_token_std_mean": float(proj_std_mean.detach().item()),
         }
         return loss, logs
+
+    def forward(self, patch_tokens: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        if patch_tokens.ndim != 3:
+            raise ValueError(
+                "SIGRegLoss expects patch tokens with shape (B, N, D); "
+                f"got {tuple(patch_tokens.shape)}"
+            )
+
+        raw_tokens = patch_tokens.float()
+        raw_std_mean = raw_tokens.reshape(-1, raw_tokens.shape[-1]).std(
+            dim=0, correction=0
+        ).mean()
+        proj_tokens = self.project_tokens(raw_tokens)
+        return self._loss_from_projected(proj_tokens, raw_std_mean)
+
+    def forward_projected(
+        self,
+        projected_tokens: torch.Tensor,
+        raw_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        raw_std_mean = raw_tokens.float().reshape(-1, raw_tokens.shape[-1]).std(
+            dim=0, correction=0
+        ).mean()
+        return self._loss_from_projected(projected_tokens, raw_std_mean)

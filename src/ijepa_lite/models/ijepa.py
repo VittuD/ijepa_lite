@@ -136,6 +136,14 @@ class IJEPAModel(nn.Module):
     def get_viz_encoder(self) -> nn.Module:
         return self.get_eval_encoder()
 
+    def _uses_projected_prediction_space(self) -> bool:
+        return self.sigreg_loss is not None and self.sigreg_weight > 0.0
+
+    def _project_prediction_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        if not self._uses_projected_prediction_space():
+            return tokens
+        return self.sigreg_loss.project_tokens(tokens)
+
     # ------------------------------------------------------------------
     # EMA update — called by the training loop after each step
     # ------------------------------------------------------------------
@@ -215,15 +223,19 @@ class IJEPAModel(nn.Module):
         else:
             full_tokens = self._encode_full_view_tokens(images)
 
-        tgt_tokens_all = F.layer_norm(full_tokens, (full_tokens.shape[-1],))
+        raw_tgt_tokens_all = F.layer_norm(full_tokens, (full_tokens.shape[-1],))
+        if self._uses_projected_prediction_space():
+            tgt_tokens_all = self.sigreg_loss.project_tokens(full_tokens)
+        else:
+            tgt_tokens_all = raw_tgt_tokens_all
 
         # Optional encoder-agreement diagnostic (re-uses already-computed tensors)
         ctx_tokens_all: Optional[torch.Tensor] = None
         tgt_at_ctx: Optional[torch.Tensor] = None
         if compute_agreement:
             ctx_tokens_all = ctx_tokens.detach()
-            tgt_at_ctx = tgt_tokens_all.gather(
-                1, ctx_idx.unsqueeze(-1).expand(-1, -1, d)
+            tgt_at_ctx = raw_tgt_tokens_all.gather(
+                1, ctx_idx.unsqueeze(-1).expand(-1, -1, raw_tgt_tokens_all.shape[-1])
             ).detach()
 
         # ------------------------------------------------------------------
@@ -270,7 +282,9 @@ class IJEPAModel(nn.Module):
 
         model_stats: dict[str, float] = {}
         if self.sigreg_loss is not None and self.sigreg_weight > 0.0:
-            sigreg_val, sigreg_logs = self.sigreg_loss(full_tokens)
+            sigreg_val, sigreg_logs = self.sigreg_loss.forward_projected(
+                tgt_tokens_all, full_tokens
+            )
             total_loss = total_loss + self.sigreg_weight * sigreg_val
             model_stats.update(sigreg_logs)
             model_stats["sigreg/weight"] = float(self.sigreg_weight)
@@ -290,11 +304,12 @@ class IJEPAModel(nn.Module):
             else:
                 tgt_idx_flat = tgt_idx
             tgt_at_ctx_pos = tgt_tokens_all.gather(
-                1, ctx_idx.unsqueeze(-1).expand(-1, -1, d)
+                1, ctx_idx.unsqueeze(-1).expand(-1, -1, tgt_tokens_all.shape[-1])
             )
+            pred_ctx_loss = self._project_prediction_tokens(pred_ctx)
             alpha = self._ctx_alpha(epoch)
             ctx_l = context_loss(
-                pred_ctx, tgt_at_ctx_pos, ctx_idx, tgt_idx_flat,
+                pred_ctx_loss, tgt_at_ctx_pos, ctx_idx, tgt_idx_flat,
                 self.grid_size, self.loss_fn,
                 gamma=self.ctx_loss_gamma, alpha=alpha,
             )
@@ -437,10 +452,11 @@ class IJEPAModel(nn.Module):
         tgt_idx: torch.Tensor,        # (B, Ntgt)
         tgt_tokens_all: torch.Tensor, # (B, N, D)
         b: int,
-        d: int,
+        _d_ctx: int,
     ):
+        d_tgt = tgt_tokens_all.shape[-1]
         tgt_tokens = tgt_tokens_all.gather(
-            1, tgt_idx.unsqueeze(-1).expand(-1, -1, d)
+            1, tgt_idx.unsqueeze(-1).expand(-1, -1, d_tgt)
         )  # (B, Ntgt, D)
 
         result = self.predictor(
@@ -452,6 +468,7 @@ class IJEPAModel(nn.Module):
         else:
             pred, pred_ctx = result, None
 
+        pred = self._project_prediction_tokens(pred)
         patch_loss = self.loss_fn(pred, tgt_tokens, reduction="none")  # (B, Ntgt)
         loss = patch_loss.mean()
         return loss, pred, tgt_tokens, patch_loss, pred_ctx
@@ -478,11 +495,12 @@ class IJEPAModel(nn.Module):
         tgt_idx: torch.Tensor,        # (B, M, K)
         tgt_tokens_all: torch.Tensor, # (B, N, D)
         b: int,
-        d: int,
+        _d_ctx: int,
         target_block_counts: torch.Tensor | None = None,
     ):
         m = tgt_idx.shape[1]
         k = tgt_idx.shape[2]
+        d_tgt = tgt_tokens_all.shape[-1]
         counts = None
         if target_block_counts is not None:
             counts = [int(x) for x in target_block_counts.detach().cpu().tolist()]
@@ -499,15 +517,16 @@ class IJEPAModel(nn.Module):
                     continue
                 block_idx = tgt_idx[:, i, :k_i]  # (B, K_i)
                 block_tgt = tgt_tokens_all.gather(
-                    1, block_idx.unsqueeze(-1).expand(-1, -1, d)
+                    1, block_idx.unsqueeze(-1).expand(-1, -1, d_tgt)
                 )  # (B, K_i, D)
                 block_pred = self.predictor(
                     ctx_tokens, ctx_idx=ctx_idx, tgt_idx=block_idx
                 )  # (B, K_i, D)
+                block_pred = self._project_prediction_tokens(block_pred)
                 block_ploss = self.loss_fn(block_pred, block_tgt, reduction="none")  # (B, K_i)
 
-                pred_pad = block_pred.new_zeros((b, max_k, d))
-                tgt_pad = block_tgt.new_zeros((b, max_k, d))
+                pred_pad = block_pred.new_zeros((b, max_k, block_pred.shape[-1]))
+                tgt_pad = block_tgt.new_zeros((b, max_k, d_tgt))
                 pred_pad[:, :k_i] = block_pred
                 tgt_pad[:, :k_i] = block_tgt
                 preds_list.append(pred_pad)
@@ -527,7 +546,7 @@ class IJEPAModel(nn.Module):
         )
 
         tgt_tokens_cat = tgt_tokens_all.gather(
-            1, tgt_idx_cat.unsqueeze(-1).expand(-1, -1, d)
+            1, tgt_idx_cat.unsqueeze(-1).expand(-1, -1, d_tgt)
         )  # (B, sum(K_i), D)
 
         result = self.predictor(
@@ -539,13 +558,14 @@ class IJEPAModel(nn.Module):
         else:
             pred_cat, pred_ctx = result, None
 
+        pred_cat = self._project_prediction_tokens(pred_cat)
         patch_loss_cat = self.loss_fn(pred_cat, tgt_tokens_cat, reduction="none")  # (B, sum(K_i))
         if counts is None:
-            pred = pred_cat.reshape(b, m, k, d)  # (B, M, K, D)
-            tgt_tokens = tgt_tokens_cat.reshape(b, m, k, d)  # (B, M, K, D)
+            pred = pred_cat.reshape(b, m, k, pred_cat.shape[-1])  # (B, M, K, D)
+            tgt_tokens = tgt_tokens_cat.reshape(b, m, k, d_tgt)  # (B, M, K, D)
         else:
-            pred = pred_cat.new_zeros((b, m, k, d))
-            tgt_tokens = tgt_tokens_cat.new_zeros((b, m, k, d))
+            pred = pred_cat.new_zeros((b, m, k, pred_cat.shape[-1]))
+            tgt_tokens = tgt_tokens_cat.new_zeros((b, m, k, d_tgt))
             offset = 0
             for i in range(m):
                 k_i = counts[i]
