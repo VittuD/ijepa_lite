@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-sigreg-stl10-dbg
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_DEEPECHO
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=sbatch_logs/sigreg/%x_%j.out
 #SBATCH --error=sbatch_logs/sigreg/%x_%j.err
 
@@ -42,8 +42,9 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       exp_name="$EXP_NAME" \
       data.root=$FAST/datasets/ \
       data.batch_size=512 \
-      train.epochs=10 \
-      train.save_every_epochs=5 \
+      train.epochs=1000 \
+      train.save_every_epochs=0 \
       train.eval_every_epochs=1 \
+      loss.sigreg.weight=5e-4 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline
