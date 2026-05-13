@@ -210,7 +210,7 @@ class SIGRegLoss(nn.Module):
 
         stat_per_slice, n_total = self.ep_test(projected)
         stat_mean = stat_per_slice.mean()
-        loss = stat_mean / n_total.clamp(min=1.0)
+        loss = stat_mean
 
         logs = {
             "sigreg/loss": float(loss.detach().item()),
