@@ -1,0 +1,26 @@
+name: tissuemnist
+root: data
+
+train_split: train
+val_split: val
+
+size: 128
+as_rgb: true
+download: false
+mmap_mode: null
+
+class_names:
+  - Collecting Duct / Connecting Tubule
+  - Distal Convoluted Tubule
+  - Glomerular endothelial cells
+  - Interstitial endothelial cells
+  - Leukocytes
+  - Podocytes
+  - Proximal Tubule Segments
+  - Thick Ascending Limb
+
+batch_size: 256
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+persistent_workers: true

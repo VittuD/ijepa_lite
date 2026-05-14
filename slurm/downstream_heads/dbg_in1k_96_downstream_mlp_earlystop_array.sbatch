@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00
-#SBATCH --array=0-6
+#SBATCH --array=0-7
 #SBATCH --output=sbatch_logs/downstream_heads/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/downstream_heads/%x_%A_%a.err
 
@@ -23,7 +23,8 @@
 #   3 -> sun397
 #   4 -> food101
 #   5 -> fairface (race)
-#   6 -> vocseg
+#   6 -> tissuemnist
+#   7 -> vocseg
 #
 # Submit:
 #   sbatch slurm/downstream_heads/dbg_in1k_96_downstream_mlp_earlystop_array.sbatch
@@ -53,7 +54,7 @@ REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
 export PRETRAIN_CKPT="$REPO_ROOT/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/epoch_00099.pt"
 export DATA_ROOT="${FAST:-/scratch}/datasets/"
 
-DATASETS=(stl10 cifar100 dtd sun397 food101 fairface vocseg)
+DATASETS=(stl10 cifar100 dtd sun397 food101 fairface tissuemnist vocseg)
 DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
 
 EXTRA_ARGS=()

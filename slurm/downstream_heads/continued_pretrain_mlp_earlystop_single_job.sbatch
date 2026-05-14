@@ -69,6 +69,7 @@ DATASETS=(
   sun397
   food101
   fairface
+  tissuemnist
   vocseg
 )
 

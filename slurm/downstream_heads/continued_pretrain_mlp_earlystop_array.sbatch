@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00
-#SBATCH --array=0-29
+#SBATCH --array=0-34
 #SBATCH --output=sbatch_logs/downstream_heads/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/downstream_heads/%x_%A_%a.err
 
@@ -29,11 +29,12 @@
 #   2 -> sun397
 #   3 -> food101
 #   4 -> fairface (race)
-#   5 -> vocseg
+#   5 -> tissuemnist
+#   6 -> vocseg
 #
 # Mapping:
-#   ckpt_idx    = SLURM_ARRAY_TASK_ID / 6
-#   dataset_idx = SLURM_ARRAY_TASK_ID % 6
+#   ckpt_idx    = SLURM_ARRAY_TASK_ID / 7
+#   dataset_idx = SLURM_ARRAY_TASK_ID % 7
 #
 # Submit:
 #   sbatch slurm/downstream_heads/continued_pretrain_mlp_earlystop_array.sbatch
@@ -83,6 +84,7 @@ DATASETS=(
   sun397
   food101
   fairface
+  tissuemnist
   vocseg
 )
 

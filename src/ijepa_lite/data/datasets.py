@@ -288,6 +288,54 @@ class FairFaceDataset(Dataset):
         return img, target
 
 
+class TissueMNISTDataset(Dataset):
+    """
+    Thin wrapper around MedMNIST TissueMNIST using the MedMNIST+ 128px source.
+
+    The downstream probe stack expects ImageNet-style RGB-normalized inputs, so
+    we request RGB conversion from MedMNIST even though the source data are
+    grayscale.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform=None,
+        size: int = 128,
+        download: bool = False,
+        as_rgb: bool = True,
+        mmap_mode: Optional[str] = None,
+        class_names: Optional[list[str]] = None,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for tissuemnist. Expected: train|val|test."
+            )
+
+        from medmnist import TissueMNIST
+
+        self.ds = TissueMNIST(
+            split=split,
+            transform=transform,
+            download=download,
+            as_rgb=as_rgb,
+            root=root,
+            size=size,
+            mmap_mode=mmap_mode,
+        )
+        self.transform = transform
+        self.classes = list(class_names or [])
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        img, target = self.ds[idx]
+        return img, int(target.reshape(-1)[0])
+
+
 def _build_dataset_local(cfg, split: str, transform):
     name = str(cfg.name).lower()
     root = str(cfg.root)
@@ -446,6 +494,18 @@ def _build_dataset_local(cfg, split: str, transform):
             image_root=getattr(cfg, "image_root", None),
         )
 
+    if name == "tissuemnist":
+        return TissueMNISTDataset(
+            root=root,
+            split=split,
+            transform=transform,
+            size=int(getattr(cfg, "size", 128)),
+            download=bool(getattr(cfg, "download", False)),
+            as_rgb=bool(getattr(cfg, "as_rgb", True)),
+            mmap_mode=getattr(cfg, "mmap_mode", None),
+            class_names=list(getattr(cfg, "class_names", [])),
+        )
+
     raise ValueError(f"Unknown dataset name={name}")
 
 
@@ -532,6 +592,10 @@ def _maybe_download_dataset(cfg, split: str, transform) -> None:
 
     if name == "fairface":
         # No built-in download path; user should provide the extracted files.
+        return
+
+    if name == "tissuemnist":
+        # MedMNIST file should already be present under the shared dataset root.
         return
 
     raise ValueError(f"Unknown dataset name={name}")

@@ -27,6 +27,7 @@ def infer_num_classes(cfg, ds_train=None) -> int:
         "food101": 101,
         "dtd": 47,
         "sun397": 397,
+        "tissuemnist": 8,
         "vocseg": 21,
         "imagenet100": 100,
         "imagenet": 1000,  # imagenet1k on disk (ImageFolder)
