@@ -233,6 +233,11 @@ def linear_probe_eval(
     early_stop_min_epochs = int(getattr(cfg.train, "early_stop_min_epochs", 0))
     early_stop_min_delta = float(getattr(cfg.train, "early_stop_min_delta", 0.0))
     no_improve_epochs = 0
+    best_epoch = -1
+    best_val_acc1 = 0.0
+    last_train_acc1 = 0.0
+    last_val_acc1 = 0.0
+    last_val_loss = 0.0
 
     callbacks.on_run_start(cfg=cfg, state=state, model=unwrap_model(model))
 
@@ -310,6 +315,9 @@ def linear_probe_eval(
 
         val_loss = (val_loss_sum / val_total.clamp(min=1.0)).item()
         val_acc1 = (val_correct / val_total.clamp(min=1.0)).item()
+        last_train_acc1 = float(train_acc1)
+        last_val_acc1 = float(val_acc1)
+        last_val_loss = float(val_loss)
         improved = val_acc1 > float(state["best_acc1"]) + early_stop_min_delta
 
         if is_rank0():
@@ -337,6 +345,8 @@ def linear_probe_eval(
 
             if improved:
                 state["best_acc1"] = float(val_acc1)
+                best_val_acc1 = float(val_acc1)
+                best_epoch = int(epoch)
                 no_improve_epochs = 0
                 torch.save(payload, os.path.join(ckpt_dir, "linear_probe_best.pt"))
             else:
@@ -365,3 +375,15 @@ def linear_probe_eval(
 
     if is_rank0():
         callbacks.on_run_end(cfg=cfg, state=state)
+    if best_epoch < 0:
+        best_epoch = int(state["epoch"])
+        best_val_acc1 = float(last_val_acc1)
+    return {
+        "task_kind": "classification",
+        "train_acc": float(last_train_acc1),
+        "val_acc": float(last_val_acc1),
+        "best_val_acc": float(best_val_acc1),
+        "best_epoch": int(best_epoch),
+        "last_epoch": int(state["epoch"]),
+        "val_loss": float(last_val_loss),
+    }

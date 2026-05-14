@@ -7,7 +7,7 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import torch
 from hydra import compose, initialize_config_dir
@@ -122,6 +122,17 @@ def _append_summary(summary_path: Path | None, message: str) -> None:
             f.write(stamped + "\n")
 
 
+def _append_summary_block(summary_path: Path | None, header: str, lines: list[str]) -> None:
+    _append_summary(summary_path, header)
+    for line in lines:
+        print(line, flush=True)
+    if summary_path is not None:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("a") as f:
+            for line in lines:
+                f.write(line + "\n")
+
+
 @contextmanager
 def _pushd(path: Path):
     prev = Path.cwd()
@@ -177,7 +188,7 @@ def _run_one_dataset(
     data_root: str,
     logger_mode: str,
     fairface_target_attr: str,
-) -> tuple[str, Path]:
+) -> tuple[str, Path, dict[str, Any]]:
     exp_name = f"in1k_96_vits_ps8_{ckpt_label}_{dataset}_es_probe"
     overrides = _build_run_overrides(
         dataset=dataset,
@@ -198,7 +209,7 @@ def _run_one_dataset(
         callbacks = build_callbacks(cfg)
         if _dataset_task(dataset) == "segmentation_probe":
             train_loader, val_loader, num_classes = build_segmentation_probe_loaders(cfg)
-            segmentation_probe_eval(
+            metrics = segmentation_probe_eval(
                 cfg=cfg,
                 encoder=encoder,
                 train_loader=train_loader,
@@ -210,7 +221,7 @@ def _run_one_dataset(
             del train_loader, val_loader, callbacks
         else:
             train_loader, val_loader, num_classes = build_linear_probe_loaders(cfg)
-            linear_probe_eval(
+            metrics = linear_probe_eval(
                 cfg=cfg,
                 encoder=encoder,
                 train_loader=train_loader,
@@ -223,7 +234,86 @@ def _run_one_dataset(
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return exp_name, run_dir
+    return exp_name, run_dir, metrics
+
+
+def _fmt_pct(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{100.0 * float(value):6.2f}"
+
+
+def _truncate(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return text[: width - 3] + "..."
+
+
+def _format_checkpoint_table(
+    ckpt_label: str,
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    headers = ["dataset", "status", "train_acc", "val_acc", "best_val", "best_ep", "notes"]
+    body: list[list[str]] = []
+    for row in rows:
+        dataset = str(row["dataset"])
+        status = str(row["status"])
+        if status == "ok":
+            metrics = row["metrics"]
+            notes = ""
+            if metrics["task_kind"] == "segmentation":
+                notes = (
+                    f"pixel_acc; val_miou={100.0 * float(metrics['val_miou']):.2f}; "
+                    f"best_val_miou={100.0 * float(metrics['best_val_miou']):.2f}"
+                )
+            body.append(
+                [
+                    dataset,
+                    status,
+                    _fmt_pct(metrics.get("train_acc")),
+                    _fmt_pct(metrics.get("val_acc")),
+                    _fmt_pct(metrics.get("best_val_acc")),
+                    str(metrics.get("best_epoch", "-")),
+                    notes,
+                ]
+            )
+        else:
+            body.append(
+                [
+                    dataset,
+                    status,
+                    "-",
+                    "-",
+                    "-",
+                    "-",
+                    str(row["error"]),
+                ]
+            )
+
+    widths = [len(h) for h in headers]
+    for row in body:
+        for idx, cell in enumerate(row):
+            limit = 72 if headers[idx] == "notes" else 20
+            widths[idx] = max(widths[idx], min(len(cell), limit))
+
+    def _render_row(row: list[str]) -> str:
+        cells = []
+        for idx, cell in enumerate(row):
+            limit = 72 if headers[idx] == "notes" else 20
+            text = _truncate(cell, min(widths[idx], limit))
+            cells.append(text.ljust(min(widths[idx], limit)))
+        return " | ".join(cells)
+
+    sep = "-+-".join("-" * min(width, 72 if headers[idx] == "notes" else 20) for idx, width in enumerate(widths))
+    lines = [
+        f"Summary table for checkpoint: {ckpt_label}",
+        _render_row(headers),
+        sep,
+    ]
+    lines.extend(_render_row(row) for row in body)
+    return lines
 
 
 def main() -> None:
@@ -249,12 +339,17 @@ def main() -> None:
     )
 
     failures: list[tuple[str, str, str]] = []
+    checkpoint_rows: dict[str, list[dict[str, Any]]] = {}
 
     for ckpt_label, ckpt_path in checkpoints:
+        checkpoint_rows[ckpt_label] = []
         if not Path(ckpt_path).is_file():
             msg = f"checkpoint not found for {ckpt_label}: {ckpt_path}"
             _append_summary(summary_path, msg)
             failures.append((ckpt_label, "<checkpoint>", msg))
+            checkpoint_rows[ckpt_label].append(
+                {"dataset": "<checkpoint>", "status": "fail", "error": msg}
+            )
             if not args.continue_on_error:
                 break
             continue
@@ -277,7 +372,7 @@ def main() -> None:
         for dataset in datasets:
             try:
                 _append_summary(summary_path, f"start ckpt={ckpt_label} dataset={dataset}")
-                exp_name, run_dir = _run_one_dataset(
+                exp_name, run_dir, metrics = _run_one_dataset(
                     repo_root=repo_root,
                     config_dir=config_dir,
                     encoder=encoder,
@@ -292,9 +387,15 @@ def main() -> None:
                     summary_path,
                     f"ok ckpt={ckpt_label} dataset={dataset} exp={exp_name} run_dir={run_dir}",
                 )
+                checkpoint_rows[ckpt_label].append(
+                    {"dataset": dataset, "status": "ok", "metrics": metrics}
+                )
             except Exception as exc:
                 tb = traceback.format_exc()
                 failures.append((ckpt_label, dataset, str(exc)))
+                checkpoint_rows[ckpt_label].append(
+                    {"dataset": dataset, "status": "fail", "error": str(exc)}
+                )
                 _append_summary(
                     summary_path,
                     f"fail ckpt={ckpt_label} dataset={dataset} err={exc}\n{tb}",
@@ -306,6 +407,15 @@ def main() -> None:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    for ckpt_label, rows in checkpoint_rows.items():
+        if not rows:
+            continue
+        _append_summary_block(
+            summary_path,
+            f"final table ckpt={ckpt_label}",
+            _format_checkpoint_table(ckpt_label, rows),
+        )
 
     if failures:
         lines = "; ".join(

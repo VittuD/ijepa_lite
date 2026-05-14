@@ -158,6 +158,14 @@ def segmentation_probe_eval(
     early_stop_min_epochs = int(getattr(cfg.train, "early_stop_min_epochs", 0))
     early_stop_min_delta = float(getattr(cfg.train, "early_stop_min_delta", 0.0))
     no_improve_epochs = 0
+    best_epoch = -1
+    best_val_miou = 0.0
+    best_val_pixel_acc = 0.0
+    last_train_miou = 0.0
+    last_train_pixel_acc = 0.0
+    last_val_miou = 0.0
+    last_val_pixel_acc = 0.0
+    last_val_loss = 0.0
 
     callbacks.on_run_start(cfg=cfg, state=state, model=unwrap_model(model))
 
@@ -229,6 +237,11 @@ def segmentation_probe_eval(
 
         val_loss = (val_loss_sum / val_items.clamp(min=1)).item()
         val_miou, val_pixel_acc = _miou_and_pixel_acc(val_conf)
+        last_train_miou = float(train_miou)
+        last_train_pixel_acc = float(train_pixel_acc)
+        last_val_miou = float(val_miou)
+        last_val_pixel_acc = float(val_pixel_acc)
+        last_val_loss = float(val_loss)
         improved = val_miou > float(state["best_miou"]) + early_stop_min_delta
 
         if is_rank0():
@@ -258,6 +271,9 @@ def segmentation_probe_eval(
 
             if improved:
                 state["best_miou"] = float(val_miou)
+                best_val_miou = float(val_miou)
+                best_val_pixel_acc = float(val_pixel_acc)
+                best_epoch = int(epoch)
                 no_improve_epochs = 0
                 torch.save(payload, os.path.join(ckpt_dir, "segmentation_probe_best.pt"))
             else:
@@ -286,3 +302,19 @@ def segmentation_probe_eval(
 
     if is_rank0():
         callbacks.on_run_end(cfg=cfg, state=state)
+    if best_epoch < 0:
+        best_epoch = int(state["epoch"])
+        best_val_miou = float(last_val_miou)
+        best_val_pixel_acc = float(last_val_pixel_acc)
+    return {
+        "task_kind": "segmentation",
+        "train_acc": float(last_train_pixel_acc),
+        "val_acc": float(last_val_pixel_acc),
+        "best_val_acc": float(best_val_pixel_acc),
+        "best_epoch": int(best_epoch),
+        "last_epoch": int(state["epoch"]),
+        "val_loss": float(last_val_loss),
+        "train_miou": float(last_train_miou),
+        "val_miou": float(last_val_miou),
+        "best_val_miou": float(best_val_miou),
+    }
