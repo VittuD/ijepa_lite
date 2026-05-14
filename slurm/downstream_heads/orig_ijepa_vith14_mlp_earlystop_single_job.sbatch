@@ -62,6 +62,8 @@ DATASETS=(
   sun397
   food101
   fairface
+  clevr_count
+  organmnist
   tissuemnist
   vocseg
 )

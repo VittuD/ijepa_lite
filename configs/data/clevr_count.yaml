@@ -1,0 +1,17 @@
+name: clevr_count
+root: ${oc.env:FAST,/scratch}/datasets/
+
+train_split: train
+val_split: val
+
+download: false
+
+# CLEVR scenes contain between 3 and 10 objects. We map these raw counts to
+# contiguous class ids 0..7 for downstream classification.
+class_values: [3, 4, 5, 6, 7, 8, 9, 10]
+
+batch_size: 256
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+persistent_workers: true

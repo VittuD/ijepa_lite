@@ -336,6 +336,110 @@ class TissueMNISTDataset(Dataset):
         return img, int(target.reshape(-1)[0])
 
 
+class OrganMNISTDataset(Dataset):
+    """
+    Thin wrapper around MedMNIST OrganAMNIST using the MedMNIST+ 128px source.
+
+    We interpret the repo-level `organmnist` downstream task as the axial-view
+    OrganAMNIST variant and request RGB conversion to stay compatible with the
+    shared ImageNet-style probe transforms.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform=None,
+        size: int = 128,
+        download: bool = False,
+        as_rgb: bool = True,
+        mmap_mode: Optional[str] = None,
+        class_names: Optional[list[str]] = None,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for organmnist. Expected: train|val|test."
+            )
+
+        from medmnist import OrganAMNIST
+
+        self.ds = OrganAMNIST(
+            split=split,
+            transform=transform,
+            download=download,
+            as_rgb=as_rgb,
+            root=root,
+            size=size,
+            mmap_mode=mmap_mode,
+        )
+        self.transform = transform
+        self.classes = list(class_names or [])
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        img, target = self.ds[idx]
+        return img, int(target.reshape(-1)[0])
+
+
+class CLEVRCountDataset(Dataset):
+    """
+    Downstream classification wrapper for torchvision CLEVRClassification.
+
+    torchvision returns the raw object count per scene. For downstream
+    cross-entropy probes we remap the configured count values to contiguous
+    zero-based class ids.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform=None,
+        download: bool = False,
+        class_values: Optional[list[int]] = None,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for clevr_count. Expected: train|val|test."
+            )
+
+        base = tv_datasets.CLEVRClassification(
+            root=root,
+            split=split,
+            transform=transform,
+            download=download,
+        )
+
+        inferred_values = sorted({int(x) for x in base._labels if x is not None})
+        values = list(class_values) if class_values is not None else inferred_values
+        if not values:
+            raise ValueError("clevr_count needs non-empty class_values or non-empty labels.")
+
+        self.ds = base
+        self.transform = transform
+        self.class_values = [int(v) for v in values]
+        self.classes = [str(v) for v in self.class_values]
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+        self._value_to_idx = {value: idx for idx, value in enumerate(self.class_values)}
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        img, target = self.ds[idx]
+        if target is None:
+            raise ValueError("clevr_count test split does not provide labels for downstream probing.")
+        target = int(target)
+        if target not in self._value_to_idx:
+            raise ValueError(
+                f"CLEVR count target {target} not present in configured class_values={self.class_values}."
+            )
+        return img, self._value_to_idx[target]
+
+
 def _build_dataset_local(cfg, split: str, transform):
     name = str(cfg.name).lower()
     root = str(cfg.root)
@@ -506,6 +610,28 @@ def _build_dataset_local(cfg, split: str, transform):
             class_names=list(getattr(cfg, "class_names", [])),
         )
 
+    if name == "organmnist":
+        return OrganMNISTDataset(
+            root=root,
+            split=split,
+            transform=transform,
+            size=int(getattr(cfg, "size", 128)),
+            download=bool(getattr(cfg, "download", False)),
+            as_rgb=bool(getattr(cfg, "as_rgb", True)),
+            mmap_mode=getattr(cfg, "mmap_mode", None),
+            class_names=list(getattr(cfg, "class_names", [])),
+        )
+
+    if name == "clevr_count":
+        class_values = getattr(cfg, "class_values", None)
+        return CLEVRCountDataset(
+            root=root,
+            split=split,
+            transform=transform,
+            download=bool(getattr(cfg, "download", False)),
+            class_values=list(class_values) if class_values is not None else None,
+        )
+
     raise ValueError(f"Unknown dataset name={name}")
 
 
@@ -596,6 +722,19 @@ def _maybe_download_dataset(cfg, split: str, transform) -> None:
 
     if name == "tissuemnist":
         # MedMNIST file should already be present under the shared dataset root.
+        return
+
+    if name == "organmnist":
+        # MedMNIST file should already be present under the shared dataset root.
+        return
+
+    if name == "clevr_count":
+        tv_datasets.CLEVRClassification(
+            root=root,
+            split=split,
+            transform=transform,
+            download=True,
+        )
         return
 
     raise ValueError(f"Unknown dataset name={name}")

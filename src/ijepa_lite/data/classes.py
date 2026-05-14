@@ -27,6 +27,8 @@ def infer_num_classes(cfg, ds_train=None) -> int:
         "food101": 101,
         "dtd": 47,
         "sun397": 397,
+        "clevr_count": 8,
+        "organmnist": 11,
         "tissuemnist": 8,
         "vocseg": 21,
         "imagenet100": 100,
