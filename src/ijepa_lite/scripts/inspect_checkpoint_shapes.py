@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -140,10 +141,14 @@ def _infer_depth(sd: dict[str, torch.Tensor]) -> int | None:
         parts = key.split(".")
         for idx, part in enumerate(parts[:-1]):
             if part in ("layers", "blocks") and idx + 1 < len(parts):
+                next_part = parts[idx + 1]
                 try:
-                    max_idx = max(max_idx, int(parts[idx + 1]))
+                    max_idx = max(max_idx, int(next_part))
+                    continue
                 except ValueError:
-                    pass
+                    match = re.search(r"(\d+)$", next_part)
+                    if match is not None:
+                        max_idx = max(max_idx, int(match.group(1)))
     return max_idx + 1 if max_idx >= 0 else None
 
 
@@ -233,20 +238,32 @@ def _print_encoder_summary(name: str, sd: dict[str, torch.Tensor], max_keys: int
 def _pick_best_encoder_view(
     candidates: list[tuple[str, dict[str, torch.Tensor]]],
 ) -> tuple[str, dict[str, torch.Tensor]] | None:
+    def _score(sd: dict[str, torch.Tensor]) -> tuple[int, int, int]:
+        info = _infer_encoder_shape(sd)
+        structure_hits = 0
+        if info.get("patch_key") is not None:
+            structure_hits += 1
+        if info.get("pos_key") is not None:
+            structure_hits += 1
+        if info.get("depth") is not None:
+            structure_hits += 1
+        return (structure_hits, len(sd), 1 if info.get("cls_key") is not None else 0)
+
     best_name = None
     best_sd = None
-    best_score = -1
+    best_score: tuple[int, int, int] = (-1, -1, -1)
     for candidate_name, sd in candidates:
         for prefix_name, pref_sd in _collect_prefix_views(sd):
-            score = len(pref_sd)
+            score = _score(pref_sd)
             if score > best_score:
                 best_name = f"{candidate_name}:{prefix_name}"
                 best_sd = pref_sd
                 best_score = score
-        if len(sd) > best_score:
+        score = _score(sd)
+        if score > best_score:
             best_name = candidate_name
             best_sd = sd
-            best_score = len(sd)
+            best_score = score
     if best_name is None or best_sd is None:
         return None
     return best_name, best_sd
