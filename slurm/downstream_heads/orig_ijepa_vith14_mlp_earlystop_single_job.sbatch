@@ -52,6 +52,8 @@ DATA_ROOT="${FAST:-/scratch}/datasets"
 SUMMARY_PATH="${REPO_ROOT}/sbatch_logs/downstream_heads/orig_ijepa_vith14_results_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k"
 CKPT_PATH="${WORK}/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.pth.tar"
+CLASSIFICATION_BATCH_SIZE=384
+SEGMENTATION_BATCH_SIZE=192
 
 DATASETS=(
   stl10
@@ -78,6 +80,8 @@ CMD=(
   --model-embed-dim 1280
   --model-num-heads 16
   --model-depth 32
+  --classification-batch-size "${CLASSIFICATION_BATCH_SIZE}"
+  --segmentation-batch-size "${SEGMENTATION_BATCH_SIZE}"
   --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
 )
 
@@ -89,6 +93,8 @@ echo "REPO_ROOT=${REPO_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
 echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CKPT_PATH=${CKPT_PATH}"
+echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
+echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
 nvidia-smi -L
 
 "${CMD[@]}"

@@ -72,6 +72,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-embed-dim", type=int, default=None, help="Override model.embed_dim.")
     p.add_argument("--model-num-heads", type=int, default=None, help="Override model.num_heads.")
     p.add_argument("--model-depth", type=int, default=None, help="Override model.depth.")
+    p.add_argument(
+        "--classification-batch-size",
+        type=int,
+        default=None,
+        help="Optional data.batch_size override for classification downstream tasks.",
+    )
+    p.add_argument(
+        "--segmentation-batch-size",
+        type=int,
+        default=None,
+        help="Optional data.batch_size override for segmentation downstream tasks.",
+    )
     return p.parse_args()
 
 
@@ -178,6 +190,21 @@ def _dataset_task(dataset: str) -> str:
     return "linear_probe"
 
 
+def _batch_overrides_for_dataset(
+    dataset: str,
+    *,
+    classification_batch_size: int | None,
+    segmentation_batch_size: int | None,
+) -> list[str]:
+    if _dataset_task(dataset) == "segmentation_probe":
+        if segmentation_batch_size is not None:
+            return [f"data.batch_size={segmentation_batch_size}"]
+        return []
+    if classification_batch_size is not None:
+        return [f"data.batch_size={classification_batch_size}"]
+    return []
+
+
 def _build_run_overrides(
     *,
     dataset: str,
@@ -187,6 +214,8 @@ def _build_run_overrides(
     logger_mode: str,
     fairface_target_attr: str,
     model_overrides: list[str],
+    classification_batch_size: int | None,
+    segmentation_batch_size: int | None,
 ) -> list[str]:
     overrides = [
         f"experiment={_dataset_experiment(dataset)}",
@@ -197,6 +226,13 @@ def _build_run_overrides(
         f"logger.mode={logger_mode}",
     ]
     overrides.extend(model_overrides)
+    overrides.extend(
+        _batch_overrides_for_dataset(
+            dataset,
+            classification_batch_size=classification_batch_size,
+            segmentation_batch_size=segmentation_batch_size,
+        )
+    )
     if dataset == "fairface":
         overrides.append(f"data.target_attr={fairface_target_attr}")
     return overrides
@@ -214,6 +250,8 @@ def _run_one_dataset(
     logger_mode: str,
     fairface_target_attr: str,
     model_overrides: list[str],
+    classification_batch_size: int | None,
+    segmentation_batch_size: int | None,
 ) -> tuple[str, Path, dict[str, Any]]:
     exp_name = f"downstream_{ckpt_label}_{dataset}_es_probe"
     overrides = _build_run_overrides(
@@ -224,6 +262,8 @@ def _run_one_dataset(
         logger_mode=logger_mode,
         fairface_target_attr=fairface_target_attr,
         model_overrides=model_overrides,
+        classification_batch_size=classification_batch_size,
+        segmentation_batch_size=segmentation_batch_size,
     )
     cfg = _compose_cfg(config_dir, overrides)
     run_dir = _make_run_dir(repo_root, exp_name)
@@ -412,6 +452,8 @@ def main() -> None:
                     logger_mode=args.logger_mode,
                     fairface_target_attr=args.fairface_target_attr,
                     model_overrides=model_overrides,
+                    classification_batch_size=args.classification_batch_size,
+                    segmentation_batch_size=args.segmentation_batch_size,
                 )
                 _append_summary(
                     summary_path,
