@@ -1,4 +1,4 @@
-arch: vit_small_16   # vit_small_16 | vit_base_16
+arch: vit_small      # vit_small | vit_base | vit_large | vit_huge
 image_size: 224
 patch_size: 16
 embed_dim: 384

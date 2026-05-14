@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep running later sweep items even if one fails.",
     )
+    p.add_argument("--model-arch", default=None, help="Override model.arch for the downstream encoder.")
+    p.add_argument("--model-image-size", type=int, default=None, help="Override model.image_size.")
+    p.add_argument("--model-patch-size", type=int, default=None, help="Override model.patch_size.")
+    p.add_argument("--model-embed-dim", type=int, default=None, help="Override model.embed_dim.")
+    p.add_argument("--model-num-heads", type=int, default=None, help="Override model.num_heads.")
+    p.add_argument("--model-depth", type=int, default=None, help="Override model.depth.")
     return p.parse_args()
 
 
@@ -145,8 +151,25 @@ def _pushd(path: Path):
 
 def _dataset_experiment(dataset: str) -> str:
     if dataset == "vocseg":
-        return "in1k_96_vits_ps8_vocseg_probe_earlystop"
-    return "in1k_96_vits_ps8_downstream_mlp_earlystop"
+        return "downstream_vocseg_mlp_earlystop"
+    return "downstream_mlp_earlystop"
+
+
+def _model_overrides_from_args(args: argparse.Namespace) -> list[str]:
+    overrides: list[str] = []
+    if args.model_arch is not None:
+        overrides.append(f"model.arch={args.model_arch}")
+    if args.model_image_size is not None:
+        overrides.append(f"model.image_size={args.model_image_size}")
+    if args.model_patch_size is not None:
+        overrides.append(f"model.patch_size={args.model_patch_size}")
+    if args.model_embed_dim is not None:
+        overrides.append(f"model.embed_dim={args.model_embed_dim}")
+    if args.model_num_heads is not None:
+        overrides.append(f"model.num_heads={args.model_num_heads}")
+    if args.model_depth is not None:
+        overrides.append(f"model.depth={args.model_depth}")
+    return overrides
 
 
 def _dataset_task(dataset: str) -> str:
@@ -163,6 +186,7 @@ def _build_run_overrides(
     exp_name: str,
     logger_mode: str,
     fairface_target_attr: str,
+    model_overrides: list[str],
 ) -> list[str]:
     overrides = [
         f"experiment={_dataset_experiment(dataset)}",
@@ -172,6 +196,7 @@ def _build_run_overrides(
         f"exp_name={exp_name}",
         f"logger.mode={logger_mode}",
     ]
+    overrides.extend(model_overrides)
     if dataset == "fairface":
         overrides.append(f"data.target_attr={fairface_target_attr}")
     return overrides
@@ -188,8 +213,9 @@ def _run_one_dataset(
     data_root: str,
     logger_mode: str,
     fairface_target_attr: str,
+    model_overrides: list[str],
 ) -> tuple[str, Path, dict[str, Any]]:
-    exp_name = f"in1k_96_vits_ps8_{ckpt_label}_{dataset}_es_probe"
+    exp_name = f"downstream_{ckpt_label}_{dataset}_es_probe"
     overrides = _build_run_overrides(
         dataset=dataset,
         data_root=data_root,
@@ -197,6 +223,7 @@ def _run_one_dataset(
         exp_name=exp_name,
         logger_mode=logger_mode,
         fairface_target_attr=fairface_target_attr,
+        model_overrides=model_overrides,
     )
     cfg = _compose_cfg(config_dir, overrides)
     run_dir = _make_run_dir(repo_root, exp_name)
@@ -327,6 +354,7 @@ def main() -> None:
     data_root = str(Path(args.data_root))
     checkpoints = _parse_checkpoint_specs(args.checkpoint, repo_root)
     datasets = list(args.dataset)
+    model_overrides = _model_overrides_from_args(args)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     _append_summary(
@@ -357,10 +385,11 @@ def main() -> None:
         ckpt_cfg = _compose_cfg(
             config_dir,
             [
-                "experiment=in1k_96_vits_ps8_downstream_mlp_earlystop",
+                "experiment=downstream_mlp_earlystop",
                 f"task.pretrained_ckpt={ckpt_path}",
                 f"data.root={data_root}",
                 f"logger.mode={args.logger_mode}",
+                *model_overrides,
             ],
         )
         set_seed(int(ckpt_cfg.seed))
@@ -382,6 +411,7 @@ def main() -> None:
                     data_root=data_root,
                     logger_mode=args.logger_mode,
                     fairface_target_attr=args.fairface_target_attr,
+                    model_overrides=model_overrides,
                 )
                 _append_summary(
                     summary_path,

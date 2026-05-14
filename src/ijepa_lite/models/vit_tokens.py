@@ -153,7 +153,7 @@ def build_torchvision_vit_tokens(cfg) -> ViTTokens:
     depth = int(cfg.depth)
     num_heads = int(cfg.num_heads)
 
-    if arch == "vit_base_16":
+    if arch in ("vit_base", "vit_base_16"):
         if image_size == 224 and patch_size == 16:
             vit = vit_b_16(weights=None)
         else:
@@ -166,7 +166,7 @@ def build_torchvision_vit_tokens(cfg) -> ViTTokens:
                 mlp_dim=embed_dim * 4,
                 num_classes=1000,
             )
-    elif arch == "vit_large_16":
+    elif arch in ("vit_large", "vit_large_16"):
         if image_size == 224 and patch_size == 16:
             vit = vit_l_16(weights=None)
         else:
@@ -179,8 +179,18 @@ def build_torchvision_vit_tokens(cfg) -> ViTTokens:
                 mlp_dim=embed_dim * 4,
                 num_classes=1000,
             )
-    elif arch == "vit_small_16":
+    elif arch in ("vit_small", "vit_small_16"):
         vit = _build_vit_small_16(image_size, patch_size, embed_dim, depth, num_heads)
+    elif arch in ("vit_huge", "vit_huge_14"):
+        vit = VisionTransformer(
+            image_size=image_size,
+            patch_size=patch_size,
+            num_layers=depth,
+            num_heads=num_heads,
+            hidden_dim=embed_dim,
+            mlp_dim=embed_dim * 4,
+            num_classes=1000,
+        )
     else:
         raise ValueError(f"Unknown arch={arch}")
 

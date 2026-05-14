@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Any, Dict, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from ijepa_lite.callbacks.ckpt_cb import CheckpointCallback
@@ -653,6 +654,153 @@ def build_eval_masker(cfg, sd_full: dict, device: torch.device):
 # Linear probe (unchanged)
 # ------------------------------------------------------------------
 
+
+def _normalize_probe_checkpoint_state_dict(sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    nested_keys = ("target_encoder", "context_encoder", "encoder")
+    for key in nested_keys:
+        nested = sd.get(key)
+        if isinstance(nested, dict):
+            sd = nested
+            break
+
+    normalized: Dict[str, torch.Tensor] = {}
+    for key, value in sd.items():
+        if not isinstance(value, torch.Tensor):
+            continue
+        if key.startswith("module."):
+            key = key[len("module."):]
+        normalized[key] = value
+    return normalized
+
+
+def _extract_probe_encoder_state_dict(
+    sd: Dict[str, torch.Tensor],
+    prefer: str,
+) -> Dict[str, torch.Tensor]:
+    if prefer == "auto":
+        prefixes = (
+            "target_encoder.vit.",
+            "target_encoder.",
+            "ema_encoder.vit.",
+            "ema_encoder.",
+            "context_encoder.vit.",
+            "context_encoder.",
+            "encoder.vit.",
+            "encoder.",
+            "vit.",
+            "backbone.",
+        )
+    elif prefer in ("target", "ema"):
+        prefixes = (
+            "target_encoder.vit.",
+            "target_encoder.",
+            "ema_encoder.vit.",
+            "ema_encoder.",
+            "context_encoder.vit.",
+            "context_encoder.",
+            "encoder.vit.",
+            "encoder.",
+            "vit.",
+            "backbone.",
+        )
+    elif prefer in ("context", "shared"):
+        prefixes = (
+            "context_encoder.vit.",
+            "context_encoder.",
+            "encoder.vit.",
+            "encoder.",
+            "target_encoder.vit.",
+            "target_encoder.",
+            "ema_encoder.vit.",
+            "ema_encoder.",
+            "vit.",
+            "backbone.",
+        )
+    else:
+        raise ValueError(f"Unknown task.encoder={prefer!r}")
+
+    for prefix in prefixes:
+        enc_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+        if enc_sd:
+            return enc_sd
+    return sd
+
+
+def _resize_torchvision_pos_embedding(
+    src_pos: torch.Tensor,
+    dst_pos: torch.Tensor,
+) -> torch.Tensor:
+    if src_pos.ndim != 3 or dst_pos.ndim != 3:
+        raise ValueError("Expected 3D positional embeddings for torchvision ViT.")
+    if src_pos.shape[0] != 1 or dst_pos.shape[0] != 1:
+        raise ValueError("Expected batch dimension 1 for positional embeddings.")
+    if src_pos.shape[2] != dst_pos.shape[2]:
+        raise ValueError(
+            "Cannot resize positional embeddings with different channel dimensions: "
+            f"{tuple(src_pos.shape)} vs {tuple(dst_pos.shape)}."
+        )
+
+    src_tokens = src_pos.shape[1] - 1
+    dst_tokens = dst_pos.shape[1] - 1
+    src_grid = int(math.isqrt(src_tokens))
+    dst_grid = int(math.isqrt(dst_tokens))
+    if src_grid * src_grid != src_tokens or dst_grid * dst_grid != dst_tokens:
+        raise ValueError(
+            "Positional embedding resize requires square patch grids after stripping CLS."
+        )
+
+    cls_pos = src_pos[:, :1, :]
+    patch_pos = src_pos[:, 1:, :]
+    patch_pos = patch_pos.reshape(1, src_grid, src_grid, src_pos.shape[2]).permute(0, 3, 1, 2)
+    patch_pos = F.interpolate(
+        patch_pos,
+        size=(dst_grid, dst_grid),
+        mode="bicubic",
+        align_corners=False,
+    )
+    patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, dst_tokens, src_pos.shape[2])
+    return torch.cat([cls_pos, patch_pos], dim=1)
+
+
+def _adapt_probe_encoder_state_dict(
+    enc_sd: Dict[str, torch.Tensor],
+    encoder: torch.nn.Module,
+) -> Dict[str, torch.Tensor]:
+    target_sd = encoder.state_dict()
+    overlap = [key for key in enc_sd if key in target_sd]
+    if not overlap:
+        raise ValueError(
+            "Checkpoint encoder weights do not match the torchvision downstream encoder format. "
+            "If this is an original I-JEPA checkpoint, it needs a dedicated backend instead of "
+            "the current torchvision probe path."
+        )
+
+    adapted = dict(enc_sd)
+    incompatible: list[str] = []
+    for key in overlap:
+        src = adapted[key]
+        dst = target_sd[key]
+        if src.shape == dst.shape:
+            continue
+        if key == "vit.encoder.pos_embedding":
+            adapted[key] = _resize_torchvision_pos_embedding(src, dst)
+            continue
+        if key == "vit.conv_proj.weight":
+            raise ValueError(
+                "Patch embedding shape mismatch between checkpoint and downstream model: "
+                f"{tuple(src.shape)} vs {tuple(dst.shape)}. "
+                "For downstream probes, model.patch_size and model.embed_dim must match "
+                "the pretrained encoder."
+            )
+        incompatible.append(f"{key}: ckpt{tuple(src.shape)} != model{tuple(dst.shape)}")
+
+    if incompatible:
+        msg = "; ".join(incompatible[:4])
+        if len(incompatible) > 4:
+            msg += "; ..."
+        raise ValueError(f"Incompatible downstream encoder checkpoint shapes: {msg}")
+    return adapted
+
 def build_linear_probe_model(cfg) -> torch.nn.Module:
     encoder = build_torchvision_vit_tokens(cfg.model)
 
@@ -664,25 +812,11 @@ def build_linear_probe_model(cfg) -> torch.nn.Module:
             if isinstance(payload, dict) and "model" in payload
             else payload
         )
+        sd = _normalize_probe_checkpoint_state_dict(sd)
 
         prefer = str(getattr(cfg.task, "encoder", "auto")).lower()
-        if prefer == "auto":
-            prefixes = ("target_encoder.", "context_encoder.", "encoder.")
-        elif prefer in ("target", "ema"):
-            prefixes = ("target_encoder.", "context_encoder.", "encoder.")
-        elif prefer in ("context", "shared"):
-            prefixes = ("context_encoder.", "encoder.", "target_encoder.")
-        else:
-            raise ValueError(f"Unknown task.encoder={prefer!r}")
-
-        enc_sd = {}
-        for prefix in prefixes:
-            enc_sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
-            if enc_sd:
-                break
-        if not enc_sd:
-            enc_sd = sd
-
+        enc_sd = _extract_probe_encoder_state_dict(sd, prefer)
+        enc_sd = _adapt_probe_encoder_state_dict(enc_sd, encoder)
         encoder.load_state_dict(enc_sd, strict=False)
 
     for p in encoder.parameters():
