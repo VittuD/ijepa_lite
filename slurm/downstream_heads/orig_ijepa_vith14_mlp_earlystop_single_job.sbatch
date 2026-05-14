@@ -47,8 +47,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 mkdir -p sbatch_logs/downstream_heads
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${FAST:-/scratch}/datasets"
 SUMMARY_PATH="${REPO_ROOT}/sbatch_logs/downstream_heads/orig_ijepa_vith14_results_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k"
