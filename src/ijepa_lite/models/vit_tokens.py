@@ -72,9 +72,10 @@ class ViTTokens(nn.Module):
     default and the return type is identical to before when False.
     """
 
-    def __init__(self, vit: VisionTransformer) -> None:
+    def __init__(self, vit: VisionTransformer, use_cls_token: bool = True) -> None:
         super().__init__()
         self.vit = vit
+        self.use_cls_token = bool(use_cls_token)
 
     def forward(
         self,
@@ -107,8 +108,9 @@ class ViTTokens(nn.Module):
         # Stage 1: patchify + positional embedding (full image, all N tokens)
         # ------------------------------------------------------------------
         x = self.vit._process_input(x)  # (B, N, D)
-        cls = self.vit.class_token.expand(b, -1, -1)  # (B, 1, D)
-        x = torch.cat([cls, x], dim=1)  # (B, 1+N, D)
+        if self.use_cls_token:
+            cls = self.vit.class_token.expand(b, -1, -1)  # (B, 1, D)
+            x = torch.cat([cls, x], dim=1)  # (B, 1+N, D)
         x = x + self.vit.encoder.pos_embedding  # broadcast add
         x = self.vit.encoder.dropout(x)
 
@@ -119,13 +121,16 @@ class ViTTokens(nn.Module):
         # global summary token; only the patch sequence is subsetted.
         # ------------------------------------------------------------------
         if keep_idx is not None:
-            patch_tokens = x[:, 1:]  # (B, N, D)
+            patch_tokens = x[:, 1:] if self.use_cls_token else x  # (B, N, D)
             d = patch_tokens.shape[-1]
             # gather the K kept patches; keep_idx is (B, K)
             patch_tokens = patch_tokens.gather(
                 1, keep_idx.unsqueeze(-1).expand(-1, -1, d)
             )  # (B, K, D)
-            x = torch.cat([x[:, :1], patch_tokens], dim=1)  # (B, 1+K, D)
+            if self.use_cls_token:
+                x = torch.cat([x[:, :1], patch_tokens], dim=1)  # (B, 1+K, D)
+            else:
+                x = patch_tokens
 
         # ------------------------------------------------------------------
         # Stage 3: transformer blocks + layer norm
@@ -136,9 +141,11 @@ class ViTTokens(nn.Module):
         x = self.vit.encoder.layers(x)
         x = self.vit.encoder.ln(x)
 
-        patch_tokens = x[:, 1:]  # (B, K, D) or (B, N, D) — drop CLS from sequence
+        patch_tokens = x[:, 1:] if self.use_cls_token else x
 
         if return_cls:
+            if not self.use_cls_token:
+                raise ValueError("return_cls=True is not supported when use_cls_token=False.")
             cls_token = x[:, 0]  # (B, D)
             return cls_token, patch_tokens
 
@@ -152,6 +159,7 @@ def build_torchvision_vit_tokens(cfg) -> ViTTokens:
     embed_dim = int(cfg.embed_dim)
     depth = int(cfg.depth)
     num_heads = int(cfg.num_heads)
+    use_cls_token = bool(getattr(cfg, "use_cls_token", True))
 
     if arch in ("vit_base", "vit_base_16"):
         if image_size == 224 and patch_size == 16:
@@ -197,12 +205,20 @@ def build_torchvision_vit_tokens(cfg) -> ViTTokens:
     if bool(getattr(cfg, "remove_head", True)):
         _remove_classifier_head(vit)
 
+    if not use_cls_token:
+        grid_size = image_size // patch_size
+        vit.encoder.pos_embedding = nn.Parameter(
+            torch.zeros(1, grid_size * grid_size, embed_dim)
+        )
+
     # Replace torchvision's learned pos_embedding if sincos is requested
     pos_kind = str(getattr(cfg, "pos_embed_kind", "learned"))
     if pos_kind != "learned":
         from ijepa_lite.models.pos_embed import build_pos_embed_2d_with_cls
         grid_size = image_size // patch_size
         new_pe = build_pos_embed_2d_with_cls(pos_kind, grid_size, embed_dim)
+        if not use_cls_token:
+            new_pe = new_pe[:, 1:, :]
         vit.encoder.pos_embedding = new_pe
 
-    return ViTTokens(vit)
+    return ViTTokens(vit, use_cls_token=use_cls_token)

@@ -9,3 +9,4 @@ ema_momentum: [0.996, 0.996]   # [start, end]; set end > start for linear warmup
 target_mode: ema               # ema | shared
 remove_head: true
 pos_embed_kind: learned        # "learned" or "sincos" — applies to encoder, predictor, and maskers
+use_cls_token: true

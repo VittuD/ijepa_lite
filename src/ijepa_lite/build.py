@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from typing import Any, Dict, Optional
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -679,41 +681,26 @@ def _extract_probe_encoder_state_dict(
 ) -> Dict[str, torch.Tensor]:
     if prefer == "auto":
         prefixes = (
-            "target_encoder.vit.",
             "target_encoder.",
-            "ema_encoder.vit.",
             "ema_encoder.",
-            "context_encoder.vit.",
             "context_encoder.",
-            "encoder.vit.",
             "encoder.",
-            "vit.",
             "backbone.",
         )
     elif prefer in ("target", "ema"):
         prefixes = (
-            "target_encoder.vit.",
             "target_encoder.",
-            "ema_encoder.vit.",
             "ema_encoder.",
-            "context_encoder.vit.",
             "context_encoder.",
-            "encoder.vit.",
             "encoder.",
-            "vit.",
             "backbone.",
         )
     elif prefer in ("context", "shared"):
         prefixes = (
-            "context_encoder.vit.",
             "context_encoder.",
-            "encoder.vit.",
             "encoder.",
-            "target_encoder.vit.",
             "target_encoder.",
-            "ema_encoder.vit.",
             "ema_encoder.",
-            "vit.",
             "backbone.",
         )
     else:
@@ -762,17 +749,167 @@ def _resize_torchvision_pos_embedding(
     return torch.cat([cls_pos, patch_pos], dim=1)
 
 
+def _resize_patch_only_pos_embedding(
+    src_pos: torch.Tensor,
+    dst_pos: torch.Tensor,
+) -> torch.Tensor:
+    if src_pos.ndim != 3 or dst_pos.ndim != 3:
+        raise ValueError("Expected 3D patch-only positional embeddings.")
+    if src_pos.shape[0] != 1 or dst_pos.shape[0] != 1:
+        raise ValueError("Expected batch dimension 1 for positional embeddings.")
+    if src_pos.shape[2] != dst_pos.shape[2]:
+        raise ValueError(
+            "Cannot resize positional embeddings with different channel dimensions: "
+            f"{tuple(src_pos.shape)} vs {tuple(dst_pos.shape)}."
+        )
+
+    src_tokens = src_pos.shape[1]
+    dst_tokens = dst_pos.shape[1]
+    src_grid = int(math.isqrt(src_tokens))
+    dst_grid = int(math.isqrt(dst_tokens))
+    if src_grid * src_grid != src_tokens or dst_grid * dst_grid != dst_tokens:
+        raise ValueError("Patch-only positional embedding resize requires square patch grids.")
+
+    patch_pos = src_pos.reshape(1, src_grid, src_grid, src_pos.shape[2]).permute(0, 3, 1, 2)
+    patch_pos = F.interpolate(
+        patch_pos,
+        size=(dst_grid, dst_grid),
+        mode="bicubic",
+        align_corners=False,
+    )
+    return patch_pos.permute(0, 2, 3, 1).reshape(1, dst_tokens, src_pos.shape[2])
+
+
+def _looks_like_original_ijepa_encoder_state_dict(enc_sd: Dict[str, torch.Tensor]) -> bool:
+    return (
+        "patch_embed.proj.weight" in enc_sd
+        and "pos_embed" in enc_sd
+        and any(k.startswith("blocks.") for k in enc_sd)
+    )
+
+
+def _set_vit_tokens_patch_only_mode(
+    encoder: torch.nn.Module,
+    *,
+    pos_tokens: int,
+) -> None:
+    if not hasattr(encoder, "vit") or not hasattr(encoder.vit, "encoder"):
+        raise ValueError("Expected a ViTTokens encoder backed by torchvision VisionTransformer.")
+    embed_dim = int(encoder.vit.encoder.pos_embedding.shape[-1])
+    device = encoder.vit.encoder.pos_embedding.device
+    dtype = encoder.vit.encoder.pos_embedding.dtype
+    encoder.use_cls_token = False
+    encoder.vit.encoder.pos_embedding = nn.Parameter(
+        torch.zeros(1, pos_tokens, embed_dim, device=device, dtype=dtype)
+    )
+
+
+def _map_original_ijepa_key(key: str) -> str | None:
+    if key == "patch_embed.proj.weight":
+        return "vit.conv_proj.weight"
+    if key == "patch_embed.proj.bias":
+        return "vit.conv_proj.bias"
+    if key == "pos_embed":
+        return "vit.encoder.pos_embedding"
+    if key == "norm.weight":
+        return "vit.encoder.ln.weight"
+    if key == "norm.bias":
+        return "vit.encoder.ln.bias"
+
+    match = re.match(r"blocks\.(\d+)\.(.+)", key)
+    if match is None:
+        return None
+
+    idx = int(match.group(1))
+    suffix = match.group(2)
+    prefix = f"vit.encoder.layers.encoder_layer_{idx}"
+
+    if suffix == "norm1.weight":
+        return f"{prefix}.ln_1.weight"
+    if suffix == "norm1.bias":
+        return f"{prefix}.ln_1.bias"
+    if suffix == "norm2.weight":
+        return f"{prefix}.ln_2.weight"
+    if suffix == "norm2.bias":
+        return f"{prefix}.ln_2.bias"
+    if suffix == "attn.qkv.weight":
+        return f"{prefix}.self_attention.in_proj_weight"
+    if suffix == "attn.qkv.bias":
+        return f"{prefix}.self_attention.in_proj_bias"
+    if suffix == "attn.proj.weight":
+        return f"{prefix}.self_attention.out_proj.weight"
+    if suffix == "attn.proj.bias":
+        return f"{prefix}.self_attention.out_proj.bias"
+    if suffix == "mlp.fc1.weight":
+        return f"{prefix}.mlp.0.weight"
+    if suffix == "mlp.fc1.bias":
+        return f"{prefix}.mlp.0.bias"
+    if suffix == "mlp.fc2.weight":
+        return f"{prefix}.mlp.3.weight"
+    if suffix == "mlp.fc2.bias":
+        return f"{prefix}.mlp.3.bias"
+    return None
+
+
+def _adapt_original_ijepa_encoder_state_dict(
+    enc_sd: Dict[str, torch.Tensor],
+    encoder: torch.nn.Module,
+) -> Dict[str, torch.Tensor]:
+    pos_embed = enc_sd.get("pos_embed")
+    if pos_embed is None or pos_embed.ndim != 3:
+        raise ValueError("Original I-JEPA checkpoint is missing a valid patch-only pos_embed.")
+
+    _set_vit_tokens_patch_only_mode(encoder, pos_tokens=int(pos_embed.shape[1]))
+    target_sd = encoder.state_dict()
+    adapted: Dict[str, torch.Tensor] = {}
+    skipped: list[str] = []
+
+    for key, value in enc_sd.items():
+        mapped = _map_original_ijepa_key(key)
+        if mapped is None:
+            skipped.append(key)
+            continue
+        if mapped not in target_sd:
+            raise ValueError(f"Mapped original-IJEPA key {key!r} -> {mapped!r} not found in target encoder.")
+        dst = target_sd[mapped]
+        if value.shape != dst.shape:
+            if mapped == "vit.encoder.pos_embedding":
+                value = _resize_patch_only_pos_embedding(value, dst)
+            else:
+                raise ValueError(
+                    "Original I-JEPA tensor shape mismatch after mapping: "
+                    f"{key} {tuple(value.shape)} -> {mapped} {tuple(dst.shape)}"
+                )
+        adapted[mapped] = value
+
+    essential = (
+        "vit.conv_proj.weight",
+        "vit.encoder.pos_embedding",
+        "vit.encoder.ln.weight",
+        "vit.encoder.ln.bias",
+    )
+    missing_essential = [key for key in essential if key not in adapted]
+    if missing_essential:
+        raise ValueError(
+            "Original I-JEPA adapter did not populate required encoder tensors: "
+            f"{missing_essential}"
+        )
+    return adapted
+
+
 def _adapt_probe_encoder_state_dict(
     enc_sd: Dict[str, torch.Tensor],
     encoder: torch.nn.Module,
 ) -> Dict[str, torch.Tensor]:
+    if _looks_like_original_ijepa_encoder_state_dict(enc_sd):
+        enc_sd = _adapt_original_ijepa_encoder_state_dict(enc_sd, encoder)
+
     target_sd = encoder.state_dict()
     overlap = [key for key in enc_sd if key in target_sd]
     if not overlap:
         raise ValueError(
             "Checkpoint encoder weights do not match the torchvision downstream encoder format. "
-            "If this is an original I-JEPA checkpoint, it needs a dedicated backend instead of "
-            "the current torchvision probe path."
+            "No compatible encoder subtree was found for the current downstream probe model."
         )
 
     adapted = dict(enc_sd)
