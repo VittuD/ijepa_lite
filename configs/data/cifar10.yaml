@@ -1,5 +1,8 @@
 name: cifar10
 root: data
+
+download: false
+
 batch_size: 256
 num_workers: 4
 pin_memory: true

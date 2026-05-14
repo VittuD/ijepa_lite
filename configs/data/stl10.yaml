@@ -9,7 +9,7 @@ pretrain_split: unlabeled
 train_split: train
 val_split: test
 
-download: true
+download: false
 
 batch_size: 128
 num_workers: 4

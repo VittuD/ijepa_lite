@@ -3,6 +3,7 @@ root: data
 
 backend: hf
 hf_repo_id: HuggingFaceM4/FairFace
+hf_saved_dir: ${.root}/fairface_hf_saved
 hf_local_dir: ${.root}/fairface_hf
 hf_subset: "0.25"
 hf_image_field: image

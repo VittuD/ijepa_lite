@@ -5,7 +5,7 @@ year: "2012"
 train_split: train
 val_split: val
 
-download: true
+download: false
 
 batch_size: 128
 num_workers: 4

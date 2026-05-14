@@ -5,7 +5,7 @@ import random
 from pathlib import Path
 from typing import Optional
 
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from PIL import Image
 from torch.utils.data import ConcatDataset, Dataset
 from torchvision import datasets as tv_datasets
@@ -52,25 +52,42 @@ class HFClassificationDataset(Dataset):
         transform=None,
         repo_id: Optional[str] = None,
         local_dir: Optional[str] = None,
+        saved_dir: Optional[str] = None,
         subset: Optional[str] = None,
         image_field: str = "image",
         label_field: str = "label",
         cache_dir: Optional[str] = None,
     ) -> None:
+        saved_path = Path(saved_dir) if saved_dir is not None else None
         local_path = Path(local_dir) if local_dir is not None else None
-        source = str(local_path) if local_path is not None and local_path.exists() else repo_id
-        if source is None:
-            raise ValueError(
-                "HFClassificationDataset requires either an existing local_dir or a repo_id."
+        if saved_path is not None and saved_path.exists():
+            ds_obj = load_from_disk(str(saved_path))
+            if hasattr(ds_obj, "keys"):
+                if split not in ds_obj:
+                    raise ValueError(
+                        f"Saved HF dataset at '{saved_path}' has no split='{split}'."
+                    )
+                self.ds = ds_obj[split]
+            else:
+                self.ds = ds_obj
+        else:
+            source = (
+                str(local_path)
+                if local_path is not None and local_path.exists()
+                else repo_id
             )
+            if source is None:
+                raise ValueError(
+                    "HFClassificationDataset requires an existing saved_dir/local_dir or a repo_id."
+                )
 
-        kwargs = {}
-        if subset is not None:
-            kwargs["name"] = subset
-        if source == repo_id and cache_dir is not None:
-            kwargs["cache_dir"] = cache_dir
+            kwargs = {}
+            if subset is not None:
+                kwargs["name"] = subset
+            if cache_dir is not None:
+                kwargs["cache_dir"] = cache_dir
 
-        self.ds = load_dataset(source, split=split, **kwargs)
+            self.ds = load_dataset(source, split=split, **kwargs)
         self.transform = transform
         self.image_field = image_field
         self.label_field = label_field
@@ -377,6 +394,7 @@ def _build_dataset_local(cfg, split: str, transform):
                 split=split,
                 transform=transform,
                 repo_id=str(getattr(cfg, "hf_repo_id", "tanganke/sun397")),
+                saved_dir=str(getattr(cfg, "hf_saved_dir", f"{root}/sun397_hf_saved")),
                 local_dir=str(getattr(cfg, "hf_local_dir", f"{root}/sun397_hf")),
                 subset=getattr(cfg, "hf_subset", None),
                 image_field=str(getattr(cfg, "hf_image_field", "image")),
@@ -403,6 +421,7 @@ def _build_dataset_local(cfg, split: str, transform):
                 split=split,
                 transform=transform,
                 repo_id=str(getattr(cfg, "hf_repo_id", "HuggingFaceM4/FairFace")),
+                saved_dir=str(getattr(cfg, "hf_saved_dir", f"{root}/fairface_hf_saved")),
                 local_dir=str(getattr(cfg, "hf_local_dir", f"{root}/fairface_hf")),
                 subset=str(getattr(cfg, "hf_subset", "0.25")),
                 image_field=str(getattr(cfg, "hf_image_field", "image")),
