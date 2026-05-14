@@ -38,8 +38,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 mkdir -p sbatch_logs/continued_pretrain
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CHECKPOINT_PATH="${REPO_ROOT}/outputs/2026-05-04/19-42-25_vanilla_baseline_multiblock_stl10/rank0/checkpoints/epoch_00999.pt"
+CHECKPOINT_PATH="${WORK}/vitturini/outputs/2026-05-04/19-42-25_vanilla_baseline_multiblock_stl10/rank0/checkpoints/epoch_00999.pt"
 
 if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
   echo "Checkpoint not found: ${CHECKPOINT_PATH}"

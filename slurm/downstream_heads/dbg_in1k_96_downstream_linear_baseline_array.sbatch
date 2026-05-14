@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-downstream-lin-dbg
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_DEEPECHO
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32

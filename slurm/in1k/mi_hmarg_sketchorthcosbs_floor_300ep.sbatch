@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-in1k-mi-hmarg-sketchorthcosbs
-#SBATCH --account=IscrC_TBoneAI
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1

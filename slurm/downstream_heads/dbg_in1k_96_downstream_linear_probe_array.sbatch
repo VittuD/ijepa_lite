@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-downstream-heads-dbg
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
-#SBATCH --time=00:30:00
+#SBATCH --time=04:00:00
 #SBATCH --array=0-6
 #SBATCH --output=sbatch_logs/downstream_heads/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/downstream_heads/%x_%A_%a.err

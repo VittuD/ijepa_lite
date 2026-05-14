@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=05:00:00
 #SBATCH --output=sbatch_logs/affinity_novelty/%x_%j.out
 #SBATCH --error=sbatch_logs/affinity_novelty/%x_%j.err
 
@@ -64,6 +64,8 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.warmup_epochs=0 \
       masking.latent.nctx_min=1 \
       masking.latent.ntgt_min=4 \
-      train.eval_every_epochs=5 \
+      train.eval_every_epochs=1 \
+      train.viz_enabled=true \
+      +train.viz_every_epochs=1 \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline

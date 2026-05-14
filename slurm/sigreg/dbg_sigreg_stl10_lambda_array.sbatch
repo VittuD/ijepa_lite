@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=06:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-2
 #SBATCH --output=sbatch_logs/sigreg/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/sigreg/%x_%A_%a.err
 
@@ -36,7 +36,6 @@ nvidia-smi -L
 
 SIGREG_WEIGHTS=(
   1e-4
-  5e-4
   1e-3
   5e-3
 )

@@ -33,7 +33,7 @@ mkdir -p sbatch_logs/sigreg
 
 nvidia-smi -L
 
-EXP_NAME="sigreg_multiblock_stl10_dbg"
+EXP_NAME="sigreg_multiblock_stl10_5e-4_1e-4"
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
   python -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -45,6 +45,6 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       train.epochs=1000 \
       train.save_every_epochs=0 \
       train.eval_every_epochs=1 \
-      loss.sigreg.weight=5e-4 \
+      loss.sigreg.weight=[5e-4, 1e-4] \
       train.viz.out_dir="viz_output_${EXP_NAME}" \
       logger.mode=offline

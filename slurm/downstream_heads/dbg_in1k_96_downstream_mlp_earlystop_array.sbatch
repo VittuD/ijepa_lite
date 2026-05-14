@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-downstream-es-dbg
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_DEEPECHO
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
@@ -50,7 +50,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 mkdir -p sbatch_logs/downstream_heads
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
-export PRETRAIN_CKPT="$REPO_ROOT/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/last.pt"
+export PRETRAIN_CKPT="$REPO_ROOT/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/epoch_00099.pt"
 export DATA_ROOT="${FAST:-/scratch}/datasets/"
 
 DATASETS=(stl10 cifar100 dtd sun397 food101 fairface vocseg)
