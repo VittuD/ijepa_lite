@@ -25,7 +25,7 @@ data:
   root: ${oc.env:FAST,/scratch}/datasets/
   batch_size: 128
   num_workers: 4
-  download: true
+  download: false
 
 task:
   head:

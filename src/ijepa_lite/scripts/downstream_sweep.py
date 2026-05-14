@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+import argparse
+import gc
+import os
+import traceback
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable
+
+import torch
+from hydra import compose, initialize_config_dir
+from hydra.core.global_hydra import GlobalHydra
+from omegaconf import OmegaConf
+
+from ijepa_lite.build import (
+    build_callbacks,
+    build_linear_probe_loaders,
+    build_linear_probe_model,
+    build_segmentation_probe_loaders,
+)
+from ijepa_lite.engine.eval_linear import linear_probe_eval
+from ijepa_lite.engine.eval_segmentation import segmentation_probe_eval
+from ijepa_lite.utils.seed import set_seed
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=(
+            "Run a downstream probe sweep inside a single Python process. "
+            "The encoder is loaded once per checkpoint and reused across datasets."
+        )
+    )
+    p.add_argument("--repo-root", required=True, help="Absolute repo root.")
+    p.add_argument("--data-root", required=True, help="Dataset root.")
+    p.add_argument(
+        "--checkpoint",
+        action="append",
+        required=True,
+        help="Checkpoint spec in the form label=/abs/or/rel/path/to/ckpt.pt",
+    )
+    p.add_argument(
+        "--dataset",
+        action="append",
+        required=True,
+        help="Dataset name. Repeat to define the sweep order.",
+    )
+    p.add_argument(
+        "--summary-path",
+        default=None,
+        help="Optional summary file to append progress/results to.",
+    )
+    p.add_argument(
+        "--logger-mode",
+        default="offline",
+        help="Logger mode override passed into each composed cfg.",
+    )
+    p.add_argument(
+        "--fairface-target-attr",
+        default="race",
+        help="FairFace target attr override when dataset=fairface.",
+    )
+    p.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Keep running later sweep items even if one fails.",
+    )
+    return p.parse_args()
+
+
+def _parse_checkpoint_specs(specs: Iterable[str], repo_root: Path) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(
+                f"Invalid --checkpoint '{spec}'. Expected label=/path/to/checkpoint.pt"
+            )
+        label, raw_path = spec.split("=", 1)
+        ckpt_path = Path(raw_path)
+        if not ckpt_path.is_absolute():
+            ckpt_path = repo_root / ckpt_path
+        out.append((label, str(ckpt_path)))
+    return out
+
+
+def _compose_cfg(config_dir: Path, overrides: list[str]):
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(config_dir), version_base="1.3"):
+        cfg = compose(config_name="config", overrides=overrides)
+    OmegaConf.set_struct(cfg, False)
+    return cfg
+
+
+def _make_run_dir(repo_root: Path, exp_name: str) -> Path:
+    now = datetime.now()
+    run_dir = (
+        repo_root
+        / "outputs"
+        / now.strftime("%Y-%m-%d")
+        / f"{now.strftime('%H-%M-%S')}_{exp_name}"
+        / "rank0"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    hydra_dir = run_dir / ".hydra"
+    hydra_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def _write_hydra_snapshots(run_dir: Path, cfg, overrides: list[str]) -> None:
+    hydra_dir = run_dir / ".hydra"
+    (hydra_dir / "config.yaml").write_text(OmegaConf.to_yaml(cfg))
+    (hydra_dir / "overrides.yaml").write_text("\n".join(overrides) + "\n")
+
+
+def _append_summary(summary_path: Path | None, message: str) -> None:
+    stamped = f"[{datetime.now().isoformat(timespec='seconds')}] {message}"
+    print(stamped, flush=True)
+    if summary_path is not None:
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("a") as f:
+            f.write(stamped + "\n")
+
+
+@contextmanager
+def _pushd(path: Path):
+    prev = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev)
+
+
+def _dataset_experiment(dataset: str) -> str:
+    if dataset == "vocseg":
+        return "in1k_96_vits_ps8_vocseg_probe_earlystop"
+    return "in1k_96_vits_ps8_downstream_mlp_earlystop"
+
+
+def _dataset_task(dataset: str) -> str:
+    if dataset == "vocseg":
+        return "segmentation_probe"
+    return "linear_probe"
+
+
+def _build_run_overrides(
+    *,
+    dataset: str,
+    data_root: str,
+    ckpt_path: str,
+    exp_name: str,
+    logger_mode: str,
+    fairface_target_attr: str,
+) -> list[str]:
+    overrides = [
+        f"experiment={_dataset_experiment(dataset)}",
+        f"data={dataset}",
+        f"data.root={data_root}",
+        f"task.pretrained_ckpt={ckpt_path}",
+        f"exp_name={exp_name}",
+        f"logger.mode={logger_mode}",
+    ]
+    if dataset == "fairface":
+        overrides.append(f"data.target_attr={fairface_target_attr}")
+    return overrides
+
+
+def _run_one_dataset(
+    *,
+    repo_root: Path,
+    config_dir: Path,
+    encoder: torch.nn.Module,
+    dataset: str,
+    ckpt_label: str,
+    ckpt_path: str,
+    data_root: str,
+    logger_mode: str,
+    fairface_target_attr: str,
+) -> tuple[str, Path]:
+    exp_name = f"in1k_96_vits_ps8_{ckpt_label}_{dataset}_es_probe"
+    overrides = _build_run_overrides(
+        dataset=dataset,
+        data_root=data_root,
+        ckpt_path=ckpt_path,
+        exp_name=exp_name,
+        logger_mode=logger_mode,
+        fairface_target_attr=fairface_target_attr,
+    )
+    cfg = _compose_cfg(config_dir, overrides)
+    run_dir = _make_run_dir(repo_root, exp_name)
+    _write_hydra_snapshots(run_dir, cfg, overrides)
+
+    # Reset RNG so each probe behaves like an independent one-off job.
+    set_seed(int(cfg.seed))
+
+    with _pushd(run_dir):
+        callbacks = build_callbacks(cfg)
+        if _dataset_task(dataset) == "segmentation_probe":
+            train_loader, val_loader, num_classes = build_segmentation_probe_loaders(cfg)
+            segmentation_probe_eval(
+                cfg=cfg,
+                encoder=encoder,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                num_classes=num_classes,
+                callbacks=callbacks,
+                device=next(encoder.parameters()).device,
+            )
+            del train_loader, val_loader, callbacks
+        else:
+            train_loader, val_loader, num_classes = build_linear_probe_loaders(cfg)
+            linear_probe_eval(
+                cfg=cfg,
+                encoder=encoder,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                num_classes=num_classes,
+                callbacks=callbacks,
+                device=next(encoder.parameters()).device,
+            )
+            del train_loader, val_loader, callbacks
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return exp_name, run_dir
+
+
+def main() -> None:
+    args = parse_args()
+
+    repo_root = Path(args.repo_root).resolve()
+    config_dir = repo_root / "configs"
+    summary_path = (
+        Path(args.summary_path).resolve() if args.summary_path is not None else None
+    )
+    data_root = str(Path(args.data_root))
+    checkpoints = _parse_checkpoint_specs(args.checkpoint, repo_root)
+    datasets = list(args.dataset)
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    _append_summary(
+        summary_path,
+        (
+            "starting downstream sweep "
+            f"checkpoints={len(checkpoints)} datasets={len(datasets)} "
+            f"device={device}"
+        ),
+    )
+
+    failures: list[tuple[str, str, str]] = []
+
+    for ckpt_label, ckpt_path in checkpoints:
+        if not Path(ckpt_path).is_file():
+            msg = f"checkpoint not found for {ckpt_label}: {ckpt_path}"
+            _append_summary(summary_path, msg)
+            failures.append((ckpt_label, "<checkpoint>", msg))
+            if not args.continue_on_error:
+                break
+            continue
+
+        ckpt_cfg = _compose_cfg(
+            config_dir,
+            [
+                "experiment=in1k_96_vits_ps8_downstream_mlp_earlystop",
+                f"task.pretrained_ckpt={ckpt_path}",
+                f"data.root={data_root}",
+                f"logger.mode={args.logger_mode}",
+            ],
+        )
+        set_seed(int(ckpt_cfg.seed))
+        encoder = build_linear_probe_model(ckpt_cfg).to(device)
+        encoder.eval()
+        encoder.requires_grad_(False)
+        _append_summary(summary_path, f"loaded encoder ckpt={ckpt_label} path={ckpt_path}")
+
+        for dataset in datasets:
+            try:
+                _append_summary(summary_path, f"start ckpt={ckpt_label} dataset={dataset}")
+                exp_name, run_dir = _run_one_dataset(
+                    repo_root=repo_root,
+                    config_dir=config_dir,
+                    encoder=encoder,
+                    dataset=dataset,
+                    ckpt_label=ckpt_label,
+                    ckpt_path=ckpt_path,
+                    data_root=data_root,
+                    logger_mode=args.logger_mode,
+                    fairface_target_attr=args.fairface_target_attr,
+                )
+                _append_summary(
+                    summary_path,
+                    f"ok ckpt={ckpt_label} dataset={dataset} exp={exp_name} run_dir={run_dir}",
+                )
+            except Exception as exc:
+                tb = traceback.format_exc()
+                failures.append((ckpt_label, dataset, str(exc)))
+                _append_summary(
+                    summary_path,
+                    f"fail ckpt={ckpt_label} dataset={dataset} err={exc}\n{tb}",
+                )
+                if not args.continue_on_error:
+                    raise
+
+        del encoder
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if failures:
+        lines = "; ".join(
+            f"{ckpt}/{dataset}: {msg}" for ckpt, dataset, msg in failures
+        )
+        raise SystemExit(f"downstream sweep finished with failures: {lines}")
+
+    _append_summary(summary_path, "downstream sweep finished successfully")
+
+
+if __name__ == "__main__":
+    main()
