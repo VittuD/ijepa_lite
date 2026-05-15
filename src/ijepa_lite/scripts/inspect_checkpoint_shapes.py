@@ -82,7 +82,15 @@ def _print_top_level_summary(label: str, payload) -> None:
     print(f"payload_type: {type(payload).__name__}")
     if isinstance(payload, dict):
         print(f"top_level_keys ({len(payload)}): {list(payload.keys())[:20]}")
-        for key in ("model", "target_encoder", "context_encoder", "encoder", "ema_encoder", "state"):
+        for key in (
+            "model",
+            "predictor",
+            "target_encoder",
+            "context_encoder",
+            "encoder",
+            "ema_encoder",
+            "state",
+        ):
             if key in payload:
                 value = payload[key]
                 kind = type(value).__name__
@@ -112,7 +120,14 @@ def _extract_candidate_state_dicts(payload) -> list[tuple[str, dict[str, torch.T
         candidates.append(("payload", _normalize_state_dict(payload)))
 
     if isinstance(payload, dict):
-        for key in ("model", "target_encoder", "context_encoder", "encoder", "ema_encoder"):
+        for key in (
+            "model",
+            "predictor",
+            "target_encoder",
+            "context_encoder",
+            "encoder",
+            "ema_encoder",
+        ):
             value = payload.get(key)
             if _is_tensor_dict(value):
                 candidates.append((f"payload.{key}", _normalize_state_dict(value)))
