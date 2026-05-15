@@ -73,6 +73,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model-num-heads", type=int, default=None, help="Override model.num_heads.")
     p.add_argument("--model-depth", type=int, default=None, help="Override model.depth.")
     p.add_argument(
+        "--model-use-cls-token",
+        default=None,
+        choices=("true", "false"),
+        help="Optional override for model.use_cls_token.",
+    )
+    p.add_argument(
         "--classification-batch-size",
         type=int,
         default=None,
@@ -181,6 +187,8 @@ def _model_overrides_from_args(args: argparse.Namespace) -> list[str]:
         overrides.append(f"model.num_heads={args.model_num_heads}")
     if args.model_depth is not None:
         overrides.append(f"model.depth={args.model_depth}")
+    if args.model_use_cls_token is not None:
+        overrides.append(f"model.use_cls_token={args.model_use_cls_token}")
     return overrides
 
 
