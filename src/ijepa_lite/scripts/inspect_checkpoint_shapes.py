@@ -30,6 +30,10 @@ KNOWN_ENCODER_PREFIXES = (
     "backbone.",
 )
 
+KNOWN_PREDICTOR_PREFIXES = (
+    "predictor.",
+)
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -128,6 +132,18 @@ def _collect_prefix_views(sd: dict[str, torch.Tensor]) -> list[tuple[str, dict[s
     return out
 
 
+def _collect_named_prefix_views(
+    sd: dict[str, torch.Tensor],
+    prefixes: Iterable[str],
+) -> list[tuple[str, dict[str, torch.Tensor]]]:
+    out: list[tuple[str, dict[str, torch.Tensor]]] = []
+    for prefix in prefixes:
+        view = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
+        if view:
+            out.append((prefix, view))
+    return out
+
+
 def _first_matching_key(sd: dict[str, torch.Tensor], keys: Iterable[str]) -> str | None:
     for key in keys:
         if key in sd:
@@ -212,6 +228,77 @@ def _infer_encoder_shape(sd: dict[str, torch.Tensor]) -> dict[str, object]:
     return info
 
 
+def _infer_predictor_shape(sd: dict[str, torch.Tensor]) -> dict[str, object]:
+    proj_in_key = _first_matching_key(
+        sd,
+        (
+            "proj_in.weight",
+            "predictor_embed.weight",
+            "embed_in.weight",
+        ),
+    )
+    proj_out_key = _first_matching_key(
+        sd,
+        (
+            "proj_out.weight",
+            "predictor_proj.weight",
+            "predictor_norm.weight",
+        ),
+    )
+    pos_key = _first_matching_key(
+        sd,
+        (
+            "pos_embed",
+            "predictor_pos_embed",
+        ),
+    )
+    mask_key = _first_matching_key(
+        sd,
+        (
+            "mask_token",
+            "predictor_mask_token",
+        ),
+    )
+
+    info: dict[str, object] = {
+        "num_tensors": len(sd),
+        "proj_in_key": proj_in_key,
+        "proj_out_key": proj_out_key,
+        "pos_key": pos_key,
+        "mask_key": mask_key,
+        "depth": _infer_depth(sd),
+    }
+
+    if proj_in_key is not None:
+        proj_in = sd[proj_in_key]
+        if proj_in.ndim == 2:
+            info["proj_in_shape"] = tuple(proj_in.shape)
+            info["predictor_dim"] = int(proj_in.shape[0])
+            info["encoder_dim"] = int(proj_in.shape[1])
+
+    if proj_out_key is not None:
+        proj_out = sd[proj_out_key]
+        if proj_out.ndim == 2:
+            info["proj_out_shape"] = tuple(proj_out.shape)
+            info.setdefault("encoder_dim", int(proj_out.shape[0]))
+            info.setdefault("predictor_dim", int(proj_out.shape[1]))
+
+    if pos_key is not None:
+        pos = sd[pos_key]
+        if pos.ndim == 3:
+            info["pos_shape"] = tuple(pos.shape)
+            tokens = int(pos.shape[1])
+            info["pos_tokens"] = tokens
+            grid = int(math.isqrt(max(tokens, 0)))
+            if grid * grid == tokens:
+                info["grid_hw"] = (grid, grid)
+
+    if mask_key is not None:
+        info["mask_shape"] = tuple(sd[mask_key].shape)
+
+    return info
+
+
 def _print_encoder_summary(name: str, sd: dict[str, torch.Tensor], max_keys: int) -> None:
     info = _infer_encoder_shape(sd)
     print(f"### encoder view: {name}")
@@ -229,6 +316,32 @@ def _print_encoder_summary(name: str, sd: dict[str, torch.Tensor], max_keys: int
         print(f"pos_has_cls: {info.get('pos_has_cls')}")
         print(f"grid_hw: {info.get('grid_hw')}")
     print(f"cls_key: {info.get('cls_key')}")
+    print(f"depth_hint: {info.get('depth')}")
+    print("example_keys:")
+    for key in sorted(sd.keys())[:max_keys]:
+        print(f"  {key:<60} {_format_shape(sd[key])}")
+
+
+def _print_predictor_summary(name: str, sd: dict[str, torch.Tensor], max_keys: int) -> None:
+    info = _infer_predictor_shape(sd)
+    print(f"### predictor view: {name}")
+    print(f"num_tensors: {info['num_tensors']}")
+    if info.get("proj_in_key") is not None:
+        print(f"proj_in_key: {info['proj_in_key']}")
+        print(f"proj_in_shape: {info.get('proj_in_shape')}")
+    if info.get("proj_out_key") is not None:
+        print(f"proj_out_key: {info['proj_out_key']}")
+        print(f"proj_out_shape: {info.get('proj_out_shape')}")
+    print(f"predictor_dim: {info.get('predictor_dim')}")
+    print(f"encoder_dim: {info.get('encoder_dim')}")
+    if info.get("pos_key") is not None:
+        print(f"pos_key: {info['pos_key']}")
+        print(f"pos_shape: {info.get('pos_shape')}")
+        print(f"pos_tokens: {info.get('pos_tokens')}")
+        print(f"grid_hw: {info.get('grid_hw')}")
+    print(f"mask_key: {info.get('mask_key')}")
+    if info.get("mask_shape") is not None:
+        print(f"mask_shape: {info.get('mask_shape')}")
     print(f"depth_hint: {info.get('depth')}")
     print("example_keys:")
     for key in sorted(sd.keys())[:max_keys]:
@@ -269,10 +382,48 @@ def _pick_best_encoder_view(
     return best_name, best_sd
 
 
-def _print_comparison(best_views: list[tuple[str, dict[str, torch.Tensor]]]) -> None:
+def _pick_best_predictor_view(
+    candidates: list[tuple[str, dict[str, torch.Tensor]]],
+) -> tuple[str, dict[str, torch.Tensor]] | None:
+    def _score(sd: dict[str, torch.Tensor]) -> tuple[int, int]:
+        info = _infer_predictor_shape(sd)
+        structure_hits = 0
+        if info.get("proj_in_key") is not None:
+            structure_hits += 1
+        if info.get("proj_out_key") is not None:
+            structure_hits += 1
+        if info.get("pos_key") is not None:
+            structure_hits += 1
+        if info.get("mask_key") is not None:
+            structure_hits += 1
+        if info.get("depth") is not None:
+            structure_hits += 1
+        return (structure_hits, len(sd))
+
+    best_name = None
+    best_sd = None
+    best_score: tuple[int, int] = (-1, -1)
+    for candidate_name, sd in candidates:
+        for prefix_name, pref_sd in _collect_named_prefix_views(sd, KNOWN_PREDICTOR_PREFIXES):
+            score = _score(pref_sd)
+            if score > best_score:
+                best_name = f"{candidate_name}:{prefix_name}"
+                best_sd = pref_sd
+                best_score = score
+        score = _score(sd)
+        if score > best_score:
+            best_name = candidate_name
+            best_sd = sd
+            best_score = score
+    if best_name is None or best_sd is None or best_score[0] <= 0:
+        return None
+    return best_name, best_sd
+
+
+def _print_encoder_comparison(best_views: list[tuple[str, dict[str, torch.Tensor]]]) -> None:
     if len(best_views) < 2:
         return
-    print("## comparison")
+    print("## encoder comparison")
     print("label | tensors | patch_proj | pos_embed | cls | depth")
     print("----- | ------- | ---------- | --------- | --- | -----")
     for label, sd in best_views:
@@ -287,10 +438,30 @@ def _print_comparison(best_views: list[tuple[str, dict[str, torch.Tensor]]]) -> 
         )
 
 
+def _print_predictor_comparison(best_views: list[tuple[str, dict[str, torch.Tensor]]]) -> None:
+    if len(best_views) < 2:
+        return
+    print("## predictor comparison")
+    print("label | tensors | proj_in | proj_out | pos_embed | mask | depth")
+    print("----- | ------- | ------- | -------- | --------- | ---- | -----")
+    for label, sd in best_views:
+        info = _infer_predictor_shape(sd)
+        print(
+            f"{label} | "
+            f"{info['num_tensors']} | "
+            f"{info.get('proj_in_shape', '-')} | "
+            f"{info.get('proj_out_shape', '-')} | "
+            f"{info.get('pos_shape', '-')} | "
+            f"{info.get('mask_shape', '-')} | "
+            f"{info.get('depth', '-')}"
+        )
+
+
 def main() -> None:
     args = parse_args()
     specs = _parse_checkpoint_specs(args.checkpoint)
-    best_views: list[tuple[str, dict[str, torch.Tensor]]] = []
+    best_encoder_views: list[tuple[str, dict[str, torch.Tensor]]] = []
+    best_predictor_views: list[tuple[str, dict[str, torch.Tensor]]] = []
 
     for label, path in specs:
         print()
@@ -306,24 +477,38 @@ def main() -> None:
 
         print("candidate_state_dicts:")
         for candidate_name, sd in candidates:
-            prefix_views = _collect_prefix_views(sd)
-            prefix_counts = ", ".join(f"{prefix}:{len(view)}" for prefix, view in prefix_views[:6])
+            encoder_prefix_views = _collect_prefix_views(sd)
+            predictor_prefix_views = _collect_named_prefix_views(sd, KNOWN_PREDICTOR_PREFIXES)
+            prefix_counts = ", ".join(
+                f"{prefix}:{len(view)}" for prefix, view in encoder_prefix_views[:6]
+            )
             print(f"  - {candidate_name}: {len(sd)} tensors")
             if prefix_counts:
                 print(f"    prefix_matches: {prefix_counts}")
+            if predictor_prefix_views:
+                pred_prefix_counts = ", ".join(
+                    f"{prefix}:{len(view)}" for prefix, view in predictor_prefix_views[:6]
+                )
+                print(f"    predictor_matches: {pred_prefix_counts}")
 
-        best = _pick_best_encoder_view(candidates)
-        if best is None:
+        best_encoder = _pick_best_encoder_view(candidates)
+        if best_encoder is None:
             print("could not identify an encoder-shaped subtree")
-            continue
+        else:
+            best_name, best_sd = best_encoder
+            _print_encoder_summary(best_name, best_sd, max_keys=args.max_keys)
+            best_encoder_views.append((label, best_sd))
 
-        best_name, best_sd = best
-        _print_encoder_summary(best_name, best_sd, max_keys=args.max_keys)
-        best_views.append((label, best_sd))
+        best_predictor = _pick_best_predictor_view(candidates)
+        if best_predictor is not None:
+            best_name, best_sd = best_predictor
+            _print_predictor_summary(best_name, best_sd, max_keys=args.max_keys)
+            best_predictor_views.append((label, best_sd))
 
-    if best_views:
+    if best_encoder_views or best_predictor_views:
         print()
-        _print_comparison(best_views)
+        _print_encoder_comparison(best_encoder_views)
+        _print_predictor_comparison(best_predictor_views)
 
 
 if __name__ == "__main__":
