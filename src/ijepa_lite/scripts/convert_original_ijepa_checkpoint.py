@@ -66,7 +66,12 @@ def _require_tensor_dict(payload: dict, key: str) -> dict[str, torch.Tensor]:
     value = payload.get(key)
     if not isinstance(value, dict):
         raise ValueError(f"Checkpoint is missing dict payload[{key!r}].")
-    out = {k: v for k, v in value.items() if isinstance(v, torch.Tensor)}
+    out: dict[str, torch.Tensor] = {}
+    for raw_key, tensor in value.items():
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        norm_key = raw_key[len("module."):] if raw_key.startswith("module.") else raw_key
+        out[norm_key] = tensor
     if not out:
         raise ValueError(f"Checkpoint payload[{key!r}] has no tensors.")
     return out
