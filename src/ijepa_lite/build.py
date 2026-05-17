@@ -897,6 +897,103 @@ def _adapt_original_ijepa_encoder_state_dict(
     return adapted
 
 
+def _map_original_ijepa_predictor_key(key: str) -> str | None:
+    if key == "predictor_embed.weight":
+        return "proj_in.weight"
+    if key == "predictor_embed.bias":
+        return "proj_in.bias"
+    if key == "predictor_proj.weight":
+        return "proj_out.weight"
+    if key == "predictor_proj.bias":
+        return "proj_out.bias"
+    if key == "predictor_pos_embed":
+        return "pos_embed"
+    if key == "mask_token":
+        return "mask_token"
+    if key == "predictor_norm.weight":
+        return "norm.weight"
+    if key == "predictor_norm.bias":
+        return "norm.bias"
+
+    match = re.match(r"predictor_blocks\.(\d+)\.(.+)", key)
+    if match is None:
+        return None
+
+    idx = int(match.group(1))
+    suffix = match.group(2)
+    prefix = f"blocks.layers.{idx}"
+
+    if suffix == "norm1.weight":
+        return f"{prefix}.norm1.weight"
+    if suffix == "norm1.bias":
+        return f"{prefix}.norm1.bias"
+    if suffix == "norm2.weight":
+        return f"{prefix}.norm2.weight"
+    if suffix == "norm2.bias":
+        return f"{prefix}.norm2.bias"
+    if suffix == "attn.qkv.weight":
+        return f"{prefix}.self_attn.in_proj_weight"
+    if suffix == "attn.qkv.bias":
+        return f"{prefix}.self_attn.in_proj_bias"
+    if suffix == "attn.proj.weight":
+        return f"{prefix}.self_attn.out_proj.weight"
+    if suffix == "attn.proj.bias":
+        return f"{prefix}.self_attn.out_proj.bias"
+    if suffix == "mlp.fc1.weight":
+        return f"{prefix}.linear1.weight"
+    if suffix == "mlp.fc1.bias":
+        return f"{prefix}.linear1.bias"
+    if suffix == "mlp.fc2.weight":
+        return f"{prefix}.linear2.weight"
+    if suffix == "mlp.fc2.bias":
+        return f"{prefix}.linear2.bias"
+    return None
+
+
+def _adapt_original_ijepa_predictor_state_dict(
+    pred_sd: Dict[str, torch.Tensor],
+    predictor: torch.nn.Module,
+) -> Dict[str, torch.Tensor]:
+    target_sd = predictor.state_dict()
+    adapted: Dict[str, torch.Tensor] = {}
+
+    for key, value in pred_sd.items():
+        mapped = _map_original_ijepa_predictor_key(key)
+        if mapped is None:
+            continue
+        if mapped not in target_sd:
+            raise ValueError(
+                f"Mapped original-IJEPA predictor key {key!r} -> {mapped!r} "
+                "not found in target predictor."
+            )
+        dst = target_sd[mapped]
+        if value.shape != dst.shape:
+            if mapped == "pos_embed":
+                value = _resize_patch_only_pos_embedding(value, dst)
+            else:
+                raise ValueError(
+                    "Original I-JEPA predictor tensor shape mismatch after mapping: "
+                    f"{key} {tuple(value.shape)} -> {mapped} {tuple(dst.shape)}"
+                )
+        adapted[mapped] = value
+
+    essential = (
+        "proj_in.weight",
+        "proj_out.weight",
+        "pos_embed",
+        "mask_token",
+        "norm.weight",
+        "norm.bias",
+    )
+    missing_essential = [key for key in essential if key not in adapted]
+    if missing_essential:
+        raise ValueError(
+            "Original I-JEPA adapter did not populate required predictor tensors: "
+            f"{missing_essential}"
+        )
+    return adapted
+
+
 def _adapt_probe_encoder_state_dict(
     enc_sd: Dict[str, torch.Tensor],
     encoder: torch.nn.Module,
