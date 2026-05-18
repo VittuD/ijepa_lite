@@ -60,17 +60,25 @@ class HFClassificationDataset(Dataset):
     ) -> None:
         saved_path = Path(saved_dir) if saved_dir is not None else None
         local_path = Path(local_dir) if local_dir is not None else None
+        self.ds = None
         if saved_path is not None and saved_path.exists():
-            ds_obj = load_from_disk(str(saved_path))
-            if hasattr(ds_obj, "keys"):
-                if split not in ds_obj:
-                    raise ValueError(
-                        f"Saved HF dataset at '{saved_path}' has no split='{split}'."
-                    )
-                self.ds = ds_obj[split]
+            try:
+                ds_obj = load_from_disk(str(saved_path))
+            except (FileNotFoundError, ValueError) as exc:
+                print(
+                    f"[HFClassificationDataset] ignoring invalid saved_dir='{saved_path}': {exc}"
+                )
             else:
-                self.ds = ds_obj
-        else:
+                if hasattr(ds_obj, "keys"):
+                    if split not in ds_obj:
+                        raise ValueError(
+                            f"Saved HF dataset at '{saved_path}' has no split='{split}'."
+                        )
+                    self.ds = ds_obj[split]
+                else:
+                    self.ds = ds_obj
+
+        if self.ds is None:
             source = (
                 str(local_path)
                 if local_path is not None and local_path.exists()

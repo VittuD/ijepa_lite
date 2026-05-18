@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:4
 #SBATCH --time=12:00:00
 #SBATCH --output=sbatch_logs/downstream_heads/%x_%j.out
 #SBATCH --error=sbatch_logs/downstream_heads/%x_%j.err
@@ -39,6 +39,7 @@ export NUMEXPR_NUM_THREADS=4
 
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NPROC_PER_NODE=4
 
 mkdir -p sbatch_logs/downstream_heads
 
@@ -66,7 +67,7 @@ DATASETS=(
 )
 
 CMD=(
-  python -m ijepa_lite.scripts.downstream_sweep
+  python -m torch.distributed.run --standalone --nproc_per_node "${NPROC_PER_NODE}" -m ijepa_lite.scripts.downstream_sweep
   --repo-root "$REPO_ROOT"
   --data-root "$DATA_ROOT"
   --summary-path "$SUMMARY_PATH"
@@ -102,6 +103,7 @@ echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
 echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
 echo "CLASSIFICATION_NUM_WORKERS=${CLASSIFICATION_NUM_WORKERS}"
 echo "SEGMENTATION_NUM_WORKERS=${SEGMENTATION_NUM_WORKERS}"
+echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
 nvidia-smi -L
 
 "${CMD[@]}"

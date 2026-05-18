@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import torch
+import torch.distributed as dist
 from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
@@ -22,6 +23,14 @@ from ijepa_lite.build import (
 )
 from ijepa_lite.engine.eval_linear import linear_probe_eval
 from ijepa_lite.engine.eval_segmentation import segmentation_probe_eval
+from ijepa_lite.utils.dist import (
+    barrier,
+    cleanup_distributed,
+    is_distributed,
+    is_rank0,
+    maybe_init_distributed,
+    setup_device,
+)
 from ijepa_lite.utils.seed import set_seed
 
 
@@ -105,6 +114,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional data.batch_size override for segmentation downstream tasks.",
     )
+    p.add_argument(
+        "--classification-num-workers",
+        type=int,
+        default=None,
+        help="Optional data.num_workers override for classification downstream tasks.",
+    )
+    p.add_argument(
+        "--segmentation-num-workers",
+        type=int,
+        default=None,
+        help="Optional data.num_workers override for segmentation downstream tasks.",
+    )
     return p.parse_args()
 
 
@@ -132,27 +153,40 @@ def _compose_cfg(config_dir: Path, overrides: list[str]):
 
 
 def _make_run_dir(repo_root: Path, exp_name: str) -> Path:
-    now = datetime.now()
+    stamp = datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
+    if is_distributed():
+        obj = [stamp] if is_rank0() else [None]
+        dist.broadcast_object_list(obj, src=0)
+        stamp = str(obj[0])
+    day, clock = stamp.split("/", 1)
     run_dir = (
         repo_root
         / "outputs"
-        / now.strftime("%Y-%m-%d")
-        / f"{now.strftime('%H-%M-%S')}_{exp_name}"
+        / day
+        / f"{clock}_{exp_name}"
         / "rank0"
     )
-    run_dir.mkdir(parents=True, exist_ok=True)
-    hydra_dir = run_dir / ".hydra"
-    hydra_dir.mkdir(parents=True, exist_ok=True)
+    if is_rank0():
+        run_dir.mkdir(parents=True, exist_ok=True)
+        hydra_dir = run_dir / ".hydra"
+        hydra_dir.mkdir(parents=True, exist_ok=True)
+    barrier()
     return run_dir
 
 
 def _write_hydra_snapshots(run_dir: Path, cfg, overrides: list[str]) -> None:
+    if not is_rank0():
+        barrier()
+        return
     hydra_dir = run_dir / ".hydra"
     (hydra_dir / "config.yaml").write_text(OmegaConf.to_yaml(cfg))
     (hydra_dir / "overrides.yaml").write_text("\n".join(overrides) + "\n")
+    barrier()
 
 
 def _append_summary(summary_path: Path | None, message: str) -> None:
+    if not is_rank0():
+        return
     stamped = f"[{datetime.now().isoformat(timespec='seconds')}] {message}"
     print(stamped, flush=True)
     if summary_path is not None:
@@ -162,6 +196,8 @@ def _append_summary(summary_path: Path | None, message: str) -> None:
 
 
 def _append_summary_block(summary_path: Path | None, header: str, lines: list[str]) -> None:
+    if not is_rank0():
+        return
     _append_summary(summary_path, header)
     for line in lines:
         print(line, flush=True)
@@ -218,14 +254,21 @@ def _batch_overrides_for_dataset(
     *,
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    classification_num_workers: int | None,
+    segmentation_num_workers: int | None,
 ) -> list[str]:
+    overrides: list[str] = []
     if _dataset_task(dataset) == "segmentation_probe":
         if segmentation_batch_size is not None:
-            return [f"data.batch_size={segmentation_batch_size}"]
-        return []
+            overrides.append(f"data.batch_size={segmentation_batch_size}")
+        if segmentation_num_workers is not None:
+            overrides.append(f"data.num_workers={segmentation_num_workers}")
+        return overrides
     if classification_batch_size is not None:
-        return [f"data.batch_size={classification_batch_size}"]
-    return []
+        overrides.append(f"data.batch_size={classification_batch_size}")
+    if classification_num_workers is not None:
+        overrides.append(f"data.num_workers={classification_num_workers}")
+    return overrides
 
 
 def _build_run_overrides(
@@ -239,6 +282,8 @@ def _build_run_overrides(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    classification_num_workers: int | None,
+    segmentation_num_workers: int | None,
     args: argparse.Namespace,
 ) -> list[str]:
     overrides = [
@@ -255,6 +300,8 @@ def _build_run_overrides(
             dataset,
             classification_batch_size=classification_batch_size,
             segmentation_batch_size=segmentation_batch_size,
+            classification_num_workers=classification_num_workers,
+            segmentation_num_workers=segmentation_num_workers,
         )
     )
     if dataset == "fairface":
@@ -276,6 +323,8 @@ def _run_one_dataset(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    classification_num_workers: int | None,
+    segmentation_num_workers: int | None,
     args: argparse.Namespace,
 ) -> tuple[str, Path, dict[str, Any]]:
     exp_name = f"downstream_{ckpt_label}_{dataset}_{args.run_suffix}"
@@ -289,6 +338,8 @@ def _run_one_dataset(
         model_overrides=model_overrides,
         classification_batch_size=classification_batch_size,
         segmentation_batch_size=segmentation_batch_size,
+        classification_num_workers=classification_num_workers,
+        segmentation_num_workers=segmentation_num_workers,
         args=args,
     )
     cfg = _compose_cfg(config_dir, overrides)
@@ -421,108 +472,126 @@ def main() -> None:
     checkpoints = _parse_checkpoint_specs(args.checkpoint, repo_root)
     datasets = list(args.dataset)
     model_overrides = _model_overrides_from_args(args)
+    bootstrap_cfg = _compose_cfg(
+        config_dir,
+        [
+            f"experiment={args.classification_experiment}",
+            f"data.root={data_root}",
+            f"logger.mode={args.logger_mode}",
+            *model_overrides,
+        ],
+    )
+    device = setup_device(bootstrap_cfg)
+    maybe_init_distributed(bootstrap_cfg)
+    barrier(device)
+    set_seed(int(bootstrap_cfg.seed))
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     _append_summary(
         summary_path,
         (
             "starting downstream sweep "
             f"checkpoints={len(checkpoints)} datasets={len(datasets)} "
-            f"device={device}"
+            f"device={device} world_size={dist.get_world_size() if is_distributed() else 1}"
         ),
     )
 
     failures: list[tuple[str, str, str]] = []
     checkpoint_rows: dict[str, list[dict[str, Any]]] = {}
 
-    for ckpt_label, ckpt_path in checkpoints:
-        checkpoint_rows[ckpt_label] = []
-        if not Path(ckpt_path).is_file():
-            msg = f"checkpoint not found for {ckpt_label}: {ckpt_path}"
-            _append_summary(summary_path, msg)
-            failures.append((ckpt_label, "<checkpoint>", msg))
-            checkpoint_rows[ckpt_label].append(
-                {"dataset": "<checkpoint>", "status": "fail", "error": msg}
-            )
-            if not args.continue_on_error:
-                break
-            continue
-
-        ckpt_cfg = _compose_cfg(
-            config_dir,
-            [
-                f"experiment={args.classification_experiment}",
-                f"task.pretrained_ckpt={ckpt_path}",
-                f"data.root={data_root}",
-                f"logger.mode={args.logger_mode}",
-                *model_overrides,
-            ],
-        )
-        set_seed(int(ckpt_cfg.seed))
-        encoder = build_linear_probe_model(ckpt_cfg).to(device)
-        encoder.eval()
-        encoder.requires_grad_(False)
-        _append_summary(summary_path, f"loaded encoder ckpt={ckpt_label} path={ckpt_path}")
-
-        for dataset in datasets:
-            try:
-                _append_summary(summary_path, f"start ckpt={ckpt_label} dataset={dataset}")
-                exp_name, run_dir, metrics = _run_one_dataset(
-                    repo_root=repo_root,
-                    config_dir=config_dir,
-                    encoder=encoder,
-                    dataset=dataset,
-                    ckpt_label=ckpt_label,
-                    ckpt_path=ckpt_path,
-                    data_root=data_root,
-                    logger_mode=args.logger_mode,
-                    fairface_target_attr=args.fairface_target_attr,
-                    model_overrides=model_overrides,
-                    classification_batch_size=args.classification_batch_size,
-                    segmentation_batch_size=args.segmentation_batch_size,
-                    args=args,
-                )
-                _append_summary(
-                    summary_path,
-                    f"ok ckpt={ckpt_label} dataset={dataset} exp={exp_name} run_dir={run_dir}",
-                )
+    try:
+        for ckpt_label, ckpt_path in checkpoints:
+            checkpoint_rows[ckpt_label] = []
+            if not Path(ckpt_path).is_file():
+                msg = f"checkpoint not found for {ckpt_label}: {ckpt_path}"
+                _append_summary(summary_path, msg)
+                failures.append((ckpt_label, "<checkpoint>", msg))
                 checkpoint_rows[ckpt_label].append(
-                    {"dataset": dataset, "status": "ok", "metrics": metrics}
-                )
-            except Exception as exc:
-                tb = traceback.format_exc()
-                failures.append((ckpt_label, dataset, str(exc)))
-                checkpoint_rows[ckpt_label].append(
-                    {"dataset": dataset, "status": "fail", "error": str(exc)}
-                )
-                _append_summary(
-                    summary_path,
-                    f"fail ckpt={ckpt_label} dataset={dataset} err={exc}\n{tb}",
+                    {"dataset": "<checkpoint>", "status": "fail", "error": msg}
                 )
                 if not args.continue_on_error:
-                    raise
+                    break
+                continue
 
-        del encoder
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            ckpt_cfg = _compose_cfg(
+                config_dir,
+                [
+                    f"experiment={args.classification_experiment}",
+                    f"task.pretrained_ckpt={ckpt_path}",
+                    f"data.root={data_root}",
+                    f"logger.mode={args.logger_mode}",
+                    *model_overrides,
+                ],
+            )
+            set_seed(int(ckpt_cfg.seed))
+            encoder = build_linear_probe_model(ckpt_cfg).to(device)
+            encoder.eval()
+            encoder.requires_grad_(False)
+            _append_summary(summary_path, f"loaded encoder ckpt={ckpt_label} path={ckpt_path}")
 
-    for ckpt_label, rows in checkpoint_rows.items():
-        if not rows:
-            continue
-        _append_summary_block(
-            summary_path,
-            f"final table ckpt={ckpt_label}",
-            _format_checkpoint_table(ckpt_label, rows),
-        )
+            for dataset in datasets:
+                try:
+                    _append_summary(summary_path, f"start ckpt={ckpt_label} dataset={dataset}")
+                    exp_name, run_dir, metrics = _run_one_dataset(
+                        repo_root=repo_root,
+                        config_dir=config_dir,
+                        encoder=encoder,
+                        dataset=dataset,
+                        ckpt_label=ckpt_label,
+                        ckpt_path=ckpt_path,
+                        data_root=data_root,
+                        logger_mode=args.logger_mode,
+                        fairface_target_attr=args.fairface_target_attr,
+                        model_overrides=model_overrides,
+                        classification_batch_size=args.classification_batch_size,
+                        segmentation_batch_size=args.segmentation_batch_size,
+                        classification_num_workers=args.classification_num_workers,
+                        segmentation_num_workers=args.segmentation_num_workers,
+                        args=args,
+                    )
+                    _append_summary(
+                        summary_path,
+                        f"ok ckpt={ckpt_label} dataset={dataset} exp={exp_name} run_dir={run_dir}",
+                    )
+                    checkpoint_rows[ckpt_label].append(
+                        {"dataset": dataset, "status": "ok", "metrics": metrics}
+                    )
+                except Exception as exc:
+                    tb = traceback.format_exc()
+                    failures.append((ckpt_label, dataset, str(exc)))
+                    checkpoint_rows[ckpt_label].append(
+                        {"dataset": dataset, "status": "fail", "error": str(exc)}
+                    )
+                    _append_summary(
+                        summary_path,
+                        f"fail ckpt={ckpt_label} dataset={dataset} err={exc}\n{tb}",
+                    )
+                    if not args.continue_on_error:
+                        raise
 
-    if failures:
-        lines = "; ".join(
-            f"{ckpt}/{dataset}: {msg}" for ckpt, dataset, msg in failures
-        )
-        raise SystemExit(f"downstream sweep finished with failures: {lines}")
+            del encoder
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            barrier(device)
 
-    _append_summary(summary_path, "downstream sweep finished successfully")
+        for ckpt_label, rows in checkpoint_rows.items():
+            if not rows:
+                continue
+            _append_summary_block(
+                summary_path,
+                f"final table ckpt={ckpt_label}",
+                _format_checkpoint_table(ckpt_label, rows),
+            )
+
+        if failures:
+            lines = "; ".join(
+                f"{ckpt}/{dataset}: {msg}" for ckpt, dataset, msg in failures
+            )
+            raise SystemExit(f"downstream sweep finished with failures: {lines}")
+
+        _append_summary(summary_path, "downstream sweep finished successfully")
+    finally:
+        cleanup_distributed(device)
 
 
 if __name__ == "__main__":
