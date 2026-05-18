@@ -47,8 +47,10 @@ DATA_ROOT="${FAST:-/scratch}/datasets"
 SUMMARY_PATH="${REPO_ROOT}/sbatch_logs/downstream_heads/orig_ijepa_vith14_ijepalite_linear_paper_results_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k_ijepalite"
 CKPT_PATH="${WORK}/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.ijepa_lite.pt"
-CLASSIFICATION_BATCH_SIZE=384
+CLASSIFICATION_BATCH_SIZE=4096
 SEGMENTATION_BATCH_SIZE=192
+CLASSIFICATION_NUM_WORKERS=1
+SEGMENTATION_NUM_WORKERS=1
 
 DATASETS=(
   stl10
@@ -83,6 +85,8 @@ CMD=(
   --model-use-cls-token false
   --classification-batch-size "${CLASSIFICATION_BATCH_SIZE}"
   --segmentation-batch-size "${SEGMENTATION_BATCH_SIZE}"
+  --classification-num-workers "${CLASSIFICATION_NUM_WORKERS}"
+  --segmentation-num-workers "${SEGMENTATION_NUM_WORKERS}"
   --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
 )
 
@@ -96,6 +100,8 @@ echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CKPT_PATH=${CKPT_PATH}"
 echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
 echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
+echo "CLASSIFICATION_NUM_WORKERS=${CLASSIFICATION_NUM_WORKERS}"
+echo "SEGMENTATION_NUM_WORKERS=${SEGMENTATION_NUM_WORKERS}"
 nvidia-smi -L
 
 "${CMD[@]}"
