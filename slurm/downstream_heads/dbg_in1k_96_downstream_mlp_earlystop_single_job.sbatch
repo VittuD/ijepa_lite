@@ -6,8 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:1
-#SBATCH --time=04:00:00
+#SBATCH --gres=gpu:4
+#SBATCH --time=12:00:00
 #SBATCH --output=sbatch_logs/downstream_heads/%x_%j.out
 #SBATCH --error=sbatch_logs/downstream_heads/%x_%j.err
 
@@ -41,6 +41,7 @@ export NUMEXPR_NUM_THREADS=4
 
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NPROC_PER_NODE=4
 
 mkdir -p sbatch_logs/downstream_heads
 
@@ -50,7 +51,9 @@ SUMMARY_PATH="${REPO_ROOT}/sbatch_logs/downstream_heads/dbg_in1k_96_results_summ
 CKPT_LABEL="in1k_96_vits_ps8_vanilla_multiblock_dbg"
 CKPT_PATH="${REPO_ROOT}/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/epoch_00099.pt"
 CLASSIFICATION_BATCH_SIZE=512
-SEGMENTATION_BATCH_SIZE=128
+SEGMENTATION_BATCH_SIZE=192
+CLASSIFICATION_NUM_WORKERS=1
+SEGMENTATION_NUM_WORKERS=1
 
 DATASETS=(
   stl10
@@ -66,7 +69,7 @@ DATASETS=(
 )
 
 CMD=(
-  python -m ijepa_lite.scripts.downstream_sweep
+  python -m torch.distributed.run --standalone --nproc_per_node "${NPROC_PER_NODE}" -m ijepa_lite.scripts.downstream_sweep
   --repo-root "$REPO_ROOT"
   --data-root "$DATA_ROOT"
   --summary-path "$SUMMARY_PATH"
@@ -77,6 +80,8 @@ CMD=(
   --segmentation-experiment in1k_96_vits_ps8_vocseg_probe_earlystop
   --classification-batch-size "${CLASSIFICATION_BATCH_SIZE}"
   --segmentation-batch-size "${SEGMENTATION_BATCH_SIZE}"
+  --classification-num-workers "${CLASSIFICATION_NUM_WORKERS}"
+  --segmentation-num-workers "${SEGMENTATION_NUM_WORKERS}"
   --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
 )
 
@@ -90,6 +95,9 @@ echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CKPT_PATH=${CKPT_PATH}"
 echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
 echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
+echo "CLASSIFICATION_NUM_WORKERS=${CLASSIFICATION_NUM_WORKERS}"
+echo "SEGMENTATION_NUM_WORKERS=${SEGMENTATION_NUM_WORKERS}"
+echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
 nvidia-smi -L
 
 "${CMD[@]}"
