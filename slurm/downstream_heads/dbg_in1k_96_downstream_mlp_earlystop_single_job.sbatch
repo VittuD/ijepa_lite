@@ -49,6 +49,8 @@ DATA_ROOT="${FAST:-/scratch}/datasets"
 SUMMARY_PATH="${REPO_ROOT}/sbatch_logs/downstream_heads/dbg_in1k_96_results_summary.txt"
 CKPT_LABEL="in1k_96_vits_ps8_vanilla_multiblock_dbg"
 CKPT_PATH="${REPO_ROOT}/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/epoch_00099.pt"
+CLASSIFICATION_BATCH_SIZE=512
+SEGMENTATION_BATCH_SIZE=128
 
 DATASETS=(
   stl10
@@ -73,6 +75,8 @@ CMD=(
   --continue-on-error
   --classification-experiment in1k_96_vits_ps8_downstream_mlp_earlystop
   --segmentation-experiment in1k_96_vits_ps8_vocseg_probe_earlystop
+  --classification-batch-size "${CLASSIFICATION_BATCH_SIZE}"
+  --segmentation-batch-size "${SEGMENTATION_BATCH_SIZE}"
   --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
 )
 
@@ -84,6 +88,8 @@ echo "REPO_ROOT=${REPO_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
 echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CKPT_PATH=${CKPT_PATH}"
+echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
+echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
 nvidia-smi -L
 
 "${CMD[@]}"
