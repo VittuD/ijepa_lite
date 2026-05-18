@@ -66,6 +66,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep running later sweep items even if one fails.",
     )
+    p.add_argument(
+        "--classification-experiment",
+        default="downstream_mlp_earlystop",
+        help="Experiment name to use for classification downstream tasks.",
+    )
+    p.add_argument(
+        "--segmentation-experiment",
+        default="downstream_vocseg_mlp_earlystop",
+        help="Experiment name to use for segmentation downstream tasks.",
+    )
+    p.add_argument(
+        "--run-suffix",
+        default="es_probe",
+        help="Suffix appended to per-dataset run names.",
+    )
     p.add_argument("--model-arch", default=None, help="Override model.arch for the downstream encoder.")
     p.add_argument("--model-image-size", type=int, default=None, help="Override model.image_size.")
     p.add_argument("--model-patch-size", type=int, default=None, help="Override model.patch_size.")
@@ -167,10 +182,10 @@ def _pushd(path: Path):
         os.chdir(prev)
 
 
-def _dataset_experiment(dataset: str) -> str:
+def _dataset_experiment(dataset: str, args: argparse.Namespace) -> str:
     if dataset == "vocseg":
-        return "downstream_vocseg_mlp_earlystop"
-    return "downstream_mlp_earlystop"
+        return str(args.segmentation_experiment)
+    return str(args.classification_experiment)
 
 
 def _model_overrides_from_args(args: argparse.Namespace) -> list[str]:
@@ -224,9 +239,10 @@ def _build_run_overrides(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    args: argparse.Namespace,
 ) -> list[str]:
     overrides = [
-        f"experiment={_dataset_experiment(dataset)}",
+        f"experiment={_dataset_experiment(dataset, args)}",
         f"data={dataset}",
         f"data.root={data_root}",
         f"task.pretrained_ckpt={ckpt_path}",
@@ -260,8 +276,9 @@ def _run_one_dataset(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    args: argparse.Namespace,
 ) -> tuple[str, Path, dict[str, Any]]:
-    exp_name = f"downstream_{ckpt_label}_{dataset}_es_probe"
+    exp_name = f"downstream_{ckpt_label}_{dataset}_{args.run_suffix}"
     overrides = _build_run_overrides(
         dataset=dataset,
         data_root=data_root,
@@ -272,6 +289,7 @@ def _run_one_dataset(
         model_overrides=model_overrides,
         classification_batch_size=classification_batch_size,
         segmentation_batch_size=segmentation_batch_size,
+        args=args,
     )
     cfg = _compose_cfg(config_dir, overrides)
     run_dir = _make_run_dir(repo_root, exp_name)
@@ -433,7 +451,7 @@ def main() -> None:
         ckpt_cfg = _compose_cfg(
             config_dir,
             [
-                "experiment=downstream_mlp_earlystop",
+                f"experiment={args.classification_experiment}",
                 f"task.pretrained_ckpt={ckpt_path}",
                 f"data.root={data_root}",
                 f"logger.mode={args.logger_mode}",
@@ -462,6 +480,7 @@ def main() -> None:
                     model_overrides=model_overrides,
                     classification_batch_size=args.classification_batch_size,
                     segmentation_batch_size=args.segmentation_batch_size,
+                    args=args,
                 )
                 _append_summary(
                     summary_path,

@@ -18,6 +18,74 @@ from ijepa_lite.utils.dist import (
 from ijepa_lite.utils.meters import AverageMeter
 
 
+class LARS(torch.optim.Optimizer):
+    """Minimal LARS optimizer for linear probing.
+
+    Credit:
+        Update semantics aligned to `kakaobrain/torchlars`
+        https://github.com/kakaobrain/torchlars
+
+    Matches the core SGD/LARS step used there:
+    - adaptive LR uses `||w|| / (||g|| + wd * ||w|| + eps)`
+    - weight decay is applied before momentum/update
+    - falls back to adaptive_lr=1 when param or grad norm is zero
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float,
+        momentum: float = 0.9,
+        weight_decay: float = 0.0,
+        eta: float = 1e-3,
+        eps: float = 1e-8,
+    ) -> None:
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay,
+            eta=eta,
+            eps=eps,
+        )
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = float(group["lr"])
+            momentum = float(group["momentum"])
+            weight_decay = float(group["weight_decay"])
+            eta = float(group["eta"])
+            eps = float(group["eps"])
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                param_norm = torch.norm(p)
+                grad = p.grad
+                grad_norm = torch.norm(grad)
+                adaptive_lr = 1.0
+                if param_norm > 0 and grad_norm > 0:
+                    divisor = grad_norm + weight_decay * param_norm + eps
+                    adaptive_lr = float(eta * param_norm / divisor)
+                if weight_decay != 0.0:
+                    grad = grad.add(p, alpha=weight_decay)
+
+                state = self.state[p]
+                if "mu" not in state:
+                    state["mu"] = torch.zeros_like(p)
+                mu = state["mu"]
+                mu.mul_(momentum).add_(grad, alpha=adaptive_lr)
+                p.add_(mu, alpha=-lr)
+
+        return loss
+
+
 @torch.no_grad()
 def _extract_features(
     encode_fn,
@@ -146,6 +214,38 @@ def _build_scheduler(optimizer, cfg_sched, epochs: int):
     )
 
 
+def _build_optimizer(model: nn.Module, cfg) -> torch.optim.Optimizer:
+    cfg_optim = getattr(getattr(cfg, "task", None), "optim", None)
+    name = str(getattr(cfg_optim, "name", "sgd")).lower() if cfg_optim else "sgd"
+    head_params = unwrap_model(model).head.parameters()
+    lr = float(cfg.train.lr)
+    weight_decay = float(cfg.train.weight_decay)
+
+    if name == "sgd":
+        momentum = float(getattr(cfg_optim, "momentum", 0.9)) if cfg_optim else 0.9
+        return torch.optim.SGD(
+            head_params,
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay,
+        )
+
+    if name == "lars":
+        momentum = float(getattr(cfg_optim, "momentum", 0.9)) if cfg_optim else 0.9
+        eta = float(getattr(cfg_optim, "eta", 1e-3)) if cfg_optim else 1e-3
+        eps = float(getattr(cfg_optim, "eps", 1e-8)) if cfg_optim else 1e-8
+        return LARS(
+            head_params,
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay,
+            eta=eta,
+            eps=eps,
+        )
+
+    raise ValueError(f"Unknown probe optimizer='{name}'. Supported: 'sgd', 'lars'.")
+
+
 def linear_probe_eval(
     cfg,
     encoder,
@@ -199,12 +299,7 @@ def linear_probe_eval(
     # ------------------------------------------------------------------
     # Optimizer + optional scheduler (head params only)
     # ------------------------------------------------------------------
-    opt = torch.optim.SGD(
-        unwrap_model(model).head.parameters(),
-        lr=float(cfg.train.lr),
-        momentum=0.9,
-        weight_decay=float(cfg.train.weight_decay),
-    )
+    opt = _build_optimizer(model, cfg)
     sched = _build_scheduler(opt, getattr(cfg.task, "sched", None), epochs)
     scaler = GradScaler("cuda", enabled=amp)
 
