@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=12:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=sbatch_logs/downstream_heads/%x_%j.out
 #SBATCH --error=sbatch_logs/downstream_heads/%x_%j.err
 
@@ -42,7 +42,7 @@ mkdir -p sbatch_logs/downstream_heads
 
 REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${FAST:-/scratch}/datasets"
-SUMMARY_PATH="${REPO_ROOT}/sbatch_logs/downstream_heads/orig_ijepa_vith14_last4_mean_results_summary.txt"
+SUMMARY_PATH="${WORK}/vitturini/sbatch_logs/downstream_heads/orig_ijepa_vith14_last4_mean_results_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k"
 CKPT_PATH="${WORK}/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.pth.tar"
 CLASSIFICATION_BATCH_SIZE=512
@@ -53,7 +53,7 @@ SEGMENTATION_NUM_WORKERS=1
 DATASETS=(
   stl10
   cifar100
-  dtd
+  minc2500
   sun397
   food101
   fairface
