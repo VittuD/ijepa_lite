@@ -299,7 +299,7 @@ def _build_run_overrides(
         f"exp_name={exp_name}",
         f"logger.mode={logger_mode}",
     ]
-    if args.task_pool is not None:
+    if args.task_pool is not None and _dataset_task(dataset) == "linear_probe":
         overrides.append(f"task.pool={args.task_pool}")
     overrides.extend(model_overrides)
     overrides.extend(
