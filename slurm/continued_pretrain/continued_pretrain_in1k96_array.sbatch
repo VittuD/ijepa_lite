@@ -32,9 +32,11 @@ set -euo pipefail
 module purge
 module load profile/deeplrn
 module load python/3.11.6--gcc--8.5.0
+module load imagenet
 
 source $WORK/vitturini/ijepa_venv/bin/activate
 
+export DATA_ROOT="$IMAGENET2012_HOME"
 export WANDB_MODE=offline
 
 export OMP_NUM_THREADS=4
@@ -54,18 +56,21 @@ if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
   exit 1
 fi
 
+echo "DATA_ROOT=${DATA_ROOT}"
+ls -ld "$DATA_ROOT" "$DATA_ROOT/train" "$DATA_ROOT/val"
+
 case "${SLURM_ARRAY_TASK_ID}" in
   0)
     RUN_LABEL="vanilla_multiblock"
     EXPERIMENT="stl10_vits_ps8_multiblock"
-    EXP_NAME="in1k_96_vanilla_multiblock_cont_from_last_200ep"
+    EXP_NAME="in1k_96_vits_ps8_vanilla_multiblock_cooldown30_from_in1k96_last"
     LOSS_ARG="loss.kind=smooth_l1"
     RUN_ARGS=()
     ;;
   1)
     RUN_LABEL="mi_affinity_novelty"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_mi_affinity_novelty_cont_from_last_200ep"
+    EXP_NAME="in1k_96_vits_ps8_mi_affinity_novelty_cooldown30_from_in1k96_last"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -86,7 +91,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   2)
     RUN_LABEL="mi_hmargbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_mi_hmargbs_floor_cont_from_last_200ep"
+    EXP_NAME="in1k_96_vits_ps8_mi_hmargbs_floor_cooldown30_from_in1k96_last"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -103,7 +108,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   3)
     RUN_LABEL="mi_hmargcosbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_mi_hmargcosbs_floor_cont_from_last_200ep"
+    EXP_NAME="in1k_96_vits_ps8_mi_hmargcosbs_floor_cooldown30_from_in1k96_last"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -121,7 +126,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   4)
     RUN_LABEL="mi_hmarg_sketchorthcosbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_mi_hmarg_sketchorthcosbs_floor_cont_from_last_200ep"
+    EXP_NAME="in1k_96_vits_ps8_mi_hmarg_sketchorthcosbs_floor_cooldown30_from_in1k96_last"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -147,10 +152,16 @@ COMMON_ARGS=(
   "exp_name=${EXP_NAME}"
   "init_weights=${CHECKPOINT_PATH}"
   "${LOSS_ARG}"
-  "data.root=$FAST/datasets/"
+  "data.name=imagenet"
+  "data.root=${DATA_ROOT}"
+  "data.pretrain_split=train"
+  "data.train_split=train"
+  "data.val_split=val"
+  "data.download=false"
   "data.batch_size=2048"
-  "optim.lr=3e-4"
-  "train.epochs=200"
+  "optim.lr=6e-5"
+  "sched.warmup_epochs=1"
+  "train.epochs=30"
   "train.eval_every_epochs=1"
   "train.viz_enabled=true"
   "+train.viz_every_epochs=1"
