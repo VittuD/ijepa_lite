@@ -90,6 +90,11 @@ def parse_args() -> argparse.Namespace:
         default="es_probe",
         help="Suffix appended to per-dataset run names.",
     )
+    p.add_argument(
+        "--task-pool",
+        default=None,
+        help="Optional override for task.pool, e.g. mean or last4_mean.",
+    )
     p.add_argument("--model-arch", default=None, help="Override model.arch for the downstream encoder.")
     p.add_argument("--model-image-size", type=int, default=None, help="Override model.image_size.")
     p.add_argument("--model-patch-size", type=int, default=None, help="Override model.patch_size.")
@@ -294,6 +299,8 @@ def _build_run_overrides(
         f"exp_name={exp_name}",
         f"logger.mode={logger_mode}",
     ]
+    if args.task_pool is not None:
+        overrides.append(f"task.pool={args.task_pool}")
     overrides.extend(model_overrides)
     overrides.extend(
         _batch_overrides_for_dataset(

@@ -77,6 +77,66 @@ class ViTTokens(nn.Module):
         self.vit = vit
         self.use_cls_token = bool(use_cls_token)
 
+    def _prepare_tokens(
+        self,
+        x: torch.Tensor,
+        keep_idx: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Patchify, add positional encodings, and optionally subset patches."""
+        if not hasattr(self.vit, "_process_input"):
+            raise RuntimeError("Unsupported torchvision VisionTransformer version.")
+
+        b = x.shape[0]
+        x = self.vit._process_input(x)  # (B, N, D)
+        if self.use_cls_token:
+            cls = self.vit.class_token.expand(b, -1, -1)  # (B, 1, D)
+            x = torch.cat([cls, x], dim=1)  # (B, 1+N, D)
+        x = x + self.vit.encoder.pos_embedding
+        x = self.vit.encoder.dropout(x)
+
+        if keep_idx is not None:
+            patch_tokens = x[:, 1:] if self.use_cls_token else x
+            d = patch_tokens.shape[-1]
+            patch_tokens = patch_tokens.gather(
+                1, keep_idx.unsqueeze(-1).expand(-1, -1, d)
+            )
+            if self.use_cls_token:
+                x = torch.cat([x[:, :1], patch_tokens], dim=1)
+            else:
+                x = patch_tokens
+        return x
+
+    def forward_last_n(
+        self,
+        x: torch.Tensor,
+        keep_idx: Optional[torch.Tensor] = None,
+        last_n: int = 4,
+    ) -> list[torch.Tensor]:
+        """
+        Return patch-token sequences from the last ``n`` transformer blocks.
+
+        Each returned tensor has shape ``(B, K, D)`` and excludes the CLS token
+        when present.
+        """
+        if last_n <= 0:
+            raise ValueError(f"last_n must be positive, got {last_n}.")
+
+        x = self._prepare_tokens(x, keep_idx=keep_idx)
+        layers = list(self.vit.encoder.layers)
+        if last_n > len(layers):
+            raise ValueError(
+                f"Requested last_n={last_n}, but encoder only has {len(layers)} layers."
+            )
+
+        outputs: list[torch.Tensor] = []
+        collect_from = len(layers) - last_n
+        for idx, layer in enumerate(layers):
+            x = layer(x)
+            if idx >= collect_from:
+                patch_tokens = x[:, 1:] if self.use_cls_token else x
+                outputs.append(patch_tokens)
+        return outputs
+
     def forward(
         self,
         x: torch.Tensor,
@@ -99,38 +159,7 @@ class ViTTokens(nn.Module):
             return_cls=False : (B, K, D) patch token embeddings
             return_cls=True  : Tuple[(B, D), (B, K, D)] — (cls_token, patch_tokens)
         """
-        if not hasattr(self.vit, "_process_input"):
-            raise RuntimeError("Unsupported torchvision VisionTransformer version.")
-
-        b = x.shape[0]
-
-        # ------------------------------------------------------------------
-        # Stage 1: patchify + positional embedding (full image, all N tokens)
-        # ------------------------------------------------------------------
-        x = self.vit._process_input(x)  # (B, N, D)
-        if self.use_cls_token:
-            cls = self.vit.class_token.expand(b, -1, -1)  # (B, 1, D)
-            x = torch.cat([cls, x], dim=1)  # (B, 1+N, D)
-        x = x + self.vit.encoder.pos_embedding  # broadcast add
-        x = self.vit.encoder.dropout(x)
-
-        # ------------------------------------------------------------------
-        # Stage 2: optional masking: select context patches BEFORE blocks
-        #
-        # We keep the CLS token (position 0) so the transformer still has a
-        # global summary token; only the patch sequence is subsetted.
-        # ------------------------------------------------------------------
-        if keep_idx is not None:
-            patch_tokens = x[:, 1:] if self.use_cls_token else x  # (B, N, D)
-            d = patch_tokens.shape[-1]
-            # gather the K kept patches; keep_idx is (B, K)
-            patch_tokens = patch_tokens.gather(
-                1, keep_idx.unsqueeze(-1).expand(-1, -1, d)
-            )  # (B, K, D)
-            if self.use_cls_token:
-                x = torch.cat([x[:, :1], patch_tokens], dim=1)  # (B, 1+K, D)
-            else:
-                x = patch_tokens
+        x = self._prepare_tokens(x, keep_idx=keep_idx)
 
         # ------------------------------------------------------------------
         # Stage 3: transformer blocks + layer norm

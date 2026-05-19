@@ -155,9 +155,15 @@ class LinearProbeModel(nn.Module):
         self.pool = str(pool)
 
     def _features(self, x: torch.Tensor) -> torch.Tensor:
-        tokens = self.encoder(x)  # (B, N, D) patch tokens
         if self.pool == "mean":
+            tokens = self.encoder(x)  # (B, N, D) patch tokens
             return tokens.mean(dim=1)  # (B, D)
+        if self.pool == "last4_mean":
+            if not hasattr(self.encoder, "forward_last_n"):
+                raise ValueError("pool=last4_mean requires an encoder with forward_last_n support.")
+            layer_tokens = self.encoder.forward_last_n(x, last_n=4)
+            pooled = [tokens.mean(dim=1) for tokens in layer_tokens]
+            return torch.stack(pooled, dim=0).mean(dim=0)
         raise ValueError(f"Unsupported pool={self.pool}")
 
     def forward(self, x: torch.Tensor | None, feat: torch.Tensor | None = None) -> torch.Tensor:

@@ -12,5 +12,5 @@ pretrained_ckpt: null
 encoder: auto
 
 # Feature pooling from patch tokens
-pool: mean   # mean | cls (cls not available in current vit wrapper)
+pool: mean   # mean | last4_mean | cls (cls not available in current vit wrapper)
 amp: true
