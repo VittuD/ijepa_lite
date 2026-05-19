@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=12:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=sbatch_logs/downstream_heads/%x_%j.out
 #SBATCH --error=sbatch_logs/downstream_heads/%x_%j.err
 
@@ -58,7 +58,7 @@ SEGMENTATION_NUM_WORKERS=1
 DATASETS=(
   stl10
   cifar100
-  dtd
+  minc2500
   sun397
   food101
   fairface

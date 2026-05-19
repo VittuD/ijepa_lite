@@ -574,6 +574,24 @@ def _build_dataset_local(cfg, split: str, transform):
             split_seed=int(getattr(cfg, "split_seed", 0)),
         )
 
+    if name == "minc2500":
+        backend = str(getattr(cfg, "backend", "hf")).lower()
+        if backend != "hf":
+            raise ValueError(
+                f"Unknown minc2500 backend='{backend}'. Expected: hf."
+            )
+        return HFClassificationDataset(
+            split=split,
+            transform=transform,
+            repo_id=str(getattr(cfg, "hf_repo_id", "mcimpoi/minc-2500_split_1")),
+            saved_dir=str(getattr(cfg, "hf_saved_dir", f"{root}/minc-2500-hf")),
+            local_dir=getattr(cfg, "hf_local_dir", None),
+            subset=getattr(cfg, "hf_subset", None),
+            image_field=str(getattr(cfg, "hf_image_field", "image")),
+            label_field=str(getattr(cfg, "hf_label_field", "label")),
+            cache_dir=root,
+        )
+
     if name == "fairface":
         backend = str(getattr(cfg, "backend", "hf")).lower()
         if backend == "hf":

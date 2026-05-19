@@ -19,7 +19,7 @@
 # Array mapping:
 #   0 -> stl10
 #   1 -> cifar100
-#   2 -> dtd
+#   2 -> minc2500
 #   3 -> sun397
 #   4 -> food101
 #   5 -> fairface (race)
@@ -56,7 +56,7 @@ REPO_ROOT="${SLURM_SUBMIT_DIR:-$PWD}"
 export PRETRAIN_CKPT="$REPO_ROOT/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/epoch_00099.pt"
 export DATA_ROOT="${FAST:-/scratch}/datasets/"
 
-DATASETS=(stl10 cifar100 dtd sun397 food101 fairface clevr_count organmnist tissuemnist vocseg)
+DATASETS=(stl10 cifar100 minc2500 sun397 food101 fairface clevr_count organmnist tissuemnist vocseg)
 DATASET="${DATASETS[$SLURM_ARRAY_TASK_ID]}"
 
 EXTRA_ARGS=()

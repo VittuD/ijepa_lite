@@ -25,7 +25,7 @@
 #
 # Dataset index:
 #   0 -> cifar100
-#   1 -> dtd
+#   1 -> minc2500
 #   2 -> sun397
 #   3 -> food101
 #   4 -> fairface (race)
@@ -82,7 +82,7 @@ CKPT_REL_PATHS=(
 
 DATASETS=(
   cifar100
-  dtd
+  minc2500
   sun397
   food101
   fairface

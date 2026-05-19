@@ -65,7 +65,7 @@ CKPT_REL_PATHS=(
 
 DATASETS=(
   cifar100
-  dtd
+  minc2500
   sun397
   food101
   fairface

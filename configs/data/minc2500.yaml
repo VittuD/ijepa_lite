@@ -1,0 +1,20 @@
+name: minc2500
+root: data
+
+backend: hf
+hf_repo_id: mcimpoi/minc-2500_split_1
+hf_saved_dir: ${.root}/minc-2500-hf
+hf_local_dir: null
+hf_subset: null
+hf_image_field: image
+hf_label_field: label
+
+train_split: train
+val_split: validation
+download: false
+
+batch_size: 256
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+persistent_workers: true
