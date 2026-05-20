@@ -162,6 +162,7 @@ COMMON_ARGS=(
   "optim.lr=6e-5"
   "sched.warmup_epochs=1"
   "train.epochs=30"
+  "train.save_every_epochs=1"
   "train.eval_every_epochs=1"
   "train.viz_enabled=true"
   "+train.viz_every_epochs=1"
