@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-ctp-in1k96-array
+#SBATCH --job-name=ijepa-ctp-in1k96-in1k30-origlr
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -9,8 +9,8 @@
 #SBATCH --gres=gpu:4
 #SBATCH --time=08:00:00
 #SBATCH --array=0-4
-#SBATCH --output=sbatch_logs/continued_pretrain/in1k96/%x_%A_%a.out
-#SBATCH --error=sbatch_logs/continued_pretrain/in1k96/%x_%A_%a.err
+#SBATCH --output=sbatch_logs/continued_pretrain/in1k96_in1k30_origlr_ema99925_nowarmup/%x_%A_%a.out
+#SBATCH --error=sbatch_logs/continued_pretrain/in1k96_in1k30_origlr_ema99925_nowarmup/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
 # Submit all five continued-pretraining variants from one command, starting
@@ -47,7 +47,7 @@ export NUMEXPR_NUM_THREADS=4
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-mkdir -p sbatch_logs/continued_pretrain/in1k96
+mkdir -p sbatch_logs/continued_pretrain/in1k96_in1k30_origlr_ema99925_nowarmup
 
 CHECKPOINT_PATH="${WORK}/vitturini/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/last.pt"
 
@@ -63,14 +63,14 @@ case "${SLURM_ARRAY_TASK_ID}" in
   0)
     RUN_LABEL="vanilla_multiblock"
     EXPERIMENT="stl10_vits_ps8_multiblock"
-    EXP_NAME="in1k_96_vits_ps8_vanilla_multiblock_cooldown30_from_in1k96_last"
+    EXP_NAME="in1k_96_vits_ps8_vanilla_multiblock_in1k30_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.kind=smooth_l1"
     RUN_ARGS=()
     ;;
   1)
     RUN_LABEL="mi_affinity_novelty"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_vits_ps8_mi_affinity_novelty_cooldown30_from_in1k96_last"
+    EXP_NAME="in1k_96_vits_ps8_mi_affinity_novelty_in1k30_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -91,7 +91,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   2)
     RUN_LABEL="mi_hmargbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_vits_ps8_mi_hmargbs_floor_cooldown30_from_in1k96_last"
+    EXP_NAME="in1k_96_vits_ps8_mi_hmargbs_floor_in1k30_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -108,7 +108,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   3)
     RUN_LABEL="mi_hmargcosbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_vits_ps8_mi_hmargcosbs_floor_cooldown30_from_in1k96_last"
+    EXP_NAME="in1k_96_vits_ps8_mi_hmargcosbs_floor_in1k30_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -126,7 +126,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   4)
     RUN_LABEL="mi_hmarg_sketchorthcosbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="in1k_96_vits_ps8_mi_hmarg_sketchorthcosbs_floor_cooldown30_from_in1k96_last"
+    EXP_NAME="in1k_96_vits_ps8_mi_hmarg_sketchorthcosbs_floor_in1k30_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -159,8 +159,9 @@ COMMON_ARGS=(
   "data.val_split=val"
   "data.download=false"
   "data.batch_size=2048"
-  "optim.lr=6e-5"
-  "sched.warmup_epochs=1"
+  "model.ema_momentum=[0.99925,0.99925]"
+  "optim.lr=6e-4"
+  "sched.warmup_epochs=0"
   "train.epochs=30"
   "train.save_every_epochs=1"
   "train.eval_every_epochs=1"
