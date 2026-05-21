@@ -2076,11 +2076,14 @@ class NegPredictabilityTerm(MaskerTerm):
         A = A.masked_fill(eye_mask, 0.0)                                   # (B,N,N)
 
         # Nadaraya–Watson regression of each patch from the SOFT context.
-        pc = p_ctx.float()
-        denom = torch.einsum("bi,bij->bj", pc, A)                          # (B,N)
-        W = pc.unsqueeze(2) * A                                            # (B,N,N) i,j
-        num = torch.einsum("bij,bid->bjd", W, z)                           # (B,N,D)
-        pred = num / (denom.unsqueeze(-1) + self.eps)                      # (B,N,D)
+        # Fold the context weight into the features and use bmm so no (B,N,N,D)
+        # intermediate is ever materialized (and no separate (B,N,N) W tensor).
+        pc = p_ctx.float()                                                 # (B,N)
+        zc = pc.unsqueeze(-1) * z                                          # (B,N,D)
+        At = A.transpose(1, 2)                                             # (B,N,N): [b,j,i]
+        num = torch.bmm(At, zc)                                            # (B,N,D): Σ_i A_ij pc_i z_i
+        denom = torch.bmm(At, pc.unsqueeze(-1))                            # (B,N,1): Σ_i A_ij pc_i
+        pred = num / (denom + self.eps)                                    # (B,N,D)
         diff = ((z - pred) ** 2).sum(dim=-1)                               # (B,N)
 
         if self.residualize:

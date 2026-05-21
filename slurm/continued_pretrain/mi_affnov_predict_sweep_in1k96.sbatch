@@ -139,7 +139,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       data.train_split=train \
       data.val_split=val \
       data.download=false \
-      data.batch_size=2048 \
+      data.batch_size=1024 \
       model.ema_momentum="[0.99925,0.99925]" \
       optim.lr=6e-4 \
       sched.warmup_epochs=0 \
