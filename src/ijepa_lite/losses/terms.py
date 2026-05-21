@@ -1436,6 +1436,25 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         self.register_buffer(
             "_cand_spread_resid", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
+        # Difficulty variant: replace the COVERAGE cost with a PREDICTABILITY cost
+        # (reuse A as a Nadaraya-Watson regressor; targets = patches hard to
+        # predict from the candidate's context). Coverage is rank-invariant (no
+        # mask x image interaction); predictability should NOT be. Read
+        # cand_gap_diff RELATIVE to cand_spread_diff (different units from
+        # coverage). gap_diff/spread_diff >> the coverage ratio => functional form
+        # restored interaction => build a difficulty-based role term.
+        self.register_buffer(
+            "_cand_gap_diff", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_argmin_frac_diff", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_global_loss_diff", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_spread_diff", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
 
     def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
         if (
@@ -1618,6 +1637,29 @@ class NegAffinityNoveltyTerm(MaskerTerm):
                 self._cand_argmin_frac_resid.fill_(float(frac_r.item()))
                 self._cand_global_loss_resid.fill_(float(gloss_r.item()))
                 self._cand_spread_resid.fill_(float(spread_r.item()))
+
+                # Difficulty cost: predict each patch's sketched feature from the
+                # candidate's CONTEXT via NW kernel regression (reuse A); targets
+                # should be HARD to predict. cost = -mean_{j in tgt} ||y_j - pred||^2
+                # (lower cost = harder = better). In sketch space (S<<D) and on a
+                # capped image subset to bound the (K,Bd,N,S) intermediate.
+                Bd = min(B, 128)
+                A_d = A[:Bd]                                                  # (Bd,N,N)
+                y_d = y[:Bd]                                                  # (Bd,N,S)
+                # numer[k,b,j,s] = sum_i pc[k,i] A[b,i,j] y[b,i,s]
+                Gky = pc_cand.unsqueeze(1).unsqueeze(-1) * y_d.unsqueeze(0)   # (K,Bd,N,S)
+                numer = torch.einsum("kbis,bij->kbjs", Gky, A_d)             # (K,Bd,N,S)
+                denom = torch.einsum("ki,bij->kbj", pc_cand, A_d)            # (K,Bd,N)
+                pred = numer / (denom.unsqueeze(-1) + self.eps)              # (K,Bd,N,S)
+                diff = ((y_d.unsqueeze(0) - pred) ** 2).sum(dim=-1)          # (K,Bd,N)
+                tgt_mass = pt_cand.sum(dim=-1).clamp(min=1.0)                # (K,)
+                diff_tgt = torch.einsum("kj,kbj->kb", pt_cand, diff) / tgt_mass.unsqueeze(1)
+                cost_diff = -diff_tgt                                        # (K,Bd)
+                gap_d, frac_d, gloss_d, _, spread_d = _cand_metrics(cost_diff)
+                self._cand_gap_diff.fill_(float(gap_d.item()))
+                self._cand_argmin_frac_diff.fill_(float(frac_d.item()))
+                self._cand_global_loss_diff.fill_(float(gloss_d.item()))
+                self._cand_spread_diff.fill_(float(spread_d.item()))
         self._step_counter.add_(1)
 
         log_max = math.log1p(self.alpha)
@@ -1651,6 +1693,10 @@ class NegAffinityNoveltyTerm(MaskerTerm):
             "affinity/cand_argmin_frac_resid": float(self._cand_argmin_frac_resid.item()),
             "affinity/cand_global_loss_resid": float(self._cand_global_loss_resid.item()),
             "affinity/cand_spread_resid": float(self._cand_spread_resid.item()),
+            "affinity/cand_gap_diff": float(self._cand_gap_diff.item()),
+            "affinity/cand_argmin_frac_diff": float(self._cand_argmin_frac_diff.item()),
+            "affinity/cand_global_loss_diff": float(self._cand_global_loss_diff.item()),
+            "affinity/cand_spread_diff": float(self._cand_spread_diff.item()),
             "affinity/cand_nctx": float(self._cand_nctx.item()),
             "affinity/cand_ntgt": float(self._cand_ntgt.item()),
             "affinity/coupling": coupling,

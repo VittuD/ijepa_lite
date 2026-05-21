@@ -46,9 +46,18 @@
 #              before training). gap_resid still ~0 => even that can't extract it
 #              => need a cross-image contrastive objective, not coverage.
 #   cand_argmin_frac(_resid) ~1 => invariant; low + gap~0 => tied/flat.
+#   cand_*_diff -> SAME candidate test but cost = PREDICTABILITY (targets hard to
+#              predict from context via NW kernel regression on A), not coverage.
+#              Coverage was rank-invariant (no mask x image interaction); this asks
+#              whether changing the FUNCTIONAL FORM restores it. Read
+#              cand_gap_diff / cand_spread_diff (scale-free ratio; diff cost is in
+#              different units). ratio >> the coverage ratio (~1e-4) => predict-
+#              ability interacts => build a difficulty-based role term. ratio still
+#              ~0 => even predictability is rank-invariant here => fall back.
 #   cand_nctx / cand_ntgt -> activity the candidates were matched to (sanity).
 #
-# Interpret all gaps/spreads relative to |cand_global_loss| (~2.2).
+# Interpret coverage gaps/spreads vs |cand_global_loss| (~2.2); interpret the
+# difficulty gap vs cand_spread_diff (its own scale).
 #
 # Submit:
 #   sbatch slurm/continued_pretrain/mi_affnov_cand_test_in1k96.sbatch
