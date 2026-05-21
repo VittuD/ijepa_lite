@@ -1382,6 +1382,21 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         self.register_buffer(
             "_eff_rank_min", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
+        # Swap test: is the affinity objective sensitive to WHICH image a mask is
+        # applied to? L_self = own-mask loss; L_foreign = rolled-mask loss (same
+        # image, a sibling's mask). gap = L_foreign - L_self. gap~0 => masks are
+        # interchangeable => objective does not reward per-image masks (static is
+        # genuinely optimal). gap>>0 => per-image masks pay off => the masker is
+        # leaving juice on the table (shortcut, not a flat objective).
+        self.register_buffer(
+            "_swap_self_loss", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_swap_foreign_loss", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_swap_gap", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
 
     def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
         if (
@@ -1489,6 +1504,40 @@ class NegAffinityNoveltyTerm(MaskerTerm):
                 eff_rank = frob_sq.square() / A_sq_frob_sq.clamp(min=1e-12)
                 self._eff_rank_mean.fill_(float(eff_rank.mean().item()))
                 self._eff_rank_min.fill_(float(eff_rank.amin().item()))
+
+                # --- Swap test (mask interchangeability) ---------------------
+                # Per-image self loss (reproduces the batch scalars per image).
+                U_ctx_pi = torch.log1p(self.alpha * c).mean(dim=-1)            # (B,)
+                ratio_pi = t / (self.eps + c + t)
+                U_tgt_pi = torch.log1p(self.alpha * ratio_pi).mean(dim=-1)     # (B,)
+                C_act_pi = (p_ctx.float() + p_tgt.float()).mean(dim=-1)        # (B,)
+                loss_self_pi = (
+                    -U_ctx_pi - self.w_tgt * U_tgt_pi + coupling * C_act_pi
+                )
+                if B > 1:
+                    # Roll masks across the batch (fixed-point-free for any
+                    # 0<shift<B), keep each image's own affinity A/Z. The rolled
+                    # set is a permutation, so mean activity (hence the C_act
+                    # term) is invariant -> the gap isolates structural fit.
+                    shift = max(1, B // 2)
+                    pc_s = torch.roll(p_ctx.float(), shifts=shift, dims=0)
+                    pt_s = torch.roll(p_tgt.float(), shifts=shift, dims=0)
+                    c_s = torch.einsum("bi,bij->bj", pc_s, A) / Z
+                    t_s = torch.einsum("bi,bij->bj", pt_s, A) / Z
+                    U_ctx_s = torch.log1p(self.alpha * c_s).mean(dim=-1)
+                    ratio_s = t_s / (self.eps + c_s + t_s)
+                    U_tgt_s = torch.log1p(self.alpha * ratio_s).mean(dim=-1)
+                    C_act_s = (pc_s + pt_s).mean(dim=-1)
+                    loss_foreign_pi = (
+                        -U_ctx_s - self.w_tgt * U_tgt_s + coupling * C_act_s
+                    )
+                    self._swap_self_loss.fill_(float(loss_self_pi.mean().item()))
+                    self._swap_foreign_loss.fill_(
+                        float(loss_foreign_pi.mean().item())
+                    )
+                    self._swap_gap.fill_(
+                        float((loss_foreign_pi - loss_self_pi).mean().item())
+                    )
         self._step_counter.add_(1)
 
         log_max = math.log1p(self.alpha)
@@ -1513,6 +1562,9 @@ class NegAffinityNoveltyTerm(MaskerTerm):
             "affinity/Z_min_mean": float(Z.detach().amin(dim=-1).mean().item()),
             "affinity/eff_rank_pr_mean": float(self._eff_rank_mean.item()),
             "affinity/eff_rank_pr_min": float(self._eff_rank_min.item()),
+            "affinity/swap_self_loss": float(self._swap_self_loss.item()),
+            "affinity/swap_foreign_loss": float(self._swap_foreign_loss.item()),
+            "affinity/swap_gap": float(self._swap_gap.item()),
             "affinity/coupling": coupling,
             "affinity/alpha": self.alpha,
             "affinity/w_tgt": self.w_tgt,
