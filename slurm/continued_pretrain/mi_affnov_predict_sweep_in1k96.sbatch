@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-ctp-in1k96-affnov-predict
-#SBATCH --account=IscrC_DEEPECHO
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
+#SBATCH --time=00:30:00
 #SBATCH --array=0-3
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_affnov_predict/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_affnov_predict/%x_%A_%a.err
@@ -39,7 +39,8 @@
 #   2  residualize=false  pred_w=1.0
 #   3  residualize=false  pred_w=2.0
 #
-# Read-out (step ~750, ~3k masker steps):
+# Read-out (debug budget: 1 epoch ~625 steps; first look at the de-static TREND,
+# full 5ep run on a normal-QOS account if promising):
 #   mask/batch_iou      -> must DROP toward ~0.24 (per-image masks at last!)
 #   mask/entropy_3way   -> commits below log 3 without going fully decisive
 #   predict/reward      -> rises (targets becoming harder to predict)
@@ -119,7 +120,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
     ;;
 esac
 
-EXP_NAME="in1k_96_vits_ps8_mi_affnovcov_predict_${RLABEL}_w${PLABEL}_in1k5ep"
+EXP_NAME="in1k_96_vits_ps8_mi_affnovcov_predict_${RLABEL}_w${PLABEL}_in1k1ep"
 
 nvidia-smi -L
 
@@ -161,7 +162,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.warmup_epochs=0 \
       masking.latent.nctx_min=1 \
       masking.latent.ntgt_min=4 \
-      train.epochs=5 \
+      train.epochs=1 \
       train.eval_every_epochs=1 \
       train.viz_enabled=true \
       +train.viz_every_epochs=1 \
