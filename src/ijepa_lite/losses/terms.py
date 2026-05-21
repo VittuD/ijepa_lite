@@ -1322,6 +1322,7 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         sketch_seed: int = 0,
         norm_eps: float = 1e-8,
         eff_rank_every_steps: int = 50,
+        n_candidates: int = 16,
     ):
         super().__init__()
         self.alpha = float(alpha)
@@ -1372,6 +1373,7 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         self.sketch_seed = int(sketch_seed)
         self.norm_eps = float(norm_eps)
         self.eff_rank_every_steps = max(int(eff_rank_every_steps), 1)
+        self.n_candidates = max(int(n_candidates), 2)
         self.register_buffer("_sketch_R", torch.empty(0), persistent=False)
         self.register_buffer(
             "_step_counter", torch.tensor(0, dtype=torch.long), persistent=True
@@ -1382,20 +1384,33 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         self.register_buffer(
             "_eff_rank_min", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
-        # Swap test: is the affinity objective sensitive to WHICH image a mask is
-        # applied to? L_self = own-mask loss; L_foreign = rolled-mask loss (same
-        # image, a sibling's mask). gap = L_foreign - L_self. gap~0 => masks are
-        # interchangeable => objective does not reward per-image masks (static is
-        # genuinely optimal). gap>>0 => per-image masks pay off => the masker is
-        # leaving juice on the table (shortcut, not a flat objective).
+        # Candidate test (masker-free): does the affinity OBJECTIVE reward
+        # per-image masks, or is one static mask optimal for every image?
+        # Evaluate K random partitions (shared across the batch, activity matched
+        # to the masker's current occupancy) on every image's own affinity A/Z.
+        # cand_gap = mean_i[ L(k_global*, i) - min_k L(k, i) ], where k_global* is
+        # the single candidate with the lowest mean loss. gap~0 => one mask wins
+        # for ~everyone => objective is image-invariant (fix the objective).
+        # gap>>0 => different images prefer different masks => per-image structure
+        # exists and the masker isn't using it (shortcut). This is immune to
+        # masker collapse: candidates are random, not the masker's output.
         self.register_buffer(
-            "_swap_self_loss", torch.tensor(0.0, dtype=torch.float32), persistent=True
+            "_cand_gap", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
         self.register_buffer(
-            "_swap_foreign_loss", torch.tensor(0.0, dtype=torch.float32), persistent=True
+            "_cand_global_loss", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
         self.register_buffer(
-            "_swap_gap", torch.tensor(0.0, dtype=torch.float32), persistent=True
+            "_cand_perimg_loss", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_argmin_frac", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_nctx", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_ntgt", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
 
     def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
@@ -1505,39 +1520,44 @@ class NegAffinityNoveltyTerm(MaskerTerm):
                 self._eff_rank_mean.fill_(float(eff_rank.mean().item()))
                 self._eff_rank_min.fill_(float(eff_rank.amin().item()))
 
-                # --- Swap test (mask interchangeability) ---------------------
-                # Per-image self loss (reproduces the batch scalars per image).
-                U_ctx_pi = torch.log1p(self.alpha * c).mean(dim=-1)            # (B,)
-                ratio_pi = t / (self.eps + c + t)
-                U_tgt_pi = torch.log1p(self.alpha * ratio_pi).mean(dim=-1)     # (B,)
-                C_act_pi = (p_ctx.float() + p_tgt.float()).mean(dim=-1)        # (B,)
-                loss_self_pi = (
-                    -U_ctx_pi - self.w_tgt * U_tgt_pi + coupling * C_act_pi
+                # --- Candidate test (masker-free per-image structure) --------
+                # K random partitions, SHARED across the batch, activity matched
+                # to the masker's current mean occupancy. Same counts for all K so
+                # the (dropped) C_act term is constant -> cost isolates structure.
+                K = self.n_candidates
+                n_ctx = int(p_ctx.float().sum(dim=-1).mean().round().item())
+                n_tgt = int(p_tgt.float().sum(dim=-1).mean().round().item())
+                n_ctx = max(1, min(n_ctx, N - 1))
+                n_tgt = max(1, min(n_tgt, N - n_ctx))
+                # K random permutations -> first n_ctx are ctx, next n_tgt are tgt.
+                order = torch.rand(K, N, device=device).argsort(dim=1)          # (K,N)
+                pc_cand = torch.zeros(K, N, device=device)
+                pt_cand = torch.zeros(K, N, device=device)
+                rows = torch.arange(K, device=device).unsqueeze(1)
+                pc_cand[rows, order[:, :n_ctx]] = 1.0
+                pt_cand[rows, order[:, n_ctx:n_ctx + n_tgt]] = 1.0
+                # Cost of every candidate on every image (own A/Z); (K,B).
+                Zc = Z.unsqueeze(0)                                            # (1,B,N)
+                c_c = torch.einsum("kp,bpj->kbj", pc_cand, A) / Zc            # (K,B,N)
+                t_c = torch.einsum("kp,bpj->kbj", pt_cand, A) / Zc
+                U_ctx_c = torch.log1p(self.alpha * c_c).mean(dim=-1)           # (K,B)
+                ratio_c = t_c / (self.eps + c_c + t_c)
+                U_tgt_c = torch.log1p(self.alpha * ratio_c).mean(dim=-1)       # (K,B)
+                cost = -U_ctx_c - self.w_tgt * U_tgt_c                         # (K,B)
+                per_img_best = cost.min(dim=0).values                         # (B,)
+                k_glob = cost.mean(dim=1).argmin()                            # scalar
+                global_cost = cost[k_glob]                                    # (B,)
+                argmin_k = cost.argmin(dim=0)                                 # (B,)
+                self._cand_gap.fill_(
+                    float((global_cost - per_img_best).mean().item())
                 )
-                if B > 1:
-                    # Roll masks across the batch (fixed-point-free for any
-                    # 0<shift<B), keep each image's own affinity A/Z. The rolled
-                    # set is a permutation, so mean activity (hence the C_act
-                    # term) is invariant -> the gap isolates structural fit.
-                    shift = max(1, B // 2)
-                    pc_s = torch.roll(p_ctx.float(), shifts=shift, dims=0)
-                    pt_s = torch.roll(p_tgt.float(), shifts=shift, dims=0)
-                    c_s = torch.einsum("bi,bij->bj", pc_s, A) / Z
-                    t_s = torch.einsum("bi,bij->bj", pt_s, A) / Z
-                    U_ctx_s = torch.log1p(self.alpha * c_s).mean(dim=-1)
-                    ratio_s = t_s / (self.eps + c_s + t_s)
-                    U_tgt_s = torch.log1p(self.alpha * ratio_s).mean(dim=-1)
-                    C_act_s = (pc_s + pt_s).mean(dim=-1)
-                    loss_foreign_pi = (
-                        -U_ctx_s - self.w_tgt * U_tgt_s + coupling * C_act_s
-                    )
-                    self._swap_self_loss.fill_(float(loss_self_pi.mean().item()))
-                    self._swap_foreign_loss.fill_(
-                        float(loss_foreign_pi.mean().item())
-                    )
-                    self._swap_gap.fill_(
-                        float((loss_foreign_pi - loss_self_pi).mean().item())
-                    )
+                self._cand_global_loss.fill_(float(global_cost.mean().item()))
+                self._cand_perimg_loss.fill_(float(per_img_best.mean().item()))
+                self._cand_argmin_frac.fill_(
+                    float((argmin_k == k_glob).float().mean().item())
+                )
+                self._cand_nctx.fill_(float(n_ctx))
+                self._cand_ntgt.fill_(float(n_tgt))
         self._step_counter.add_(1)
 
         log_max = math.log1p(self.alpha)
@@ -1562,9 +1582,12 @@ class NegAffinityNoveltyTerm(MaskerTerm):
             "affinity/Z_min_mean": float(Z.detach().amin(dim=-1).mean().item()),
             "affinity/eff_rank_pr_mean": float(self._eff_rank_mean.item()),
             "affinity/eff_rank_pr_min": float(self._eff_rank_min.item()),
-            "affinity/swap_self_loss": float(self._swap_self_loss.item()),
-            "affinity/swap_foreign_loss": float(self._swap_foreign_loss.item()),
-            "affinity/swap_gap": float(self._swap_gap.item()),
+            "affinity/cand_gap": float(self._cand_gap.item()),
+            "affinity/cand_global_loss": float(self._cand_global_loss.item()),
+            "affinity/cand_perimg_loss": float(self._cand_perimg_loss.item()),
+            "affinity/cand_argmin_frac": float(self._cand_argmin_frac.item()),
+            "affinity/cand_nctx": float(self._cand_nctx.item()),
+            "affinity/cand_ntgt": float(self._cand_ntgt.item()),
             "affinity/coupling": coupling,
             "affinity/alpha": self.alpha,
             "affinity/w_tgt": self.w_tgt,
