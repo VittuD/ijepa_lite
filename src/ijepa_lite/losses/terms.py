@@ -1990,6 +1990,120 @@ class NegHybridAffinityNoveltyTerm(MaskerTerm):
 
 
 # ------------------------------------------------------------------
+# −predictability — role term: targets = patches HARD to predict from the
+# (soft) context. Unlike coverage/cos-surprise, this has a real mask×image
+# interaction (the candidate diagnostic measured the difficulty landscape as
+# ~62× more mask-discriminating and ~94× more per-image than coverage).
+# ------------------------------------------------------------------
+
+class NegPredictabilityTerm(MaskerTerm):
+    """
+    Reuse the cosine-RBF affinity ``A`` (median bandwidth, JL sketch) as a
+    Nadaraya–Watson regressor: predict every patch's feature from the soft
+    context, ``pred_j = Σ_i p_ctx_i A_ij z_i / Σ_i p_ctx_i A_ij``. The role
+    reward makes targets the patches that are *hard* to predict from context:
+    ``reward = mean_{j} p_tgt_j · ‖z_j − pred_j‖²`` (loss = −reward).
+
+    ``residualize`` (default on) subtracts each position's batch-mean difficulty
+    (detached). This (a) isolates "hard *in this image*" from "universally hard
+    at this position" — the per-image signal we want — and (b) self-guards the
+    cos-surprise ctx-collapse mode: emptying the context makes ``pred→0`` and the
+    difficulty ≈‖z_j‖²≈1 *uniformly*, so the per-position-centered reward → 0
+    (shrinking ctx buys nothing). It owns the ctx-vs-tgt axis; pair it with
+    affinity-novelty (w_tgt=0) for the active-set / coverage axis.
+    """
+
+    name = "neg_predictability"
+
+    def __init__(
+        self,
+        sketch_dim: int = 64,
+        sigma_rho: float = 1.0,
+        sigma_floor: float = 1e-6,
+        eps: float = 1e-4,
+        sketch_seed: int = 0,
+        norm_eps: float = 1e-8,
+        residualize: bool = True,
+    ):
+        super().__init__()
+        self.sketch_dim = int(sketch_dim)
+        if self.sketch_dim <= 0:
+            raise ValueError("neg_predictability.sketch_dim must be > 0")
+        self.sigma_rho = float(sigma_rho)
+        if self.sigma_rho <= 0.0:
+            raise ValueError("neg_predictability.sigma_rho must be > 0")
+        self.sigma_floor = float(sigma_floor)
+        self.eps = float(eps)
+        self.sketch_seed = int(sketch_seed)
+        self.norm_eps = float(norm_eps)
+        self.residualize = bool(residualize)
+        self.register_buffer("_sketch_R", torch.empty(0), persistent=False)
+
+    def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
+        if (
+            self._sketch_R.numel() == 0
+            or self._sketch_R.shape != (self.sketch_dim, dim)
+            or self._sketch_R.device != device
+        ):
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(self.sketch_seed)
+            R = torch.randn(self.sketch_dim, dim, generator=gen, dtype=torch.float32)
+            R = R * (self.sketch_dim ** -0.5)
+            self._sketch_R = R.to(device=device)
+        return self._sketch_R
+
+    def forward(self, *, p_ctx, p_tgt, p_ign, ema_full, **kw):
+        del p_ign
+
+        z = F.normalize(ema_full.float(), dim=-1, eps=self.norm_eps)        # (B,N,D)
+        B, N, D = z.shape
+        device = z.device
+
+        # Cosine-RBF affinity from the JL sketch (matches affinity-novelty).
+        R = self._get_sketch(D, device)                                    # (S,D)
+        y = torch.einsum("bnd,sd->bns", z, R)                              # (B,N,S)
+        y_norm = (y * y).sum(dim=-1)                                       # (B,N)
+        gram = torch.einsum("bns,bms->bnm", y, y)                          # (B,N,N)
+        d_sq = (
+            y_norm.unsqueeze(2) + y_norm.unsqueeze(1) - 2.0 * gram
+        ).clamp(min=0.0)
+        eye_mask = torch.eye(N, dtype=torch.bool, device=device)
+        sigma_sq = torch.nanmedian(
+            d_sq.masked_fill(eye_mask, float("nan")).flatten(1), dim=-1
+        ).values                                                           # (B,)
+        sigma_sq = (self.sigma_rho * sigma_sq).clamp(min=self.sigma_floor)
+        A = torch.exp(-d_sq / (2.0 * sigma_sq.view(B, 1, 1)))
+        A = A.masked_fill(eye_mask, 0.0)                                   # (B,N,N)
+
+        # Nadaraya–Watson regression of each patch from the SOFT context.
+        pc = p_ctx.float()
+        denom = torch.einsum("bi,bij->bj", pc, A)                          # (B,N)
+        W = pc.unsqueeze(2) * A                                            # (B,N,N) i,j
+        num = torch.einsum("bij,bid->bjd", W, z)                           # (B,N,D)
+        pred = num / (denom.unsqueeze(-1) + self.eps)                      # (B,N,D)
+        diff = ((z - pred) ** 2).sum(dim=-1)                               # (B,N)
+
+        if self.residualize:
+            # Per-position batch-mean baseline (detached control variate):
+            # isolates image-specific surprise and neutralizes ctx-collapse.
+            diff = diff - diff.mean(dim=0, keepdim=True).detach()
+
+        p_tgt_sum = p_tgt.sum(dim=-1).clamp(min=1.0)                       # (B,)
+        reward = ((p_tgt * diff).sum(dim=-1) / p_tgt_sum).mean()
+        loss = -reward
+
+        logs = {
+            "predict/loss": float(loss.detach().item()),
+            "predict/reward": float(reward.detach().item()),
+            "predict/diff_mean": float(diff.detach().mean().item()),
+            "predict/denom_mean": float(denom.detach().mean().item()),
+            "predict/sigma_sq_mean": float(sigma_sq.detach().mean().item()),
+            "predict/residualize": 1.0 if self.residualize else 0.0,
+        }
+        return loss, logs
+
+
+# ------------------------------------------------------------------
 
 TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "H_cond": HCondTerm,
@@ -2017,4 +2131,5 @@ TERM_REGISTRY: dict[str, type[MaskerTerm]] = {
     "nway_progressive_kl": NWayProgressiveKLTerm,
     "neg_affinity_novelty": NegAffinityNoveltyTerm,
     "neg_hybrid_affinity_novelty": NegHybridAffinityNoveltyTerm,
+    "neg_predictability": NegPredictabilityTerm,
 }

@@ -98,6 +98,15 @@ terms:
     sketch_seed: 0
     norm_eps: 1.0e-8
     eff_rank_every_steps: 50
+  neg_predictability:
+    weight: [0, 0]
+    sketch_dim: 64
+    sigma_rho: 1.0        # scalar (no schedule); RBF sharpness, like affinity-novelty
+    sigma_floor: 1.0e-6
+    eps: 1.0e-4
+    sketch_seed: 0
+    norm_eps: 1.0e-8
+    residualize: true     # subtract per-position batch-mean difficulty (image-specific surprise + ctx-collapse guard)
 
 warmup_epochs: 0
 warmup_use_vanilla_multiblock: false
