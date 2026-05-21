@@ -28,20 +28,27 @@
 # on every image's own affinity A/Z, and asks whether one mask is best for
 # everyone or each image prefers its own.
 #
+# Prior result (raw affinity): cand_gap ~3e-4 vs |loss| ~2.2 (~0.02%),
+# cand_argmin_frac ~0.25, cand_global_loss flat at -2.196 => the RAW objective is
+# image-invariant and barely mask-sensitive (best-of-16-random ~ trained masker).
+# This run adds the spread + residual-A probes to localize WHY and whether it's
+# recoverable.
+#
 # Read-out (affinity/cand_*):
-#   cand_gap = mean_i[ L(k_global*, i) - min_k L(k, i) ]
-#       ~0  => one static mask is as good as per-image selection => the affinity
-#              OBJECTIVE is image-invariant. Fix the OBJECTIVE (cross-image term
-#              / non-coverage role signal); content-conditioned queries won't help.
-#       >>0 => different images prefer different masks => per-image structure
-#              EXISTS and the masker isn't using it => SHORTCUT. The architectural
-#              fix (content-conditioned queries) is justified.
-#   cand_argmin_frac -> fraction of images whose best candidate IS the global
-#              best. ~1 => invariant; low => structure.
-#   cand_global_loss / cand_perimg_loss -> the two ends of the gap, for scale.
+#   cand_gap = mean_i[ L(k_global*, i) - min_k L(k, i) ]; ~0 => one mask is best
+#              for everyone => objective image-invariant.
+#   cand_spread = mean_i[max_k L - min_k L]: how much the objective differentiates
+#              masks at all. spread~gap~0 => mask-insensitive (gap~0 trivial).
+#              spread>>gap => masks differ but ranking is image-invariant.
+#   cand_gap_resid / cand_spread_resid -> SAME test after removing the position-
+#              conditional (stationary) feature mode. gap_resid >> gap => per-image
+#              structure EXISTS but the stationary mode hid it (=> residualize A
+#              before training). gap_resid still ~0 => even that can't extract it
+#              => need a cross-image contrastive objective, not coverage.
+#   cand_argmin_frac(_resid) ~1 => invariant; low + gap~0 => tied/flat.
 #   cand_nctx / cand_ntgt -> activity the candidates were matched to (sanity).
 #
-# Interpret cand_gap relative to the ~1.5 |loss| scale (and to cand_global_loss).
+# Interpret all gaps/spreads relative to |cand_global_loss| (~2.2).
 #
 # Submit:
 #   sbatch slurm/continued_pretrain/mi_affnov_cand_test_in1k96.sbatch

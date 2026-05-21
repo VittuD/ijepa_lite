@@ -1412,6 +1412,30 @@ class NegAffinityNoveltyTerm(MaskerTerm):
         self.register_buffer(
             "_cand_ntgt", torch.tensor(0.0, dtype=torch.float32), persistent=True
         )
+        # cand_spread = mean_i[max_k L(k,i) - min_k L(k,i)]: how much the objective
+        # differentiates masks AT ALL. spread~0 => objective is mask-insensitive
+        # (gap~0 is trivial). spread>>gap => masks differ but ranking is image-
+        # invariant (one mask wins for everyone).
+        self.register_buffer(
+            "_cand_spread", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        # Residual-A variant: same candidate test after removing the position-
+        # conditional (stationary) mode from the features. If cand_gap_resid >>
+        # cand_gap, per-image structure EXISTS but the stationary mode hid it
+        # (=> residualize before building A). If still ~0, even that can't extract
+        # it (=> need a cross-image contrastive objective).
+        self.register_buffer(
+            "_cand_gap_resid", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_argmin_frac_resid", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_global_loss_resid", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
+        self.register_buffer(
+            "_cand_spread_resid", torch.tensor(0.0, dtype=torch.float32), persistent=True
+        )
 
     def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
         if (
@@ -1536,28 +1560,64 @@ class NegAffinityNoveltyTerm(MaskerTerm):
                 rows = torch.arange(K, device=device).unsqueeze(1)
                 pc_cand[rows, order[:, :n_ctx]] = 1.0
                 pt_cand[rows, order[:, n_ctx:n_ctx + n_tgt]] = 1.0
-                # Cost of every candidate on every image (own A/Z); (K,B).
-                Zc = Z.unsqueeze(0)                                            # (1,B,N)
-                c_c = torch.einsum("kp,bpj->kbj", pc_cand, A) / Zc            # (K,B,N)
-                t_c = torch.einsum("kp,bpj->kbj", pt_cand, A) / Zc
-                U_ctx_c = torch.log1p(self.alpha * c_c).mean(dim=-1)           # (K,B)
-                ratio_c = t_c / (self.eps + c_c + t_c)
-                U_tgt_c = torch.log1p(self.alpha * ratio_c).mean(dim=-1)       # (K,B)
-                cost = -U_ctx_c - self.w_tgt * U_tgt_c                         # (K,B)
-                per_img_best = cost.min(dim=0).values                         # (B,)
-                k_glob = cost.mean(dim=1).argmin()                            # scalar
-                global_cost = cost[k_glob]                                    # (B,)
-                argmin_k = cost.argmin(dim=0)                                 # (B,)
-                self._cand_gap.fill_(
-                    float((global_cost - per_img_best).mean().item())
-                )
-                self._cand_global_loss.fill_(float(global_cost.mean().item()))
-                self._cand_perimg_loss.fill_(float(per_img_best.mean().item()))
-                self._cand_argmin_frac.fill_(
-                    float((argmin_k == k_glob).float().mean().item())
-                )
+
+                def _cand_cost(A_, Z_):
+                    # cost (K,B): every candidate on every image's own A/Z.
+                    Zc = Z_.unsqueeze(0)                                       # (1,B,N)
+                    c_ = torch.einsum("kp,bpj->kbj", pc_cand, A_) / Zc
+                    t_ = torch.einsum("kp,bpj->kbj", pt_cand, A_) / Zc
+                    Uc = torch.log1p(self.alpha * c_).mean(dim=-1)            # (K,B)
+                    rt = t_ / (self.eps + c_ + t_)
+                    Ut = torch.log1p(self.alpha * rt).mean(dim=-1)            # (K,B)
+                    return -Uc - self.w_tgt * Ut                             # (K,B)
+
+                def _cand_metrics(cost):
+                    per_best = cost.min(dim=0).values                        # (B,)
+                    k_glob = cost.mean(dim=1).argmin()
+                    g_cost = cost[k_glob]                                     # (B,)
+                    gap = (g_cost - per_best).mean()
+                    frac = (cost.argmin(dim=0) == k_glob).float().mean()
+                    spread = (cost.amax(dim=0) - per_best).mean()
+                    return gap, frac, g_cost.mean(), per_best.mean(), spread
+
+                # Raw affinity: is there per-image structure as-is?
+                gap, frac, gloss, ploss, spread = _cand_metrics(_cand_cost(A, Z))
+                self._cand_gap.fill_(float(gap.item()))
+                self._cand_argmin_frac.fill_(float(frac.item()))
+                self._cand_global_loss.fill_(float(gloss.item()))
+                self._cand_perimg_loss.fill_(float(ploss.item()))
+                self._cand_spread.fill_(float(spread.item()))
                 self._cand_nctx.fill_(float(n_ctx))
                 self._cand_ntgt.fill_(float(n_tgt))
+
+                # Residual affinity: drop the position-conditional (stationary)
+                # mode so A reflects per-image content, then re-test on the SAME
+                # candidates. gap_resid >> gap => structure was hidden by the
+                # stationary mode (residualize before building A).
+                pos_mean = ema_full.mean(dim=0, keepdim=True)                 # (1,N,D)
+                z_res = F.normalize(
+                    (ema_full - pos_mean).float(), dim=-1, eps=self.norm_eps
+                )
+                y_r = torch.einsum("bnd,sd->bns", z_res, R)
+                yn_r = (y_r * y_r).sum(dim=-1)
+                gram_r = torch.einsum("bns,bms->bnm", y_r, y_r)
+                dsq_r = (
+                    yn_r.unsqueeze(2) + yn_r.unsqueeze(1) - 2.0 * gram_r
+                ).clamp(min=0.0)
+                sig_r = torch.nanmedian(
+                    dsq_r.masked_fill(eye_mask, float("nan")).flatten(1), dim=-1
+                ).values
+                sig_r = (sigma_rho * sig_r).clamp(min=self.sigma_floor)
+                A_r = torch.exp(-dsq_r / (2.0 * sig_r.view(B, 1, 1)))
+                A_r = A_r.masked_fill(eye_mask, 0.0)
+                Z_r = A_r.sum(dim=1) + self.eps
+                gap_r, frac_r, gloss_r, _, spread_r = _cand_metrics(
+                    _cand_cost(A_r, Z_r)
+                )
+                self._cand_gap_resid.fill_(float(gap_r.item()))
+                self._cand_argmin_frac_resid.fill_(float(frac_r.item()))
+                self._cand_global_loss_resid.fill_(float(gloss_r.item()))
+                self._cand_spread_resid.fill_(float(spread_r.item()))
         self._step_counter.add_(1)
 
         log_max = math.log1p(self.alpha)
@@ -1586,6 +1646,11 @@ class NegAffinityNoveltyTerm(MaskerTerm):
             "affinity/cand_global_loss": float(self._cand_global_loss.item()),
             "affinity/cand_perimg_loss": float(self._cand_perimg_loss.item()),
             "affinity/cand_argmin_frac": float(self._cand_argmin_frac.item()),
+            "affinity/cand_spread": float(self._cand_spread.item()),
+            "affinity/cand_gap_resid": float(self._cand_gap_resid.item()),
+            "affinity/cand_argmin_frac_resid": float(self._cand_argmin_frac_resid.item()),
+            "affinity/cand_global_loss_resid": float(self._cand_global_loss_resid.item()),
+            "affinity/cand_spread_resid": float(self._cand_spread_resid.item()),
             "affinity/cand_nctx": float(self._cand_nctx.item()),
             "affinity/cand_ntgt": float(self._cand_ntgt.item()),
             "affinity/coupling": coupling,
