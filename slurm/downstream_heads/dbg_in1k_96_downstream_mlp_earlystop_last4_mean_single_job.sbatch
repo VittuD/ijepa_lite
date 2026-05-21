@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-downstream-es-dbg-l4m-1job
-#SBATCH --account=IscrC_DEEPECHO
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
-#SBATCH --output=sbatch_logs/downstream_heads/%x_%j.out
-#SBATCH --error=sbatch_logs/downstream_heads/%x_%j.err
+#SBATCH --time=00:30:00
+#SBATCH --output=sbatch_logs/downstream_heads/in1k96/hmargbs/%x_%j.out
+#SBATCH --error=sbatch_logs/downstream_heads/in1k96/hmargbs/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # Single-job early-stopped MLP downstream sweep for the IN1K 96x96 / ps8
@@ -38,13 +38,13 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NPROC_PER_NODE=4
 
-mkdir -p sbatch_logs/downstream_heads
+mkdir -p sbatch_logs/downstream_heads/in1k96/hmargbs
 
 REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${FAST:-/scratch}/datasets"
-SUMMARY_PATH="${WORK}/vitturini/sbatch_logs/downstream_heads/dbg_in1k_96_last4_mean_results_summary.txt"
+SUMMARY_PATH="${WORK}/vitturini/sbatch_logs/downstream_heads/in1k96/hmargbs/dbg_in1k_96_last4_mean_results_summary.txt"
 CKPT_LABEL="in1k_96_vits_ps8_vanilla_multiblock_dbg"
-CKPT_PATH="${WORK}/vitturini/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/epoch_00099.pt"
+CKPT_PATH="${WORK}/vitturini/outputs/2026-05-20/16-23-36_in1k_96_vits_ps8_mi_hmargbs_floor_in1k30_origlr_ema99925_nowarmup/rank0/checkpoints/last.pt"
 CLASSIFICATION_BATCH_SIZE=512
 SEGMENTATION_BATCH_SIZE=192
 CLASSIFICATION_NUM_WORKERS=1

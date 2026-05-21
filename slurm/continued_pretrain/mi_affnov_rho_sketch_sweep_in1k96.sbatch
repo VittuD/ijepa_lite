@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
+#SBATCH --time=01:00:00
 #SBATCH --array=0-3
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_affnov_rho_sketch_sweep/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_affnov_rho_sketch_sweep/%x_%A_%a.err

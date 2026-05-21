@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-ctp-in1k96-in1k30-origlr
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_DEEPECHO
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=06:00:00
 #SBATCH --array=0-4
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_in1k30_origlr_ema99925_nowarmup/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_in1k30_origlr_ema99925_nowarmup/%x_%A_%a.err

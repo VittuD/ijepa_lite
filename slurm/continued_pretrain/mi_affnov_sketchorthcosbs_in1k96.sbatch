@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=06:00:00
 #SBATCH --array=0-1
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_affnov_sketchorthcosbs/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_affnov_sketchorthcosbs/%x_%A_%a.err

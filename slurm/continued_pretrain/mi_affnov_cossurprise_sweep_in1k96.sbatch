@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-ctp-in1k96-affnov-cos
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_DEEPECHO
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
+#SBATCH --time=01:00:00
 #SBATCH --array=0-2
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_affnov_cossurprise/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_affnov_cossurprise/%x_%A_%a.err
