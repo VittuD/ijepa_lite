@@ -2024,6 +2024,7 @@ class NegPredictabilityTerm(MaskerTerm):
         sketch_seed: int = 0,
         norm_eps: float = 1e-8,
         residualize: bool = True,
+        reward_norm: str = "all",
     ):
         super().__init__()
         self.sketch_dim = int(sketch_dim)
@@ -2037,6 +2038,15 @@ class NegPredictabilityTerm(MaskerTerm):
         self.sketch_seed = int(sketch_seed)
         self.norm_eps = float(norm_eps)
         self.residualize = bool(residualize)
+        # "all"     : reward = Σ_j p_tgt_j·diff_j / N  (mean over ALL patches) —
+        #             per-patch gradient diff_j/N, so the hard REGION becomes
+        #             targets; size emerges from balance vs affinity coverage.
+        # "targets" : reward = Σ_j p_tgt_j·diff_j / Σ_j p_tgt_j (mean over the
+        #             selected targets) — DEGENERATE: a mean is maximized by a
+        #             singleton, so ntgt → 1 (kept only as a control).
+        self.reward_norm = str(reward_norm).lower()
+        if self.reward_norm not in ("all", "targets"):
+            raise ValueError("neg_predictability.reward_norm must be 'all' or 'targets'")
         self.register_buffer("_sketch_R", torch.empty(0), persistent=False)
 
     def _get_sketch(self, dim: int, device: torch.device) -> torch.Tensor:
@@ -2091,14 +2101,21 @@ class NegPredictabilityTerm(MaskerTerm):
             # isolates image-specific surprise and neutralizes ctx-collapse.
             diff = diff - diff.mean(dim=0, keepdim=True).detach()
 
-        p_tgt_sum = p_tgt.sum(dim=-1).clamp(min=1.0)                       # (B,)
-        reward = ((p_tgt * diff).sum(dim=-1) / p_tgt_sum).mean()
+        captured = (p_tgt * diff).sum(dim=-1)                              # (B,)
+        if self.reward_norm == "targets":
+            norm = p_tgt.sum(dim=-1).clamp(min=1.0)                        # (B,) mean over targets
+        else:  # "all": fixed denominator -> no singleton incentive
+            norm = float(N)
+        reward = (captured / norm).mean()
         loss = -reward
 
         logs = {
             "predict/loss": float(loss.detach().item()),
             "predict/reward": float(reward.detach().item()),
             "predict/diff_mean": float(diff.detach().mean().item()),
+            "predict/diff_tgt_mean": float(
+                (captured / p_tgt.sum(dim=-1).clamp(min=1.0)).detach().mean().item()
+            ),
             "predict/denom_mean": float(denom.detach().mean().item()),
             "predict/sigma_sq_mean": float(sigma_sq.detach().mean().item()),
             "predict/residualize": 1.0 if self.residualize else 0.0,
