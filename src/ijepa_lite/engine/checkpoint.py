@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 import os
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from ijepa_lite.utils.dist import is_rank0, unwrap_model
 
@@ -102,12 +104,92 @@ def load_model_weights(
     )
 
     core = unwrap_model(model)
+    state_dict, resized_keys = _adapt_weight_init_state_dict(state_dict, core.state_dict())
     incompatible = core.load_state_dict(state_dict, strict=strict)
 
     if is_rank0():
         mode = "strict" if strict else "non-strict"
         print(f"[init_weights] Loaded model weights from {path} ({mode}).")
+        if resized_keys:
+            print(f"[init_weights] Resized positional embeddings: {resized_keys}")
         if incompatible.missing_keys:
             print(f"[init_weights] Missing keys: {incompatible.missing_keys}")
         if incompatible.unexpected_keys:
             print(f"[init_weights] Unexpected keys: {incompatible.unexpected_keys}")
+
+
+def _adapt_weight_init_state_dict(
+    state_dict: dict[str, torch.Tensor],
+    target_state_dict: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], list[str]]:
+    adapted = dict(state_dict)
+    resized_keys: list[str] = []
+
+    for key, value in list(adapted.items()):
+        target = target_state_dict.get(key)
+        if target is None or not isinstance(value, torch.Tensor):
+            continue
+        if value.shape == target.shape:
+            continue
+        if _is_pos_embedding_key(key):
+            resized = _resize_square_grid_pos_embedding(value, target)
+            if resized is not None:
+                adapted[key] = resized
+                resized_keys.append(key)
+                continue
+        raise ValueError(
+            "Cannot initialize model weights because a checkpoint tensor shape "
+            f"does not match the current model: {key} "
+            f"ckpt{tuple(value.shape)} != model{tuple(target.shape)}"
+        )
+
+    return adapted, resized_keys
+
+
+def _is_pos_embedding_key(key: str) -> bool:
+    return "pos_embed" in key or "pos_embedding" in key
+
+
+def _square_grid_size(tokens: int) -> int | None:
+    grid = int(math.isqrt(tokens))
+    return grid if grid * grid == tokens else None
+
+
+def _resize_square_grid_pos_embedding(
+    src: torch.Tensor,
+    dst: torch.Tensor,
+) -> torch.Tensor | None:
+    if src.ndim != 3 or dst.ndim != 3:
+        return None
+    if src.shape[0] != 1 or dst.shape[0] != 1:
+        return None
+    if src.shape[2] != dst.shape[2]:
+        return None
+
+    src_tokens = int(src.shape[1])
+    dst_tokens = int(dst.shape[1])
+    src_grid = _square_grid_size(src_tokens)
+    dst_grid = _square_grid_size(dst_tokens)
+    has_cls = False
+
+    if src_grid is None or dst_grid is None:
+        src_grid = _square_grid_size(src_tokens - 1)
+        dst_grid = _square_grid_size(dst_tokens - 1)
+        has_cls = src_grid is not None and dst_grid is not None
+
+    if src_grid is None or dst_grid is None:
+        return None
+
+    cls_pos = src[:, :1, :] if has_cls else None
+    patch_pos = src[:, 1:, :] if has_cls else src
+    patch_pos = patch_pos.reshape(1, src_grid, src_grid, src.shape[2]).permute(0, 3, 1, 2)
+    patch_pos = F.interpolate(
+        patch_pos,
+        size=(dst_grid, dst_grid),
+        mode="bicubic",
+        align_corners=False,
+    )
+    patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, dst_grid * dst_grid, src.shape[2])
+    if cls_pos is not None:
+        return torch.cat([cls_pos, patch_pos], dim=1)
+    return patch_pos
