@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-ctp-in1k96-affnov-candtest
-#SBATCH --account=IscrC_DEEPECHO
+#SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
@@ -134,7 +134,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.warmup_epochs=0 \
       masking.latent.nctx_min=1 \
       masking.latent.ntgt_min=4 \
-      train.epochs=1 \
+      train.epochs=5 \
       train.eval_every_epochs=1 \
       train.viz_enabled=true \
       +train.viz_every_epochs=1 \
