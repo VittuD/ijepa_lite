@@ -2024,6 +2024,7 @@ class NegPredictabilityTerm(MaskerTerm):
         sketch_seed: int = 0,
         norm_eps: float = 1e-8,
         residualize: bool = True,
+        standardize: bool = True,
         reward_norm: str = "all",
     ):
         super().__init__()
@@ -2038,6 +2039,11 @@ class NegPredictabilityTerm(MaskerTerm):
         self.sketch_seed = int(sketch_seed)
         self.norm_eps = float(norm_eps)
         self.residualize = bool(residualize)
+        # Per-image scale-normalize the (residualized) difficulty by its RMS so
+        # the reward is dimensionless: the loss weight becomes a transferable
+        # O(1) threshold in std-units instead of chasing the raw, image-varying
+        # difficulty magnitude. Sign (hence target set/count) is unchanged.
+        self.standardize = bool(standardize)
         # "all"     : reward = Σ_j p_tgt_j·diff_j / N  (mean over ALL patches) —
         #             per-patch gradient diff_j/N, so the hard REGION becomes
         #             targets; size emerges from balance vs affinity coverage.
@@ -2101,6 +2107,12 @@ class NegPredictabilityTerm(MaskerTerm):
             # isolates image-specific surprise and neutralizes ctx-collapse.
             diff = diff - diff.mean(dim=0, keepdim=True).detach()
 
+        if self.standardize:
+            # Per-image RMS (detached): dimensionless surprise -> the weight is a
+            # transferable threshold in std-units. Sign/count preserved.
+            scale = diff.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()    # (B,1)
+            diff = diff / scale.detach()
+
         captured = (p_tgt * diff).sum(dim=-1)                              # (B,)
         if self.reward_norm == "targets":
             norm = p_tgt.sum(dim=-1).clamp(min=1.0)                        # (B,) mean over targets
@@ -2119,6 +2131,7 @@ class NegPredictabilityTerm(MaskerTerm):
             "predict/denom_mean": float(denom.detach().mean().item()),
             "predict/sigma_sq_mean": float(sigma_sq.detach().mean().item()),
             "predict/residualize": 1.0 if self.residualize else 0.0,
+            "predict/standardize": 1.0 if self.standardize else 0.0,
         }
         return loss, logs
 

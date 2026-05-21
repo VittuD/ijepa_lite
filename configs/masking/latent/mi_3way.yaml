@@ -107,6 +107,7 @@ terms:
     sketch_seed: 0
     norm_eps: 1.0e-8
     residualize: true     # subtract per-position batch-mean difficulty (image-specific surprise + ctx-collapse guard)
+    standardize: true     # per-image RMS-normalize the difficulty -> loss weight is a transferable O(1) std-threshold
     reward_norm: all      # "all" = Σ p_tgt·diff / N (targets = hard REGION); "targets" = / Σ p_tgt (DEGENERATE: ntgt→1)
 
 warmup_epochs: 0

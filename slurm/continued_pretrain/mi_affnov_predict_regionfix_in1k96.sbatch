@@ -26,14 +26,18 @@
 #
 # The fix: reward_norm="all" -> Σ p_tgt·diff / N (mean over ALL patches). The
 # per-patch gradient is diff_j/N, so every above-baseline-difficulty patch wants
-# to be a target -> targets become the hard REGION; size emerges from the balance
-# against affinity coverage. (÷N rescales the gradient vs the ÷ntgt~1 that worked
-# at w=1, so "all" needs a larger weight -- swept here.)
+# to be a target -> targets become the hard REGION; size emerges from the SIGN of
+# the (residualized) difficulty, i.e. content -- no count injected.
 #
-# Matrix (all on residualize=true, the validated winner):
-#   0  reward_norm=all      w=16
-#   1  reward_norm=all      w=32
-#   2  reward_norm=all      w=64
+# Emergence knob: standardize=true per-image RMS-normalizes the difficulty, so
+# the loss weight is a dimensionless O(1) threshold in std-units (transferable)
+# instead of chasing the raw magnitude (which is why the ÷N-raw version needed
+# ~×N weights). The target set/count stay emergent (sign preserved).
+#
+# Matrix (all on residualize=true + standardize=true, the validated winner):
+#   0  reward_norm=all      w=1.0
+#   1  reward_norm=all      w=2.0
+#   2  reward_norm=all      w=4.0
 #   3  reward_norm=targets  w=1.0   (CONTROL: reproduces the singleton)
 #
 # Read-out (watch the TREND across the run):
@@ -89,18 +93,18 @@ ls -ld "$DATA_ROOT" "$DATA_ROOT/train" "$DATA_ROOT/val"
 case "${SLURM_ARRAY_TASK_ID}" in
   0)
     RNORM="all"
-    PRED_W="16.0"
-    LABEL="all_w16"
+    PRED_W="1.0"
+    LABEL="all_w1"
     ;;
   1)
     RNORM="all"
-    PRED_W="32.0"
-    LABEL="all_w32"
+    PRED_W="2.0"
+    LABEL="all_w2"
     ;;
   2)
     RNORM="all"
-    PRED_W="64.0"
-    LABEL="all_w64"
+    PRED_W="4.0"
+    LABEL="all_w4"
     ;;
   3)
     RNORM="targets"
@@ -150,6 +154,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.terms.neg_predictability.sigma_rho=0.25 \
       masking.latent.terms.neg_predictability.sketch_dim=64 \
       masking.latent.terms.neg_predictability.residualize=true \
+      masking.latent.terms.neg_predictability.standardize=true \
       masking.latent.terms.neg_predictability.reward_norm=${RNORM} \
       masking.latent.hard_assignment=gumbel \
       masking.latent.gumbel_tau=1.0 \
