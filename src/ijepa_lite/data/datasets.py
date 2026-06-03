@@ -399,6 +399,8 @@ class ChestMNISTDataset(Dataset):
 
     ChestMNIST is a 14-label binary multilabel task. We return the full target
     vector as float32 so downstream probes can train with BCE-with-logits.
+    For self-supervised pretraining, split="all" concatenates train/val/test;
+    the pretrain collate keeps only the image tensor and ignores the target.
     """
 
     def __init__(
@@ -412,15 +414,14 @@ class ChestMNISTDataset(Dataset):
         mmap_mode: Optional[str] = None,
         class_names: Optional[list[str]] = None,
     ) -> None:
-        if split not in ("train", "val", "test"):
+        if split not in ("train", "val", "test", "all"):
             raise ValueError(
-                f"Unknown split='{split}' for chestmnist. Expected: train|val|test."
+                f"Unknown split='{split}' for chestmnist. Expected: train|val|test|all."
             )
 
         from medmnist import ChestMNIST
 
-        self.ds = ChestMNIST(
-            split=split,
+        kwargs = dict(
             transform=transform,
             download=download,
             as_rgb=as_rgb,
@@ -428,6 +429,12 @@ class ChestMNISTDataset(Dataset):
             size=size,
             mmap_mode=mmap_mode,
         )
+        if split == "all":
+            self.ds = ConcatDataset(
+                ChestMNIST(split=part, **kwargs) for part in ("train", "val", "test")
+            )
+        else:
+            self.ds = ChestMNIST(split=split, **kwargs)
         self.transform = transform
         self.classes = list(class_names or [])
         self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
@@ -439,6 +446,53 @@ class ChestMNISTDataset(Dataset):
     def __getitem__(self, idx):
         img, target = self.ds[idx]
         return img, torch.as_tensor(target.reshape(-1), dtype=torch.float32)
+
+
+class PneumoniaMNISTDataset(Dataset):
+    """
+    Thin wrapper around MedMNIST PneumoniaMNIST using the MedMNIST+ 224px source.
+
+    PneumoniaMNIST is a binary-class pediatric chest X-ray task. We request RGB
+    conversion to stay compatible with the shared ImageNet-style probe transforms.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform=None,
+        size: int = 224,
+        download: bool = False,
+        as_rgb: bool = True,
+        mmap_mode: Optional[str] = None,
+        class_names: Optional[list[str]] = None,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for pneumoniamnist. Expected: train|val|test."
+            )
+
+        from medmnist import PneumoniaMNIST
+
+        self.ds = PneumoniaMNIST(
+            split=split,
+            transform=transform,
+            download=download,
+            as_rgb=as_rgb,
+            root=root,
+            size=size,
+            mmap_mode=mmap_mode,
+        )
+        self.transform = transform
+        self.classes = list(class_names or [])
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        img, target = self.ds[idx]
+        return img, int(target.reshape(-1)[0])
 
 
 class CLEVRCountDataset(Dataset):
@@ -709,6 +763,18 @@ def _build_dataset_local(cfg, split: str, transform):
             class_names=list(getattr(cfg, "class_names", [])),
         )
 
+    if name == "pneumoniamnist":
+        return PneumoniaMNISTDataset(
+            root=root,
+            split=split,
+            transform=transform,
+            size=int(getattr(cfg, "size", 224)),
+            download=bool(getattr(cfg, "download", False)),
+            as_rgb=bool(getattr(cfg, "as_rgb", True)),
+            mmap_mode=getattr(cfg, "mmap_mode", None),
+            class_names=list(getattr(cfg, "class_names", [])),
+        )
+
     if name == "clevr_count":
         class_values = getattr(cfg, "class_values", None)
         return CLEVRCountDataset(
@@ -816,6 +882,10 @@ def _maybe_download_dataset(cfg, split: str, transform) -> None:
         return
 
     if name == "chestmnist":
+        # MedMNIST file should already be present under the shared dataset root.
+        return
+
+    if name == "pneumoniamnist":
         # MedMNIST file should already be present under the shared dataset root.
         return
 

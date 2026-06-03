@@ -61,6 +61,7 @@ DATASETS=(
   organmnist
   tissuemnist
   chestmnist
+  pneumoniamnist
   vocseg
 )
 

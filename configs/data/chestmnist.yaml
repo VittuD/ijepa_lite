@@ -3,6 +3,7 @@ root: data
 
 train_split: train
 val_split: val
+pretrain_split: all
 
 size: 224
 as_rgb: true
