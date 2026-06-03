@@ -21,7 +21,15 @@ import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader as _TDL, TensorDataset
 
-from ijepa_lite.engine.eval_linear import LinearProbeModel, _acc_top1, _build_scheduler, _extract_features
+from ijepa_lite.engine.eval_linear import (
+    LinearProbeModel,
+    _acc_top1,
+    _build_scheduler,
+    _extract_features,
+    _is_multilabel_probe,
+    _probe_correct_total,
+    _probe_loss,
+)
 from ijepa_lite.utils.dist import (
     all_reduce_sum,
     is_distributed,
@@ -140,6 +148,8 @@ def _run_linear_probe(
     amp = bool(getattr(cfg.task, "amp", True)) and (device.type == "cuda")
     epochs = int(cfg.train.epochs)
     log_every = int(getattr(cfg.train, "log_every", 50))
+    multilabel = _is_multilabel_probe(cfg)
+    metric_name = "label_acc" if multilabel else "acc1"
 
     head = nn.Linear(int(cfg.model.embed_dim), int(num_classes)).to(device)
     model = LinearProbeModel(
@@ -204,7 +214,7 @@ def _run_linear_probe(
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 logits = model(None, feat=feat)
-                loss = F.cross_entropy(logits, y)
+                loss = _probe_loss(logits, y, multilabel)
 
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -214,7 +224,7 @@ def _run_linear_probe(
             state["global_step"] += 1
 
             with torch.no_grad():
-                c, t = _acc_top1(logits, y)
+                c, t = _probe_correct_total(logits, y, multilabel)
                 correct_sum += c
                 total_sum += t
 
@@ -246,10 +256,11 @@ def _run_linear_probe(
             for feat, y in val_cache:
                 with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                     logits = model(None, feat=feat)
-                    loss = F.cross_entropy(logits, y)
+                    loss = _probe_loss(logits, y, multilabel)
                 val_loss_sum += loss.detach() * feat.size(0)
-                val_correct += _acc_top1(logits, y)[0]
-                val_total += y.numel()
+                c, t = _probe_correct_total(logits, y, multilabel)
+                val_correct += c
+                val_total += t
 
         val_loss_sum = all_reduce_sum(val_loss_sum)
         val_correct = all_reduce_sum(val_correct.float())
@@ -267,9 +278,9 @@ def _run_linear_probe(
                 state=state,
                 metrics={
                     "probe/linear_train_loss": float(loss_meter.avg),
-                    "probe/linear_train_acc1": float(train_acc1),
+                    f"probe/linear_train_{metric_name}": float(train_acc1),
                     "probe/linear_val_loss": float(val_loss),
-                    "probe/linear_val_acc1": float(val_acc1),
+                    f"probe/linear_val_{metric_name}": float(val_acc1),
                     "probe/linear_lr": float(opt.param_groups[0]["lr"]),
                     "probe/epoch": float(epoch),
                 },

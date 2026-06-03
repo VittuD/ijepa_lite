@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-ctp-in1k96-in1k30-origlr
-#SBATCH --account=IscrC_DEEPECHO
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1

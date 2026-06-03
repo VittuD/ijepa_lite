@@ -57,7 +57,12 @@ class SupervisedCollate:
             imgs.append(item[0])
             labels.append(item[1])
         images = torch.stack(imgs, dim=0)
-        y = torch.tensor(labels, dtype=torch.long)
+        if labels and isinstance(labels[0], torch.Tensor):
+            y = torch.stack(labels, dim=0)
+        else:
+            y = torch.as_tensor(labels)
+            if y.ndim <= 1:
+                y = y.long()
         return {"images": images, "labels": y}
 
 

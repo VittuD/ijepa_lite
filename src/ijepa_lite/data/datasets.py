@@ -5,6 +5,7 @@ import random
 from pathlib import Path
 from typing import Optional
 
+import torch
 from datasets import load_dataset, load_from_disk
 from PIL import Image
 from torch.utils.data import ConcatDataset, Dataset
@@ -392,6 +393,54 @@ class OrganMNISTDataset(Dataset):
         return img, int(target.reshape(-1)[0])
 
 
+class ChestMNISTDataset(Dataset):
+    """
+    Thin wrapper around MedMNIST ChestMNIST using the MedMNIST+ 128px source.
+
+    ChestMNIST is a 14-label binary multilabel task. We return the full target
+    vector as float32 so downstream probes can train with BCE-with-logits.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform=None,
+        size: int = 128,
+        download: bool = False,
+        as_rgb: bool = True,
+        mmap_mode: Optional[str] = None,
+        class_names: Optional[list[str]] = None,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for chestmnist. Expected: train|val|test."
+            )
+
+        from medmnist import ChestMNIST
+
+        self.ds = ChestMNIST(
+            split=split,
+            transform=transform,
+            download=download,
+            as_rgb=as_rgb,
+            root=root,
+            size=size,
+            mmap_mode=mmap_mode,
+        )
+        self.transform = transform
+        self.classes = list(class_names or [])
+        self.class_to_idx = {name: idx for idx, name in enumerate(self.classes)}
+        self.target_type = "multilabel"
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        img, target = self.ds[idx]
+        return img, torch.as_tensor(target.reshape(-1), dtype=torch.float32)
+
+
 class CLEVRCountDataset(Dataset):
     """
     Downstream classification wrapper for torchvision CLEVRClassification.
@@ -648,6 +697,18 @@ def _build_dataset_local(cfg, split: str, transform):
             class_names=list(getattr(cfg, "class_names", [])),
         )
 
+    if name == "chestmnist":
+        return ChestMNISTDataset(
+            root=root,
+            split=split,
+            transform=transform,
+            size=int(getattr(cfg, "size", 128)),
+            download=bool(getattr(cfg, "download", False)),
+            as_rgb=bool(getattr(cfg, "as_rgb", True)),
+            mmap_mode=getattr(cfg, "mmap_mode", None),
+            class_names=list(getattr(cfg, "class_names", [])),
+        )
+
     if name == "clevr_count":
         class_values = getattr(cfg, "class_values", None)
         return CLEVRCountDataset(
@@ -751,6 +812,10 @@ def _maybe_download_dataset(cfg, split: str, transform) -> None:
         return
 
     if name == "organmnist":
+        # MedMNIST file should already be present under the shared dataset root.
+        return
+
+    if name == "chestmnist":
         # MedMNIST file should already be present under the shared dataset root.
         return
 

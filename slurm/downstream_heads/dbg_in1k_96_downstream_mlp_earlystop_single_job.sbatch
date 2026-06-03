@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-downstream-es-dbg-1job
-#SBATCH --account=IscrC_DEEPECHO
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1

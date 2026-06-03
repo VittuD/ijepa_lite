@@ -184,6 +184,41 @@ def _acc_top1(
     return correct, total
 
 
+def _is_multilabel_probe(cfg) -> bool:
+    data_cfg = getattr(cfg, "data", None)
+    task_cfg = getattr(cfg, "task", None)
+    target_type = str(
+        getattr(
+            data_cfg,
+            "task_type",
+            getattr(task_cfg, "target_type", ""),
+        )
+    ).lower()
+    return target_type in {"multilabel", "multi-label", "multi_label"}
+
+
+def _probe_loss(logits: torch.Tensor, y: torch.Tensor, multilabel: bool) -> torch.Tensor:
+    if multilabel:
+        return F.binary_cross_entropy_with_logits(logits, y.float())
+    return F.cross_entropy(logits, y.long())
+
+
+@torch.no_grad()
+def _probe_correct_total(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    multilabel: bool,
+    threshold: float = 0.5,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if multilabel:
+        pred = torch.sigmoid(logits) >= threshold
+        target = y.bool()
+        correct = (pred == target).sum()
+        total = torch.tensor(y.numel(), device=y.device, dtype=torch.long)
+        return correct, total
+    return _acc_top1(logits, y.long())
+
+
 def _build_scheduler(optimizer, cfg_sched, epochs: int):
     """
     Build a LR scheduler for the linear head, or return None for constant LR.
@@ -263,6 +298,8 @@ def linear_probe_eval(
 ):
     amp = bool(getattr(cfg.task, "amp", True)) and (device.type == "cuda")
     epochs = int(cfg.train.epochs)
+    multilabel = _is_multilabel_probe(cfg)
+    metric_name = "label_acc" if multilabel else "acc1"
 
     # ------------------------------------------------------------------
     # Model
@@ -359,7 +396,7 @@ def linear_probe_eval(
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 logits = model(None, feat=feat)
-                loss = F.cross_entropy(logits, y)
+                loss = _probe_loss(logits, y, multilabel)
 
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -369,7 +406,7 @@ def linear_probe_eval(
             state["global_step"] += 1
 
             with torch.no_grad():
-                c, t = _acc_top1(logits, y)
+                c, t = _probe_correct_total(logits, y, multilabel)
                 correct_sum += c
                 total_sum += t
 
@@ -404,11 +441,12 @@ def linear_probe_eval(
             for feat, y in val_cache:
                 with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                     logits = model(None, feat=feat)
-                    loss = F.cross_entropy(logits, y)
+                    loss = _probe_loss(logits, y, multilabel)
 
                 val_loss_sum += loss.detach() * feat.size(0)
-                val_correct += _acc_top1(logits, y)[0]
-                val_total += y.numel()
+                c, t = _probe_correct_total(logits, y, multilabel)
+                val_correct += c
+                val_total += t
 
         val_loss_sum = all_reduce_sum(val_loss_sum)
         val_correct = all_reduce_sum(val_correct.float())
@@ -427,9 +465,9 @@ def linear_probe_eval(
                 state=state,
                 metrics={
                     "probe/train_epoch_loss": float(loss_meter.avg),
-                    "probe/train_acc1": float(train_acc1),
+                    f"probe/train_{metric_name}": float(train_acc1),
                     "probe/val_loss": float(val_loss),
-                    "probe/val_acc1": float(val_acc1),
+                    f"probe/val_{metric_name}": float(val_acc1),
                     "probe/lr": float(opt.param_groups[0]["lr"]),
                     "probe/epoch": float(epoch),
                 },
@@ -440,9 +478,12 @@ def linear_probe_eval(
 
             payload = {
                 "head": unwrap_model(model).head.state_dict(),
-                "val_acc1": val_acc1,
+                "metric_name": metric_name,
+                "val_metric": val_acc1,
                 "epoch": epoch,
             }
+            if not multilabel:
+                payload["val_acc1"] = val_acc1
 
             if improved:
                 state["best_acc1"] = float(val_acc1)
@@ -480,7 +521,7 @@ def linear_probe_eval(
         best_epoch = int(state["epoch"])
         best_val_acc1 = float(last_val_acc1)
     return {
-        "task_kind": "classification",
+        "task_kind": "multilabel" if multilabel else "classification",
         "train_acc": float(last_train_acc1),
         "val_acc": float(last_val_acc1),
         "best_val_acc": float(best_val_acc1),

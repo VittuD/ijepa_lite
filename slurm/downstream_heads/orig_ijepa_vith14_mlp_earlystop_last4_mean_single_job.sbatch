@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-orig-vith14-heads-l4m
-#SBATCH --account=IscrC_DEEPECHO
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
@@ -60,6 +60,7 @@ DATASETS=(
   clevr_count
   organmnist
   tissuemnist
+  chestmnist
   vocseg
 )
 
