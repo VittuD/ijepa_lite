@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --array=0-3
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_predict_regionfix/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_predict_regionfix/%x_%A_%a.err
@@ -161,7 +161,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.warmup_epochs=0 \
       masking.latent.nctx_min=1 \
       masking.latent.ntgt_min=4 \
-      train.epochs=10 \
+      train.epochs=30 \
       train.eval_every_epochs=1 \
       train.viz_enabled=true \
       +train.viz_every_epochs=1 \

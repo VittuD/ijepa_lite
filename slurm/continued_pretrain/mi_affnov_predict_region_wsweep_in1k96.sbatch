@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-ctp-in1k96-predict-region-wsweep
+#SBATCH --job-name=ijepa-ctp-in1k96-predict-region-w37to43
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -8,61 +8,24 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=04:00:00
-#SBATCH --array=0-3
-#SBATCH --output=sbatch_logs/continued_pretrain/in1k96_predict_region_wsweep/%x_%A_%a.out
-#SBATCH --error=sbatch_logs/continued_pretrain/in1k96_predict_region_wsweep/%x_%A_%a.err
+#SBATCH --array=0-6
+#SBATCH --output=sbatch_logs/continued_pretrain/in1k96_predict_region_w37to43/%x_%A_%a.out
+#SBATCH --error=sbatch_logs/continued_pretrain/in1k96_predict_region_w37to43/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
 # REGION EXPERIMENT: grow the singleton into a target REGION via reward_norm=all,
 # at the correct weight scale.
 #
-# Established so far:
-#   * Validated winner (reward_norm=targets, w=1, standardize=FALSE) reproduces a
-#     STABLE singleton: ctx contours the subject (coverage), tgt = the hard core,
-#     ign = subject body. Plateaus -- no all-ctx drift. (singleton_repro run.)
-#   * standardize=TRUE was the regionfix destabilizer (forces unit per-image RMS
-#     -> amplifies noise once structure weakens -> all-ctx). Kept FALSE here.
-#   * The first regionfix sweep (reward_norm=all) used w in {1,2,4} and formed NO
-#     targets -> all-ctx. reward_norm=all divides the reward by a FIXED N (=144 at
-#     96px/ps8), so at the singleton operating point (Sum p_tgt ~ 1) it needs
-#     w ~ N just to MATCH the force that produced the singleton, and more to grow
-#     it. w<=4 was ~36-144x too weak.
-#
-# The mechanism we want: with a fixed denominator the per-patch gradient is
-# diff_j/N for EVERY patch, so every above-baseline-difficulty patch (the ign
-# subject body in the repro) wants to be a target -> the singleton core expands
-# into the hard REGION. Size emerges from balance vs affinity coverage; no count
-# is injected (sign of the residualized difficulty decides membership).
-#
 # Sweep (all on residualize=true, standardize=FALSE, reward_norm=all):
-#   0  predict_w=16
-#   1  predict_w=32
-#   2  predict_w=64
-#   3  predict_w=128
-# (~N=144 is the scale where all-norm matches targets-norm w=1; bracket around it.)
+#   0  predict_w=37
+#   1  predict_w=38
+#   2  predict_w=39
+#   3  predict_w=40
+#   4  predict_w=41
+#   5  predict_w=42
+#   6  predict_w=43
 #
-# Read-out (watch the TREND across the run):
-#   mask/ntgt          -> THE metric: must grow from ~1 to a stable REGION (the
-#                         subject body), not stay 1 and not run to all-active.
-#                         Expect it to scale UP with predict_w.
-#   mask/batch_iou     -> stay LOW (per-image); hold the ~0.02-0.05 win.
-#   mask/nctx          -> hold; no all-ctx swing (would mean predict too weak) and
-#                         no all-tgt swing (predict too strong, ctx starved).
-#   predict/diff_tgt_mean -> per-target difficulty; a region is less extreme than
-#                         the single max, so expect a small drop but clearly > 0.
-#   predict/reward     -> rises with w; train/mse_raw + encoder_agreement must NOT
-#                         tank (target region must stay learnable, not impossible).
-#   affinity/C_act, affinity/c_mean -> must NOT climb toward all-ctx.
-#
-# Failure reads: still all-ctx at w=128 -> denominator/scale wrong, not weight
-# (revisit reward_norm). all-tgt / encoder tank at low w -> predict too strong
-# vs coverage (lower the bracket / raise affinity gamma).
-#
-# Cooldown knobs match the validated run: ema=0.99925, lr=6e-4, no warmup,
-# bs=1024, affinity coverage-only (w_tgt=0, gamma=0.1, rho=0.25), no stabilizers.
-#
-# Submit:
-#   sbatch slurm/continued_pretrain/mi_affnov_predict_region_wsweep_in1k96.sbatch
+# Narrow integer sweep around the lower edge of the previous 36-60 bracket.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -85,7 +48,7 @@ export NUMEXPR_NUM_THREADS=4
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-mkdir -p sbatch_logs/continued_pretrain/in1k96_predict_region_wsweep
+mkdir -p sbatch_logs/continued_pretrain/in1k96_predict_region_w37to43
 
 CHECKPOINT_PATH="${WORK}/vitturini/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/last.pt"
 
@@ -99,20 +62,32 @@ ls -ld "$DATA_ROOT" "$DATA_ROOT/train" "$DATA_ROOT/val"
 
 case "${SLURM_ARRAY_TASK_ID}" in
   0)
-    PRED_W="16.0"
-    LABEL="all_w16"
+    PRED_W="37"
+    LABEL="all_w37"
     ;;
   1)
-    PRED_W="32.0"
-    LABEL="all_w32"
+    PRED_W="38"
+    LABEL="all_w38"
     ;;
   2)
-    PRED_W="64.0"
-    LABEL="all_w64"
+    PRED_W="39"
+    LABEL="all_w39"
     ;;
   3)
-    PRED_W="128.0"
-    LABEL="all_w128"
+    PRED_W="40"
+    LABEL="all_w40"
+    ;;
+  4)
+    PRED_W="41"
+    LABEL="all_w41"
+    ;;
+  5)
+    PRED_W="42"
+    LABEL="all_w42"
+    ;;
+  6)
+    PRED_W="43"
+    LABEL="all_w43"
     ;;
   *)
     echo "Unsupported SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}"

@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-ctp-in1k96-affnov-cos
-#SBATCH --account=IscrC_DEEPECHO
+#SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --array=0-2
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_affnov_cossurprise/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_affnov_cossurprise/%x_%A_%a.err
@@ -110,7 +110,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
     ;;
 esac
 
-EXP_NAME="in1k_96_vits_ps8_mi_affnov_rho0p25_coscw${COS_LABEL}_in1k5ep"
+EXP_NAME="in1k_96_vits_ps8_mi_affnov_rho0p25_coscw${COS_LABEL}_in1k30ep"
 
 nvidia-smi -L
 
@@ -149,7 +149,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK \
       masking.latent.warmup_epochs=0 \
       masking.latent.nctx_min=1 \
       masking.latent.ntgt_min=4 \
-      train.epochs=5 \
+      train.epochs=30 \
       train.eval_every_epochs=1 \
       train.viz_enabled=true \
       +train.viz_every_epochs=1 \

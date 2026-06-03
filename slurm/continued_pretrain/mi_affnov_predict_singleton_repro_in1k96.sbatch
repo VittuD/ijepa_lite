@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-ctp-in1k96-predict-singleton-repro
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=04:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/continued_pretrain/in1k96_predict_singleton_repro/%x_%j.out
 #SBATCH --error=sbatch_logs/continued_pretrain/in1k96_predict_singleton_repro/%x_%j.err
 
