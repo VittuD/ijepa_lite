@@ -83,6 +83,12 @@ class InlineEvalCallback(Callback):
         dataset_cfg = SimpleNamespace(
             name=dataset_name,
             root=data_root,
+            size=getattr(icfg, "size", 128),
+            as_rgb=getattr(icfg, "as_rgb", True),
+            download=getattr(icfg, "download", False),
+            mmap_mode=getattr(icfg, "mmap_mode", None),
+            task_type=getattr(icfg, "task_type", "classification"),
+            class_names=list(getattr(icfg, "class_names", [])),
             partition=getattr(icfg, "partition", 1),
             train_ratio=getattr(icfg, "train_ratio", 0.8),
             val_ratio=getattr(icfg, "val_ratio", 0.1),
@@ -163,10 +169,19 @@ class InlineEvalCallback(Callback):
         # Run the probe
         train_acc, val_acc = self._run_probe(encoder, head, icfg)
 
-        metrics["inline_eval/train_acc1"] = train_acc
-        metrics["inline_eval/val_acc1"] = val_acc
+        metric_name = (
+            "label_acc"
+            if _is_multilabel_inline_eval(icfg)
+            else "acc1"
+        )
+        metrics[f"inline_eval/train_{metric_name}"] = train_acc
+        metrics[f"inline_eval/val_{metric_name}"] = val_acc
 
-        print(f"[InlineEval] epoch={epoch}  train_acc1={train_acc:.4f}  val_acc1={val_acc:.4f}")
+        print(
+            f"[InlineEval] epoch={epoch}  "
+            f"train_{metric_name}={train_acc:.4f}  "
+            f"val_{metric_name}={val_acc:.4f}"
+        )
 
         # Restore training mode
         model.train()
@@ -185,6 +200,7 @@ class InlineEvalCallback(Callback):
         probe_lr = float(getattr(icfg, "probe_lr", 0.1))
         probe_wd = float(getattr(icfg, "probe_weight_decay", 0.0))
         sched_name = str(getattr(icfg, "probe_sched", "step")).lower()
+        multilabel = _is_multilabel_inline_eval(icfg)
 
         amp = self._device.type == "cuda"
 
@@ -220,7 +236,7 @@ class InlineEvalCallback(Callback):
                 opt.zero_grad(set_to_none=True)
                 with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                     logits = head(feat)
-                    loss = F.cross_entropy(logits, y)
+                    loss = _inline_eval_loss(logits, y, multilabel)
                 scaler.scale(loss).backward()
                 scaler.step(opt)
                 scaler.update()
@@ -229,8 +245,8 @@ class InlineEvalCallback(Callback):
                 sched.step()
 
         # Final accuracy over cached features
-        train_acc = self._evaluate(head, train_cache, amp)
-        val_acc   = self._evaluate(head, val_cache,   amp)
+        train_acc = self._evaluate(head, train_cache, amp, multilabel)
+        val_acc   = self._evaluate(head, val_cache,   amp, multilabel)
         return train_acc, val_acc
 
     @torch.no_grad()
@@ -239,6 +255,7 @@ class InlineEvalCallback(Callback):
         head: nn.Module,
         cache_loader: _TDL,
         amp: bool,
+        multilabel: bool = False,
     ) -> float:
         head.eval()
         correct = 0
@@ -246,6 +263,36 @@ class InlineEvalCallback(Callback):
         for feat, y in cache_loader:
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 logits = head(feat)
-            correct += (logits.argmax(dim=1) == y).sum().item()
-            total += y.numel()
+            c, t = _inline_eval_correct_total(logits, y, multilabel)
+            correct += c
+            total += t
         return correct / max(total, 1)
+
+
+def _is_multilabel_inline_eval(icfg: Any) -> bool:
+    target_type = str(getattr(icfg, "task_type", "")).lower()
+    return target_type in {"multilabel", "multi-label", "multi_label"}
+
+
+def _inline_eval_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    multilabel: bool,
+) -> torch.Tensor:
+    if multilabel:
+        return F.binary_cross_entropy_with_logits(logits, y.float())
+    return F.cross_entropy(logits, y.long())
+
+
+@torch.no_grad()
+def _inline_eval_correct_total(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    multilabel: bool,
+    threshold: float = 0.5,
+) -> tuple[int, int]:
+    if multilabel:
+        pred = torch.sigmoid(logits) >= threshold
+        target = y.bool()
+        return int((pred == target).sum().item()), int(y.numel())
+    return int((logits.argmax(dim=1) == y.long()).sum().item()), int(y.numel())

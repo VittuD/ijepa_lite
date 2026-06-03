@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-ctp-chest128-all
+#SBATCH --job-name=ijepa-ctp-chest128-tr
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -9,17 +9,18 @@
 #SBATCH --gres=gpu:4
 #SBATCH --time=12:30:00
 #SBATCH --array=0-4
-#SBATCH --output=sbatch_logs/continued_pretrain/chestmnist224to128_all_from_in1k96_e170_origlr_ema99925_nowarmup/%x_%A_%a.out
-#SBATCH --error=sbatch_logs/continued_pretrain/chestmnist224to128_all_from_in1k96_e170_origlr_ema99925_nowarmup/%x_%A_%a.err
+#SBATCH --output=sbatch_logs/continued_pretrain/chestmnist224to128_train_from_in1k96_e247_origlr_ema99925_nowarmup/%x_%A_%a.out
+#SBATCH --error=sbatch_logs/continued_pretrain/chestmnist224to128_train_from_in1k96_e247_origlr_ema99925_nowarmup/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
 # Submit all five 128x128 / ps8 continued-pretraining variants from one command,
 # starting from the IN1K 96x96 / ps8 vanilla-multiblock checkpoint and switching
-# the pretraining data to ChestMNIST 224px source images over all splits.
+# the pretraining data to ChestMNIST 224px source train images.
 #
-# ChestMNIST-all has 112,120 samples. With data.batch_size=1024 per process and
-# 4 processes, 170 epochs is roughly the same optimizer-step budget as the
-# original 15-epoch ImageNet-1K 128px run.
+# Inline eval trains a multilabel probe on ChestMNIST val and evaluates on
+# ChestMNIST test. With data.batch_size=1024 per process and 4 processes,
+# 247 epochs is roughly the same optimizer-step budget as the original
+# 15-epoch ImageNet-1K 128px run.
 #
 # Matrix:
 #   0  vanilla_multiblock
@@ -51,7 +52,7 @@ export NUMEXPR_NUM_THREADS=4
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-mkdir -p sbatch_logs/continued_pretrain/chestmnist224to128_all_from_in1k96_e170_origlr_ema99925_nowarmup
+mkdir -p sbatch_logs/continued_pretrain/chestmnist224to128_train_from_in1k96_e247_origlr_ema99925_nowarmup
 
 CHECKPOINT_PATH="${WORK}/vitturini/outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep/rank0/checkpoints/last.pt"
 
@@ -68,14 +69,14 @@ case "${SLURM_ARRAY_TASK_ID}" in
   0)
     RUN_LABEL="vanilla_multiblock"
     EXPERIMENT="stl10_vits_ps8_multiblock"
-    EXP_NAME="chestmnist_128_vits_ps8_vanilla_multiblock_from_in1k96_e170_origlr_ema99925_nowarmup"
+    EXP_NAME="chestmnist_128_vits_ps8_vanilla_multiblock_from_in1k96_e247_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.kind=smooth_l1"
     RUN_ARGS=()
     ;;
   1)
     RUN_LABEL="mi_affinity_novelty"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="chestmnist_128_vits_ps8_mi_affinity_novelty_from_in1k96_e170_origlr_ema99925_nowarmup"
+    EXP_NAME="chestmnist_128_vits_ps8_mi_affinity_novelty_from_in1k96_e247_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -96,7 +97,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   2)
     RUN_LABEL="mi_hmargbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="chestmnist_128_vits_ps8_mi_hmargbs_floor_from_in1k96_e170_origlr_ema99925_nowarmup"
+    EXP_NAME="chestmnist_128_vits_ps8_mi_hmargbs_floor_from_in1k96_e247_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -113,7 +114,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   3)
     RUN_LABEL="mi_hmargcosbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="chestmnist_128_vits_ps8_mi_hmargcosbs_floor_from_in1k96_e170_origlr_ema99925_nowarmup"
+    EXP_NAME="chestmnist_128_vits_ps8_mi_hmargcosbs_floor_from_in1k96_e247_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -131,7 +132,7 @@ case "${SLURM_ARRAY_TASK_ID}" in
   4)
     RUN_LABEL="mi_hmarg_sketchorthcosbs_floor"
     EXPERIMENT="stl10_vits_ps8_mi"
-    EXP_NAME="chestmnist_128_vits_ps8_mi_hmarg_sketchorthcosbs_floor_from_in1k96_e170_origlr_ema99925_nowarmup"
+    EXP_NAME="chestmnist_128_vits_ps8_mi_hmarg_sketchorthcosbs_floor_from_in1k96_e247_origlr_ema99925_nowarmup"
     LOSS_ARG="loss.base_kind=smooth_l1"
     RUN_ARGS=(
       "masking.latent.terms.H_cond.weight=[0.0,0.0]"
@@ -159,7 +160,7 @@ COMMON_ARGS=(
   "init_weights=${CHECKPOINT_PATH}"
   "${LOSS_ARG}"
   "data.root=${DATA_ROOT}"
-  "data.pretrain_split=all"
+  "data.pretrain_split=train"
   "data.train_split=train"
   "data.val_split=val"
   "data.download=false"
@@ -170,9 +171,29 @@ COMMON_ARGS=(
   "model.ema_momentum=[0.99925,0.99925]"
   "optim.lr=6e-4"
   "sched.warmup_epochs=0"
-  "train.epochs=170"
+  "train.epochs=247"
   "train.save_every_epochs=10"
-  "train.eval_every_epochs=0"
+  "train.eval_every_epochs=10"
+  "train.inline_eval.dataset=chestmnist"
+  "train.inline_eval.data_root=${DATA_ROOT}"
+  "train.inline_eval.train_split=val"
+  "train.inline_eval.val_split=test"
+  "train.inline_eval.num_classes=14"
+  "train.inline_eval.task_type=multilabel"
+  "train.inline_eval.size=224"
+  "train.inline_eval.as_rgb=true"
+  "train.inline_eval.download=false"
+  "train.inline_eval.batch_size=512"
+  "train.inline_eval.num_workers=4"
+  "train.inline_eval.head_type=mlp"
+  "train.inline_eval.head_hidden_dim=384"
+  "train.inline_eval.head_num_layers=1"
+  "train.inline_eval.probe_epochs=10"
+  "train.inline_eval.probe_lr=0.1"
+  "train.inline_eval.probe_weight_decay=0.0"
+  "train.inline_eval.probe_sched=step"
+  "train.inline_eval.probe_step_size=5"
+  "train.inline_eval.probe_gamma=0.1"
   "train.viz_enabled=false"
   "train.viz.out_dir=viz_output_${EXP_NAME}"
   "logger.mode=offline"
