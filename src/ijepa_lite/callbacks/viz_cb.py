@@ -148,7 +148,19 @@ class VizCallback(Callback):
 
         self._run_viz(cfg, state, epoch)
 
-    def _run_viz(self, cfg: Any, state: dict, epoch: int) -> None:
+    def on_before_train_start(
+        self, cfg: Any, state: dict, metrics: Dict[str, float]
+    ) -> None:
+        if not self._enabled or not is_rank0():
+            return
+        vcfg = self._cfg_viz
+        if not bool(getattr(vcfg, "eval_at_start", False)):
+            return
+        self._run_viz(cfg, state, 0, label="start")
+
+    def _run_viz(
+        self, cfg: Any, state: dict, epoch: int, label: str | None = None
+    ) -> None:
         import torch
 
         vcfg = self._cfg_viz
@@ -156,7 +168,8 @@ class VizCallback(Callback):
         out_base = str(getattr(vcfg, "out_dir", "viz_output"))
         grid_cols = int(getattr(vcfg, "grid_cols", 10))
 
-        out_dir = Path(out_base) / f"epoch_{epoch:05d}"
+        epoch_label = label if label is not None else f"epoch_{epoch:05d}"
+        out_dir = Path(out_base) / epoch_label
         out_dir.mkdir(parents=True, exist_ok=True)
 
         dataset_name = str(getattr(vcfg, "dataset", "stl10"))
@@ -197,7 +210,7 @@ class VizCallback(Callback):
                     out_dir / f"{dataset_name}_per_class_coverage.png",
                     verbose=False,
                 )
-            print(f"[VizCallback] epoch={epoch}  output -> {out_dir}/")
+            print(f"[VizCallback] {epoch_label}  output -> {out_dir}/")
             return
 
         from ijepa_lite.viz.goldilocks_viz import (
@@ -295,4 +308,4 @@ class VizCallback(Callback):
 
         encoder.train()
         masker.train()
-        print(f"[VizCallback] epoch={epoch}  output -> {out_dir}/")
+        print(f"[VizCallback] {epoch_label}  output -> {out_dir}/")

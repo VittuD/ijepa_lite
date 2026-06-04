@@ -46,6 +46,19 @@ def _null_interclass_std(p: float, n_min: int) -> float:
     return math.sqrt(p * (1.0 - p) / n_min)
 
 
+def _single_class_label_or_none(label) -> Optional[int]:
+    """Return a scalar class id, or None for multilabel/vector targets."""
+    if torch.is_tensor(label):
+        arr = label.detach().cpu().numpy()
+    else:
+        arr = np.asarray(label)
+    if arr.shape == ():
+        return int(arr.item())
+    if arr.size == 1:
+        return int(arr.reshape(-1)[0])
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Colormap: cold (blue=0) → yellow (0.5) → hot (red=1)
 # ---------------------------------------------------------------------------
@@ -648,7 +661,7 @@ def visualize_split_multiblock(
                 pil = img_raw
             pil_crop = _resize_crop(pil.convert("RGB"))
             displays.append(np.array(pil_crop, dtype=np.uint8))
-            labels_batch.append(int(lbl))
+            labels_batch.append(_single_class_label_or_none(lbl))
 
         mask_out = masker(B)
 
@@ -669,12 +682,13 @@ def visualize_split_multiblock(
             sums["ctx"] += ctx_freq.reshape(gh, gw)
             sums["tgt"] += tgt_freq.reshape(gh, gw)
 
-            if lbl not in cls_sums:
-                cls_sums[lbl] = {"ctx": _zero(), "tgt": _zero()}
-                cls_n[lbl] = 0
-            cls_sums[lbl]["ctx"] += ctx_freq.reshape(gh, gw)
-            cls_sums[lbl]["tgt"] += tgt_freq.reshape(gh, gw)
-            cls_n[lbl] += 1
+            if lbl is not None:
+                if lbl not in cls_sums:
+                    cls_sums[lbl] = {"ctx": _zero(), "tgt": _zero()}
+                    cls_n[lbl] = 0
+                cls_sums[lbl]["ctx"] += ctx_freq.reshape(gh, gw)
+                cls_sums[lbl]["tgt"] += tgt_freq.reshape(gh, gw)
+                cls_n[lbl] += 1
 
             orig_np = displays[bi]
 
@@ -1107,7 +1121,7 @@ def visualize_split(
 
             displays.append(display)
             tensors.append(tensor)
-            labels_batch.append(int(lbl))
+            labels_batch.append(_single_class_label_or_none(lbl))
 
         x = torch.stack(tensors).to(device)
         tokens = encoder(x)
@@ -1156,9 +1170,10 @@ def visualize_split(
 
         for bi in range(B):
             lbl = labels_batch[bi]
-            if lbl not in class_img_n:
-                class_img_n[lbl] = 0
-            class_img_n[lbl] += 1
+            if lbl is not None:
+                if lbl not in class_img_n:
+                    class_img_n[lbl] = 0
+                class_img_n[lbl] += 1
 
             orig_np = displays[bi]
 
@@ -1181,9 +1196,10 @@ def visualize_split(
                 for ci_k, key in enumerate(role_keys):
                     ch = soft_bi[..., ci_k].astype(np.float64)
                     role_sums[key] += ch
-                    if lbl not in class_role_sums:
-                        class_role_sums[lbl] = {k: _zero() for k in role_keys}
-                    class_role_sums[lbl][key] += ch
+                    if lbl is not None:
+                        if lbl not in class_role_sums:
+                            class_role_sums[lbl] = {k: _zero() for k in role_keys}
+                        class_role_sums[lbl][key] += ch
 
             elif masker_type == "3way":
                 # 3-way: middle panel = soft 3-way overlay
@@ -1224,13 +1240,14 @@ def visualize_split(
                 role_sums["ctx"] += pc.astype(np.float64)
                 role_sums["tgt"] += pt.astype(np.float64)
                 role_sums["ign"] += pi.astype(np.float64)
-                if lbl not in class_role_sums:
-                    class_role_sums[lbl] = {
-                        "ctx": _zero(), "tgt": _zero(), "ign": _zero(),
-                    }
-                class_role_sums[lbl]["ctx"] += pc.astype(np.float64)
-                class_role_sums[lbl]["tgt"] += pt.astype(np.float64)
-                class_role_sums[lbl]["ign"] += pi.astype(np.float64)
+                if lbl is not None:
+                    if lbl not in class_role_sums:
+                        class_role_sums[lbl] = {
+                            "ctx": _zero(), "tgt": _zero(), "ign": _zero(),
+                        }
+                    class_role_sums[lbl]["ctx"] += pc.astype(np.float64)
+                    class_role_sums[lbl]["tgt"] += pt.astype(np.float64)
+                    class_role_sums[lbl]["ign"] += pi.astype(np.float64)
             else:
                 # 2-way: middle panel = cold→hot p_tgt heatmap
                 bin_flat = torch.full((N,), 2, dtype=torch.long)
@@ -1246,9 +1263,10 @@ def visualize_split(
                 assign_np = apply_assignment_overlay(orig_np, bin_map, patch_size)
 
                 score_sums += score_map.astype(np.float64)
-                if lbl not in class_score_sums:
-                    class_score_sums[lbl] = np.zeros((gh, gw), dtype=np.float64)
-                class_score_sums[lbl] += score_map.astype(np.float64)
+                if lbl is not None:
+                    if lbl not in class_score_sums:
+                        class_score_sums[lbl] = np.zeros((gh, gw), dtype=np.float64)
+                    class_score_sums[lbl] += score_map.astype(np.float64)
 
             cells.append(make_cell(orig_np, mid_np, assign_np))
 

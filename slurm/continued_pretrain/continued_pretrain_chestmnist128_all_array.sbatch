@@ -197,6 +197,7 @@ COMMON_ARGS=(
   "train.inline_eval.probe_gamma=0.1"
   "train.viz_enabled=true"
   "+train.viz_every_epochs=1"
+  "train.viz.eval_at_start=true"
   "train.viz.dataset=chestmnist"
   "train.viz.data_root=${DATA_ROOT}"
   "+train.viz.split=test"
