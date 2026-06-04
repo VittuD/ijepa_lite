@@ -79,6 +79,37 @@ class VizCallback(Callback):
                 self._dataset = tv_datasets.STL10(data_root, split="test", download=False)
             elif dataset_name == "food101":
                 self._dataset = tv_datasets.Food101(data_root, split="test", download=False)
+            elif dataset_name == "chestmnist":
+                from medmnist import ChestMNIST
+                self._dataset = ChestMNIST(
+                    root=data_root,
+                    split=str(getattr(vcfg, "split", "test")),
+                    size=int(getattr(vcfg, "size", 224)),
+                    as_rgb=True,
+                    download=False,
+                )
+                self._dataset.classes = list(
+                    getattr(
+                        vcfg,
+                        "class_names",
+                        [
+                            "atelectasis",
+                            "cardiomegaly",
+                            "effusion",
+                            "infiltration",
+                            "mass",
+                            "nodule",
+                            "pneumonia",
+                            "pneumothorax",
+                            "consolidation",
+                            "edema",
+                            "emphysema",
+                            "fibrosis",
+                            "pleural",
+                            "hernia",
+                        ],
+                    )
+                )
             else:
                 print(f"[VizCallback] Unknown dataset '{dataset_name}' — disabling.")
                 self._enabled = False

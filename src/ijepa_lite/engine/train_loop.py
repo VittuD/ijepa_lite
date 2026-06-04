@@ -104,6 +104,10 @@ def train(
     # all_reduce before rank 0 has left on_run_start, causing a collective hang.
     barrier(device)
 
+    start_metrics: dict[str, float] = {}
+    callbacks.on_before_train_start(cfg=cfg, state=state, metrics=start_metrics)
+    barrier(device)
+
     # Unwrap once here; DDP wrapping doesn't change between epochs.
     # (The variable is reused inside the loop for EMA/metrics without re-wrapping.)
 

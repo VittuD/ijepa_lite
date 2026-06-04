@@ -16,6 +16,7 @@ inline_eval:
   num_classes: 10
   batch_size: 512
   num_workers: 4
+  eval_at_start: false
   head_type: mlp
   head_hidden_dim: 384
   head_num_layers: 1

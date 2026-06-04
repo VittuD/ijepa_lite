@@ -103,6 +103,13 @@ class WandbCallback(Callback):
             return
         wandb.log(self._convert_histograms(metrics), step=int(state["global_step"]))
 
+    def on_before_train_start(
+        self, cfg: Any, state: dict, metrics: Dict[str, float]
+    ) -> None:
+        if self.run is None or not is_rank0() or not metrics:
+            return
+        wandb.log(self._convert_histograms(metrics), step=int(state["global_step"]))
+
     def on_epoch_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
         if self.run is None or not is_rank0():
             return

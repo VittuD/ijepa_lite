@@ -133,6 +133,16 @@ class InlineEvalCallback(Callback):
         print(f"[InlineEval] Enabled: every {self._eval_every} epochs, "
               f"dataset={dataset_name}, num_classes={self._num_classes}")
 
+    def on_before_train_start(
+        self, cfg: Any, state: dict, metrics: Dict[str, float]
+    ) -> None:
+        if self._eval_every <= 0 or not is_rank0():
+            return
+        icfg = self._cfg_inline
+        if not bool(getattr(icfg, "eval_at_start", False)):
+            return
+        self._run_and_record(cfg, state, metrics, label="start")
+
     # ------------------------------------------------------------------
     # Epoch end — run probe
     # ------------------------------------------------------------------
@@ -145,6 +155,15 @@ class InlineEvalCallback(Callback):
         if (epoch + 1) % self._eval_every != 0:
             return
 
+        self._run_and_record(cfg, state, metrics, label=f"epoch={epoch}")
+
+    def _run_and_record(
+        self,
+        cfg: Any,
+        state: dict,
+        metrics: Dict[str, float],
+        label: str,
+    ) -> None:
         icfg = self._cfg_inline
 
         # Extract the representation encoder from the live model.
@@ -178,7 +197,7 @@ class InlineEvalCallback(Callback):
         metrics[f"inline_eval/val_{metric_name}"] = val_acc
 
         print(
-            f"[InlineEval] epoch={epoch}  "
+            f"[InlineEval] {label}  "
             f"train_{metric_name}={train_acc:.4f}  "
             f"val_{metric_name}={val_acc:.4f}"
         )

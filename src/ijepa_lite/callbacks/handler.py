@@ -13,6 +13,12 @@ class CallbackHandler:
         for cb in self.callbacks:
             cb.on_run_start(cfg, state, model)
 
+    def on_before_train_start(
+        self, cfg: Any, state: dict, metrics: Dict[str, float]
+    ) -> None:
+        for cb in self.callbacks:
+            cb.on_before_train_start(cfg, state, metrics)
+
     def on_epoch_start(self, cfg: Any, state: dict) -> None:
         for cb in self.callbacks:
             cb.on_epoch_start(cfg, state)
