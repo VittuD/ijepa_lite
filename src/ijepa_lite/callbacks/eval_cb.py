@@ -186,20 +186,20 @@ class InlineEvalCallback(Callback):
         head = _build_head(self._embed_dim, self._num_classes, head_cfg).to(self._device)
 
         # Run the probe
-        train_acc, val_acc = self._run_probe(encoder, head, icfg)
+        train_metric, val_metric = self._run_probe(encoder, head, icfg)
 
         metric_name = (
-            "label_acc"
+            "auroc"
             if _is_multilabel_inline_eval(icfg)
             else "acc1"
         )
-        metrics[f"inline_eval/train_{metric_name}"] = train_acc
-        metrics[f"inline_eval/val_{metric_name}"] = val_acc
+        metrics[f"inline_eval/train_{metric_name}"] = train_metric
+        metrics[f"inline_eval/val_{metric_name}"] = val_metric
 
         print(
             f"[InlineEval] {label}  "
-            f"train_{metric_name}={train_acc:.4f}  "
-            f"val_{metric_name}={val_acc:.4f}"
+            f"train_{metric_name}={train_metric:.4f}  "
+            f"val_{metric_name}={val_metric:.4f}"
         )
 
         # Restore training mode
@@ -263,10 +263,10 @@ class InlineEvalCallback(Callback):
             if sched is not None:
                 sched.step()
 
-        # Final accuracy over cached features
-        train_acc = self._evaluate(head, train_cache, amp, multilabel)
-        val_acc   = self._evaluate(head, val_cache,   amp, multilabel)
-        return train_acc, val_acc
+        # Final metric over cached features
+        train_metric = self._evaluate(head, train_cache, amp, multilabel)
+        val_metric   = self._evaluate(head, val_cache,   amp, multilabel)
+        return train_metric, val_metric
 
     @torch.no_grad()
     def _evaluate(
@@ -277,6 +277,18 @@ class InlineEvalCallback(Callback):
         multilabel: bool = False,
     ) -> float:
         head.eval()
+        if multilabel:
+            all_logits = []
+            all_targets = []
+            for feat, y in cache_loader:
+                with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+                    logits = head(feat)
+                all_logits.append(logits.float().cpu())
+                all_targets.append(y.float().cpu())
+            logits = torch.cat(all_logits, dim=0)
+            targets = torch.cat(all_targets, dim=0)
+            return _multilabel_mean_auroc(logits, targets)
+
         correct = 0
         total = 0
         for feat, y in cache_loader:
@@ -315,3 +327,42 @@ def _inline_eval_correct_total(
         target = y.bool()
         return int((pred == target).sum().item()), int(y.numel())
     return int((logits.argmax(dim=1) == y.long()).sum().item()), int(y.numel())
+
+
+def _multilabel_mean_auroc(logits: torch.Tensor, y: torch.Tensor) -> float:
+    """Macro AUROC over labels, skipping labels without both classes present."""
+    aucs = []
+    for class_idx in range(logits.shape[1]):
+        auc = _binary_auroc(logits[:, class_idx], y[:, class_idx])
+        if auc is not None:
+            aucs.append(auc)
+    if not aucs:
+        return float("nan")
+    return float(sum(aucs) / len(aucs))
+
+
+def _binary_auroc(scores: torch.Tensor, y: torch.Tensor) -> float | None:
+    target = y.bool().flatten()
+    scores = scores.float().flatten()
+    n_pos = int(target.sum().item())
+    n_total = int(target.numel())
+    n_neg = n_total - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return None
+
+    order = torch.argsort(scores)
+    sorted_scores = scores[order]
+    ranks = torch.empty(n_total, dtype=torch.float64)
+
+    start = 0
+    while start < n_total:
+        end = start + 1
+        while end < n_total and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        avg_rank = (start + 1 + end) / 2.0
+        ranks[order[start:end]] = avg_rank
+        start = end
+
+    pos_rank_sum = ranks[target].sum().item()
+    auc = (pos_rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    return float(auc)
