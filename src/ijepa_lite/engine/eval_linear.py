@@ -4,6 +4,7 @@ import os
 from typing import Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
@@ -197,6 +198,29 @@ def _is_multilabel_probe(cfg) -> bool:
     return target_type in {"multilabel", "multi-label", "multi_label"}
 
 
+def _is_binary_auroc_probe(cfg, num_classes: int) -> bool:
+    data_cfg = getattr(cfg, "data", None)
+    task_cfg = getattr(cfg, "task", None)
+    target_type = str(
+        getattr(
+            data_cfg,
+            "task_type",
+            getattr(task_cfg, "target_type", ""),
+        )
+    ).lower()
+    data_name = str(getattr(data_cfg, "name", "")).lower()
+    return (
+        target_type in {"binary", "binary_auroc", "binary-classification"}
+        or data_name in {"pneumoniamnist"}
+    ) and int(num_classes) == 2
+
+
+def _primary_metric_name(cfg, num_classes: int, multilabel: bool) -> str:
+    if multilabel or _is_binary_auroc_probe(cfg, num_classes):
+        return "auroc"
+    return "acc1"
+
+
 def _probe_loss(logits: torch.Tensor, y: torch.Tensor, multilabel: bool) -> torch.Tensor:
     if multilabel:
         return F.binary_cross_entropy_with_logits(logits, y.float())
@@ -217,6 +241,84 @@ def _probe_correct_total(
         total = torch.tensor(y.numel(), device=y.device, dtype=torch.long)
         return correct, total
     return _acc_top1(logits, y.long())
+
+
+def _gather_metric_tensors(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not is_distributed():
+        return logits.detach().float().cpu(), y.detach().cpu()
+
+    logits = logits.detach().contiguous()
+    y = y.detach().contiguous()
+    gathered_logits = [torch.empty_like(logits) for _ in range(dist.get_world_size())]
+    gathered_y = [torch.empty_like(y) for _ in range(dist.get_world_size())]
+    dist.all_gather(gathered_logits, logits)
+    dist.all_gather(gathered_y, y)
+    return torch.cat(gathered_logits, dim=0).float().cpu(), torch.cat(gathered_y, dim=0).cpu()
+
+
+def _auroc_from_parts(
+    logits_parts: list[torch.Tensor],
+    y_parts: list[torch.Tensor],
+    *,
+    multilabel: bool,
+) -> float:
+    logits = torch.cat(logits_parts, dim=0)
+    y = torch.cat(y_parts, dim=0)
+    logits, y = _gather_metric_tensors(logits, y)
+    if multilabel:
+        return _multilabel_mean_auroc(logits, y.float())
+    return _binary_classification_auroc(logits, y.long())
+
+
+def _multilabel_mean_auroc(logits: torch.Tensor, y: torch.Tensor) -> float:
+    """Macro AUROC over labels, skipping labels without both classes present."""
+    aucs = []
+    for class_idx in range(logits.shape[1]):
+        auc = _binary_auroc(logits[:, class_idx], y[:, class_idx])
+        if auc is not None:
+            aucs.append(auc)
+    if not aucs:
+        return float("nan")
+    return float(sum(aucs) / len(aucs))
+
+
+def _binary_classification_auroc(logits: torch.Tensor, y: torch.Tensor) -> float:
+    if logits.ndim == 2 and logits.shape[1] == 2:
+        scores = logits[:, 1] - logits[:, 0]
+    else:
+        scores = logits.reshape(-1)
+    auc = _binary_auroc(scores, y.reshape(-1))
+    return float("nan") if auc is None else float(auc)
+
+
+def _binary_auroc(scores: torch.Tensor, y: torch.Tensor) -> float | None:
+    target = y.bool().flatten()
+    scores = scores.float().flatten()
+    n_pos = int(target.sum().item())
+    n_total = int(target.numel())
+    n_neg = n_total - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return None
+
+    order = torch.argsort(scores)
+    sorted_scores = scores[order]
+    ranks = torch.empty(n_total, dtype=torch.float64)
+
+    start = 0
+    while start < n_total:
+        end = start + 1
+        while end < n_total and sorted_scores[end] == sorted_scores[start]:
+            end += 1
+        avg_rank = (start + 1 + end) / 2.0
+        ranks[order[start:end]] = avg_rank
+        start = end
+
+    pos_rank_sum = ranks[target].sum().item()
+    auc = (pos_rank_sum - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    return float(auc)
 
 
 def _build_scheduler(optimizer, cfg_sched, epochs: int):
@@ -299,7 +401,7 @@ def linear_probe_eval(
     amp = bool(getattr(cfg.task, "amp", True)) and (device.type == "cuda")
     epochs = int(cfg.train.epochs)
     multilabel = _is_multilabel_probe(cfg)
-    metric_name = "label_acc" if multilabel else "acc1"
+    metric_name = _primary_metric_name(cfg, num_classes, multilabel)
 
     # ------------------------------------------------------------------
     # Model
@@ -365,16 +467,16 @@ def linear_probe_eval(
     # ------------------------------------------------------------------
     # Loop
     # ------------------------------------------------------------------
-    state = {"epoch": 0, "global_step": 0, "best_acc1": 0.0}
+    state = {"epoch": 0, "global_step": 0, "best_metric": 0.0}
     log_every = int(getattr(cfg.train, "log_every", 50))
     early_stop_patience = int(getattr(cfg.train, "early_stop_patience", 0))
     early_stop_min_epochs = int(getattr(cfg.train, "early_stop_min_epochs", 0))
     early_stop_min_delta = float(getattr(cfg.train, "early_stop_min_delta", 0.0))
     no_improve_epochs = 0
     best_epoch = -1
-    best_val_acc1 = 0.0
-    last_train_acc1 = 0.0
-    last_val_acc1 = 0.0
+    best_val_metric = 0.0
+    last_train_metric = 0.0
+    last_val_metric = 0.0
     last_val_loss = 0.0
 
     callbacks.on_run_start(cfg=cfg, state=state, model=unwrap_model(model))
@@ -391,6 +493,8 @@ def linear_probe_eval(
         loss_meter = AverageMeter()
         correct_sum = torch.zeros((), device=device, dtype=torch.long)
         total_sum = torch.zeros((), device=device, dtype=torch.long)
+        train_logits_parts: list[torch.Tensor] = []
+        train_target_parts: list[torch.Tensor] = []
 
         for feat, y in train_cache:
             opt.zero_grad(set_to_none=True)
@@ -406,9 +510,13 @@ def linear_probe_eval(
             state["global_step"] += 1
 
             with torch.no_grad():
-                c, t = _probe_correct_total(logits, y, multilabel)
-                correct_sum += c
-                total_sum += t
+                if metric_name == "auroc":
+                    train_logits_parts.append(logits.detach())
+                    train_target_parts.append(y.detach())
+                else:
+                    c, t = _probe_correct_total(logits, y, multilabel)
+                    correct_sum += c
+                    total_sum += t
 
             if state["global_step"] % log_every == 0 and is_rank0():
                 callbacks.on_step_end(
@@ -424,9 +532,16 @@ def linear_probe_eval(
         if sched is not None:
             sched.step()
 
-        correct_sum = all_reduce_sum(correct_sum.float())
-        total_sum = all_reduce_sum(total_sum.float())
-        train_acc1 = (correct_sum / total_sum.clamp(min=1.0)).item()
+        if metric_name == "auroc":
+            train_metric = _auroc_from_parts(
+                train_logits_parts,
+                train_target_parts,
+                multilabel=multilabel,
+            )
+        else:
+            correct_sum = all_reduce_sum(correct_sum.float())
+            total_sum = all_reduce_sum(total_sum.float())
+            train_metric = (correct_sum / total_sum.clamp(min=1.0)).item()
 
         # --------------------------------------------------------------
         # Validate
@@ -434,8 +549,11 @@ def linear_probe_eval(
         unwrap_model(model).eval()
 
         val_loss_sum = torch.zeros((), device=device)
+        val_count = torch.zeros((), device=device)
         val_correct = torch.zeros((), device=device, dtype=torch.long)
         val_total = torch.zeros((), device=device, dtype=torch.long)
+        val_logits_parts: list[torch.Tensor] = []
+        val_target_parts: list[torch.Tensor] = []
 
         with torch.no_grad():
             for feat, y in val_cache:
@@ -444,20 +562,33 @@ def linear_probe_eval(
                     loss = _probe_loss(logits, y, multilabel)
 
                 val_loss_sum += loss.detach() * feat.size(0)
-                c, t = _probe_correct_total(logits, y, multilabel)
-                val_correct += c
-                val_total += t
+                val_count += feat.size(0)
+                if metric_name == "auroc":
+                    val_logits_parts.append(logits.detach())
+                    val_target_parts.append(y.detach())
+                else:
+                    c, t = _probe_correct_total(logits, y, multilabel)
+                    val_correct += c
+                    val_total += t
 
         val_loss_sum = all_reduce_sum(val_loss_sum)
-        val_correct = all_reduce_sum(val_correct.float())
-        val_total = all_reduce_sum(val_total.float())
+        val_count = all_reduce_sum(val_count)
 
-        val_loss = (val_loss_sum / val_total.clamp(min=1.0)).item()
-        val_acc1 = (val_correct / val_total.clamp(min=1.0)).item()
-        last_train_acc1 = float(train_acc1)
-        last_val_acc1 = float(val_acc1)
+        val_loss = (val_loss_sum / val_count.clamp(min=1.0)).item()
+        if metric_name == "auroc":
+            val_metric = _auroc_from_parts(
+                val_logits_parts,
+                val_target_parts,
+                multilabel=multilabel,
+            )
+        else:
+            val_correct = all_reduce_sum(val_correct.float())
+            val_total = all_reduce_sum(val_total.float())
+            val_metric = (val_correct / val_total.clamp(min=1.0)).item()
+        last_train_metric = float(train_metric)
+        last_val_metric = float(val_metric)
         last_val_loss = float(val_loss)
-        improved = val_acc1 > float(state["best_acc1"]) + early_stop_min_delta
+        improved = val_metric > float(state["best_metric"]) + early_stop_min_delta
 
         if is_rank0():
             callbacks.on_epoch_end(
@@ -465,9 +596,9 @@ def linear_probe_eval(
                 state=state,
                 metrics={
                     "probe/train_epoch_loss": float(loss_meter.avg),
-                    f"probe/train_{metric_name}": float(train_acc1),
+                    f"probe/train_{metric_name}": float(train_metric),
                     "probe/val_loss": float(val_loss),
-                    f"probe/val_{metric_name}": float(val_acc1),
+                    f"probe/val_{metric_name}": float(val_metric),
                     "probe/lr": float(opt.param_groups[0]["lr"]),
                     "probe/epoch": float(epoch),
                 },
@@ -479,15 +610,17 @@ def linear_probe_eval(
             payload = {
                 "head": unwrap_model(model).head.state_dict(),
                 "metric_name": metric_name,
-                "val_metric": val_acc1,
+                "val_metric": val_metric,
                 "epoch": epoch,
             }
-            if not multilabel:
-                payload["val_acc1"] = val_acc1
+            if metric_name == "acc1":
+                payload["val_acc1"] = val_metric
+            elif metric_name == "auroc":
+                payload["val_auroc"] = val_metric
 
             if improved:
-                state["best_acc1"] = float(val_acc1)
-                best_val_acc1 = float(val_acc1)
+                state["best_metric"] = float(val_metric)
+                best_val_metric = float(val_metric)
                 best_epoch = int(epoch)
                 no_improve_epochs = 0
                 torch.save(payload, os.path.join(ckpt_dir, "linear_probe_best.pt"))
@@ -519,12 +652,16 @@ def linear_probe_eval(
         callbacks.on_run_end(cfg=cfg, state=state)
     if best_epoch < 0:
         best_epoch = int(state["epoch"])
-        best_val_acc1 = float(last_val_acc1)
+        best_val_metric = float(last_val_metric)
     return {
         "task_kind": "multilabel" if multilabel else "classification",
-        "train_acc": float(last_train_acc1),
-        "val_acc": float(last_val_acc1),
-        "best_val_acc": float(best_val_acc1),
+        "metric_name": metric_name,
+        "train_metric": float(last_train_metric),
+        "val_metric": float(last_val_metric),
+        "best_val_metric": float(best_val_metric),
+        "train_acc": float(last_train_metric),
+        "val_acc": float(last_val_metric),
+        "best_val_acc": float(best_val_metric),
         "best_epoch": int(best_epoch),
         "last_epoch": int(state["epoch"]),
         "val_loss": float(last_val_loss),

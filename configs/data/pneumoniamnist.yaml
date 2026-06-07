@@ -8,6 +8,7 @@ size: 224
 as_rgb: true
 download: false
 mmap_mode: null
+task_type: binary
 
 class_names:
   - normal

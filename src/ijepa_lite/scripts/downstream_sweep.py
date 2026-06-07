@@ -299,7 +299,7 @@ def _build_run_overrides(
         f"exp_name={exp_name}",
         f"logger.mode={logger_mode}",
     ]
-    if args.task_pool is not None and _dataset_task(dataset) == "linear_probe":
+    if args.task_pool is not None:
         overrides.append(f"task.pool={args.task_pool}")
     overrides.extend(model_overrides)
     overrides.extend(
@@ -406,26 +406,30 @@ def _format_checkpoint_table(
     ckpt_label: str,
     rows: list[dict[str, Any]],
 ) -> list[str]:
-    headers = ["dataset", "status", "train_acc", "val_acc", "best_val", "best_ep", "notes"]
+    headers = ["dataset", "status", "metric", "train", "val", "best_val", "best_ep", "notes"]
     body: list[list[str]] = []
     for row in rows:
         dataset = str(row["dataset"])
         status = str(row["status"])
         if status == "ok":
             metrics = row["metrics"]
-            notes = ""
             if metrics["task_kind"] == "segmentation":
+                metric_name = "pixel_acc"
                 notes = (
                     f"pixel_acc; val_miou={100.0 * float(metrics['val_miou']):.2f}; "
                     f"best_val_miou={100.0 * float(metrics['best_val_miou']):.2f}"
                 )
+            else:
+                metric_name = str(metrics.get("metric_name", "acc1"))
+                notes = ""
             body.append(
                 [
                     dataset,
                     status,
-                    _fmt_pct(metrics.get("train_acc")),
-                    _fmt_pct(metrics.get("val_acc")),
-                    _fmt_pct(metrics.get("best_val_acc")),
+                    metric_name,
+                    _fmt_pct(metrics.get("train_metric", metrics.get("train_acc"))),
+                    _fmt_pct(metrics.get("val_metric", metrics.get("val_acc"))),
+                    _fmt_pct(metrics.get("best_val_metric", metrics.get("best_val_acc"))),
                     str(metrics.get("best_epoch", "-")),
                     notes,
                 ]
@@ -435,6 +439,7 @@ def _format_checkpoint_table(
                 [
                     dataset,
                     status,
+                    "-",
                     "-",
                     "-",
                     "-",
