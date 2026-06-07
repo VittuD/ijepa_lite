@@ -239,6 +239,8 @@ def build_torchvision_vit_tokens(cfg) -> ViTTokens:
         vit.encoder.pos_embedding = nn.Parameter(
             torch.zeros(1, grid_size * grid_size, embed_dim)
         )
+        if hasattr(vit, "class_token"):
+            vit.class_token.requires_grad_(False)
 
     # Replace torchvision's learned pos_embedding if sincos is requested
     pos_kind = str(getattr(cfg, "pos_embed_kind", "learned"))
