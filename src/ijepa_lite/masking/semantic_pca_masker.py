@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import torch
@@ -27,7 +26,8 @@ class SemanticPCAMasker(LatentMasker):
         num_patches: int,
         target_ratio: float,
         context_ratio: float,
-        pca_dim: int = 3,
+        pca_dim: int = 1,
+        power_iterations: int = 4,
         split_mode: str = "band",
         context_mode: str = "complement",
         normalize_tokens: bool = True,
@@ -38,7 +38,9 @@ class SemanticPCAMasker(LatentMasker):
         self.num_patches = int(num_patches)
         self.ntgt = max(1, int(round(self.num_patches * float(target_ratio))))
         self.nctx = max(1, int(round(self.num_patches * float(context_ratio))))
-        self.pca_dim = max(1, int(pca_dim))
+        self.requested_pca_dim = max(1, int(pca_dim))
+        self.pca_dim = 1
+        self.power_iterations = max(1, int(power_iterations))
         self.normalize_tokens = bool(normalize_tokens)
         self.eps = float(eps)
 
@@ -77,113 +79,89 @@ class SemanticPCAMasker(LatentMasker):
                 "Check model.image_size and model.patch_size."
             )
 
-        ctx_rows: list[torch.Tensor] = []
-        tgt_rows: list[torch.Tensor] = []
-        explained_rows: list[torch.Tensor] = []
-
-        for b in range(B):
-            scores, explained = self._pca_scores(ema_full[b])
-            semantic_score = self._project_scores(scores)
-            order = semantic_score.argsort()
-
-            tgt_idx = self._select_target(order)
-            ctx_idx = self._select_context(order, tgt_idx)
-
-            tgt_rows.append(tgt_idx)
-            ctx_rows.append(ctx_idx)
-            explained_rows.append(explained)
-
-        target_idx = torch.stack(tgt_rows, dim=0)
-        context_idx = torch.stack(ctx_rows, dim=0)
-        explained_var = torch.stack(explained_rows, dim=0)
+        semantic_score, explained_var = self._batched_pc1_scores(ema_full)
+        order = semantic_score.argsort(dim=1)
+        target_idx = self._select_target_batched(order)
+        context_idx = self._select_context_batched(order, target_idx)
 
         return MaskOutput(
             context_idx=context_idx,
             target_idx=target_idx,
             aux={
                 "pca_dim": float(self.pca_dim),
+                "pca_requested_dim": float(self.requested_pca_dim),
+                "pca_power_iterations": float(self.power_iterations),
                 "pca_explained_var_mean": explained_var.mean().detach(),
-                "pca_explained_var_top1": explained_var[:, 0].mean().detach(),
+                "pca_explained_var_top1": explained_var.mean().detach(),
                 "target_ratio_actual": float(target_idx.shape[1] / N),
                 "context_ratio_actual": float(context_idx.shape[1] / N),
             },
         )
 
-    def _pca_scores(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # CUDA eigensolvers do not support bf16. AMP can autocast the Gram/cov
-        # matmul back to bf16, so keep the whole PCA block explicitly in fp32.
-        with torch.amp.autocast(device_type=x.device.type, enabled=False):
-            x = x.detach().to(dtype=torch.float32)
-            x = x - x.mean(dim=0, keepdim=True)
-            if self.normalize_tokens:
-                x = x / x.norm(dim=-1, keepdim=True).clamp_min(self.eps)
+    def _batched_pc1_scores(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Approximate PC1 with batched power iteration using only matrix-vector
+        # products. No eigensolver is used, so AMP/bf16 is allowed here.
+        x = x.detach()
+        x = x - x.mean(dim=1, keepdim=True)
+        if self.normalize_tokens:
+            x = x / x.norm(dim=-1, keepdim=True).clamp_min(self.eps)
 
-            N, D = x.shape
-            k = min(self.pca_dim, N - 1, D)
-            if k <= 0:
-                zeros = x.new_zeros(N, 1)
-                explained = x.new_zeros(1)
-                return zeros, explained
+        B, _N, D = x.shape
+        direction = torch.randn(B, D, 1, device=x.device, dtype=x.dtype)
+        direction = direction / direction.norm(dim=1, keepdim=True).clamp_min(self.eps)
 
-            if N <= D:
-                gram = x @ x.T
-                evals, evecs = torch.linalg.eigh(gram)
-                top_vals = evals[-k:].flip(0).clamp_min(0.0)
-                top_vecs = evecs[:, -k:].flip(1)
-                scores = top_vecs * top_vals.sqrt().unsqueeze(0)
-            else:
-                cov = x.T @ x
-                evals, evecs = torch.linalg.eigh(cov)
-                top_vals = evals[-k:].flip(0).clamp_min(0.0)
-                top_vecs = evecs[:, -k:].flip(1)
-                scores = x @ top_vecs
+        for _ in range(self.power_iterations):
+            scores = torch.bmm(x, direction)
+            direction = torch.bmm(x.transpose(1, 2), scores)
+            direction = direction / direction.norm(dim=1, keepdim=True).clamp_min(self.eps)
 
-            total_var = evals.clamp_min(0.0).sum().clamp_min(self.eps)
-            explained = top_vals / total_var
-            return scores, explained
+        scores = torch.bmm(x, direction).squeeze(-1)
+        sign = torch.empty(B, 1, device=x.device, dtype=x.dtype).bernoulli_()
+        scores = scores * sign.mul(2.0).sub(1.0)
 
-    def _project_scores(self, scores: torch.Tensor) -> torch.Tensor:
-        dim = scores.shape[1]
-        if dim == 1:
-            direction = torch.empty((), device=scores.device).bernoulli_()
-            sign = direction.mul(2.0).sub(1.0)
-            return scores[:, 0] * sign
+        pc1_var = scores.float().square().sum(dim=1)
+        total_var = x.float().square().sum(dim=(1, 2)).clamp_min(self.eps)
+        explained = pc1_var / total_var
+        return scores, explained
 
-        direction = torch.randn(dim, device=scores.device, dtype=scores.dtype)
-        direction = direction / direction.norm().clamp_min(self.eps)
-        return scores @ direction
-
-    def _select_target(self, order: torch.Tensor) -> torch.Tensor:
-        N = order.numel()
+    def _select_target_batched(self, order: torch.Tensor) -> torch.Tensor:
+        B, N = order.shape
         ntgt = min(self.ntgt, N - 1)
 
         if self.split_mode == "side":
-            use_high_side = bool(torch.empty((), device=order.device).bernoulli_().item())
-            if use_high_side:
-                return order[-ntgt:]
-            return order[:ntgt]
+            low = order[:, :ntgt]
+            high = order[:, -ntgt:]
+            use_high = torch.empty(B, 1, device=order.device).bernoulli_().bool()
+            return torch.where(use_high, high, low)
 
         max_start = N - ntgt
-        start = int(torch.randint(max_start + 1, (), device=order.device).item())
-        return order[start : start + ntgt]
+        starts = torch.randint(max_start + 1, (B, 1), device=order.device)
+        offsets = torch.arange(ntgt, device=order.device).unsqueeze(0)
+        positions = starts + offsets
+        return order.gather(1, positions)
 
-    def _select_context(self, order: torch.Tensor, tgt_idx: torch.Tensor) -> torch.Tensor:
-        N = order.numel()
-        is_tgt = torch.zeros(N, dtype=torch.bool, device=order.device)
-        is_tgt[tgt_idx] = True
+    def _select_context_batched(
+        self,
+        order: torch.Tensor,
+        tgt_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        B, N = order.shape
+        is_tgt = torch.zeros(B, N, dtype=torch.bool, device=order.device)
+        is_tgt.scatter_(1, tgt_idx, True)
 
-        available = order[~is_tgt[order]]
-        nctx = min(self.nctx, available.numel())
-        if self.context_mode == "complement" or nctx == available.numel():
-            return available[:nctx]
+        available_mask = ~is_tgt.gather(1, order)
+        available = order[available_mask].view(B, N - tgt_idx.shape[1])
+        nctx = min(self.nctx, available.shape[1])
+        if self.context_mode == "complement" or nctx == available.shape[1]:
+            return available[:, :nctx]
 
         # Balanced keeps context semantically broad by taking evenly spaced
         # points along the same PCA ordering, without introducing per-token
         # salt-and-pepper target sampling.
         positions = torch.linspace(
             0,
-            available.numel() - 1,
+            available.shape[1] - 1,
             steps=nctx,
             device=available.device,
         ).round().long()
-        return available[positions]
+        return available.gather(1, positions.unsqueeze(0).expand(B, -1))

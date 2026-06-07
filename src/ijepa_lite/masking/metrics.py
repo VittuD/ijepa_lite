@@ -293,6 +293,8 @@ def mask_diagnostics(
     # Semantic PCA masker — algorithmic, no soft scores.
     for key in (
         "pca_dim",
+        "pca_requested_dim",
+        "pca_power_iterations",
         "pca_explained_var_mean",
         "pca_explained_var_top1",
         "target_ratio_actual",

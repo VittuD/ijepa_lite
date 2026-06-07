@@ -156,7 +156,8 @@ case "${SLURM_ARRAY_TASK_ID}" in
     RUN_ARGS=(
       "+masking/compressor=full"
       "+masking/latent=semantic_pca"
-      "masking.latent.pca_dim=3"
+      "masking.latent.pca_dim=1"
+      "masking.latent.power_iterations=4"
       "masking.latent.split_mode=band"
       "masking.latent.context_mode=complement"
       "masking.latent.normalize_tokens=true"
