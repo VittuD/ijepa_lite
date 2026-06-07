@@ -58,7 +58,20 @@ def parse_args() -> argparse.Namespace:
         )
     )
     p.add_argument("--repo-root", default=".", help="Repository root containing configs/.")
-    p.add_argument("--data-root", required=True, help="Dataset root passed to Hydra data.root.")
+    p.add_argument(
+        "--data-root",
+        required=True,
+        help="Default dataset root passed to Hydra data.root.",
+    )
+    p.add_argument(
+        "--dataset-root",
+        action="append",
+        default=(),
+        help=(
+            "Optional per-dataset root override in the form name=/path. "
+            "Repeat when datasets live under different roots."
+        ),
+    )
     p.add_argument(
         "--checkpoint",
         required=True,
@@ -170,6 +183,18 @@ def _parse_dataset_spec(spec: str) -> DatasetSpec:
     return DatasetSpec(name=spec, split=None)
 
 
+def _parse_dataset_roots(specs: Iterable[str]) -> dict[str, str]:
+    roots: dict[str, str] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise ValueError(
+                f"Invalid --dataset-root {spec!r}. Expected name=/path/to/root."
+            )
+        name, root = spec.split("=", 1)
+        roots[name] = root
+    return roots
+
+
 def _compose_cfg(config_dir: Path, overrides: list[str]):
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(config_dir), version_base="1.3"):
@@ -203,13 +228,14 @@ def _dataset_cfg(
     args: argparse.Namespace,
     checkpoint_path: Path,
     dataset_name: str,
+    data_root: str,
 ) -> Any:
     return _compose_cfg(
         config_dir,
         [
             f"experiment={args.experiment}",
             f"data={dataset_name}",
-            f"data.root={args.data_root}",
+            f"data.root={data_root}",
             f"data.batch_size={args.batch_size}",
             f"data.num_workers={args.num_workers}",
             "data.download=false",
@@ -675,12 +701,14 @@ def main() -> None:
     dataset_specs = [_parse_dataset_spec(spec) for spec in args.dataset]
     if not dataset_specs:
         raise ValueError("At least one --dataset is required.")
+    dataset_roots = _parse_dataset_roots(args.dataset_root)
 
     base_cfg = _dataset_cfg(
         config_dir=config_dir,
         args=args,
         checkpoint_path=ckpt_path,
         dataset_name=dataset_specs[0].name,
+        data_root=dataset_roots.get(dataset_specs[0].name, args.data_root),
     )
     encoder = build_linear_probe_model(base_cfg).to(device)
     encoder.eval()
@@ -706,6 +734,7 @@ def main() -> None:
             args=args,
             checkpoint_path=ckpt_path,
             dataset_name=spec.name,
+            data_root=dataset_roots.get(spec.name, args.data_root),
         )
         split = spec.split or _default_split(cfg)
         _, val_tfm = build_linear_probe_transforms(cfg)
