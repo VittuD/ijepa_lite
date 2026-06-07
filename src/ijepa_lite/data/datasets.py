@@ -495,6 +495,132 @@ class PneumoniaMNISTDataset(Dataset):
         return img, int(target.reshape(-1)[0])
 
 
+class SIIMACRPneumothoraxSegmentation(Dataset):
+    """
+    SIIM-ACR pneumothorax segmentation using the Kaggle PNG image/mask layout.
+
+    Expected default layout under ``root``:
+      siim-acr-pneumothorax/
+        png_images/*.png
+        png_masks/*.png
+
+    When present, ``stage_1_train_images.csv`` and ``stage_1_test_images.csv``
+    define the split via their ``new_filename`` column. If CSVs are absent, we
+    fall back to filename markers and then to a deterministic train/val split.
+    """
+
+    _EXTS = {".png", ".jpg", ".jpeg"}
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transforms=None,
+        data_dir: str = "siim-acr-pneumothorax",
+        image_dir: str = "png_images",
+        mask_dir: str = "png_masks",
+        val_ratio: float = 0.2,
+        split_seed: int = 0,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for siimacr_pneumothorax. "
+                "Expected: train|val|test."
+            )
+        self.transforms = transforms
+
+        base = Path(root) / data_dir
+        if not base.exists():
+            base = Path(root)
+        self.image_dir = base / image_dir
+        self.mask_dir = base / mask_dir
+        if not self.image_dir.is_dir():
+            raise FileNotFoundError(f"SIIM image_dir not found: {self.image_dir}")
+        if not self.mask_dir.is_dir():
+            raise FileNotFoundError(f"SIIM mask_dir not found: {self.mask_dir}")
+
+        mask_by_name = {
+            path.name: path
+            for path in self.mask_dir.rglob("*")
+            if path.suffix.lower() in self._EXTS
+        }
+        pairs = []
+        for image_path in sorted(self.image_dir.rglob("*")):
+            if image_path.suffix.lower() not in self._EXTS:
+                continue
+            mask_path = mask_by_name.get(image_path.name)
+            if mask_path is not None:
+                pairs.append((image_path, mask_path))
+
+        if not pairs:
+            raise RuntimeError(
+                f"No SIIM image/mask pairs found in {self.image_dir} and {self.mask_dir}."
+            )
+
+        pair_by_name = {image_path.name: (image_path, mask_path) for image_path, mask_path in pairs}
+        train_pairs = self._pairs_from_csv(base, "stage_1_train_images.csv", pair_by_name)
+        test_pairs = self._pairs_from_csv(base, "stage_1_test_images.csv", pair_by_name)
+
+        if train_pairs and test_pairs:
+            self.pairs = train_pairs if split == "train" else test_pairs
+        else:
+            train_pairs = [
+                pair for pair in pairs if "_train_" in pair[0].name.lower()
+            ]
+            test_pairs = [
+                pair for pair in pairs if "_test_" in pair[0].name.lower()
+            ]
+            if train_pairs and test_pairs:
+                self.pairs = train_pairs if split == "train" else test_pairs
+            else:
+                rng = random.Random(int(split_seed))
+                shuffled = list(pairs)
+                rng.shuffle(shuffled)
+                n_val = max(1, int(round(len(shuffled) * float(val_ratio))))
+                val_pairs = sorted(shuffled[:n_val])
+                train_pairs = sorted(shuffled[n_val:])
+                self.pairs = train_pairs if split == "train" else val_pairs
+
+        if not self.pairs:
+            raise RuntimeError(f"No SIIM pairs available for split='{split}'.")
+
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    @staticmethod
+    def _pairs_from_csv(
+        base: Path,
+        filename: str,
+        pair_by_name: dict[str, tuple[Path, Path]],
+    ) -> list[tuple[Path, Path]]:
+        csv_path = base / filename
+        if not csv_path.is_file():
+            matches = sorted(base.rglob(filename))
+            if not matches:
+                return []
+            csv_path = matches[0]
+        out = []
+        with csv_path.open(newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = row.get("new_filename")
+                if name is None:
+                    continue
+                pair = pair_by_name.get(name)
+                if pair is not None:
+                    out.append(pair)
+        return out
+
+    def __getitem__(self, idx):
+        image_path, mask_path = self.pairs[idx]
+        image = Image.open(image_path).convert("RGB")
+        mask = Image.open(mask_path).convert("L")
+        mask = mask.point(lambda px: 1 if px > 0 else 0, mode="L")
+        if self.transforms is not None:
+            return self.transforms(image, mask)
+        return image, mask
+
+
 class CLEVRCountDataset(Dataset):
     """
     Downstream classification wrapper for torchvision CLEVRClassification.
@@ -916,6 +1042,24 @@ def build_segmentation_dataset(cfg, split: str, transforms):
     name = str(cfg.name).lower()
     root = str(cfg.root)
     download = bool(getattr(cfg, "download", True))
+
+    if name == "siimacr_pneumothorax":
+        if download:
+            raise ValueError(
+                "siimacr_pneumothorax cannot be downloaded automatically. "
+                "Download/extract the Kaggle PNG dataset under data.root first."
+            )
+        barrier()
+        return SIIMACRPneumothoraxSegmentation(
+            root=root,
+            split=split,
+            transforms=transforms,
+            data_dir=str(getattr(cfg, "data_dir", "siim-acr-pneumothorax")),
+            image_dir=str(getattr(cfg, "image_dir", "png_images")),
+            mask_dir=str(getattr(cfg, "mask_dir", "png_masks")),
+            val_ratio=float(getattr(cfg, "val_ratio", 0.2)),
+            split_seed=int(getattr(cfg, "split_seed", 0)),
+        )
 
     if name != "vocseg":
         raise ValueError(

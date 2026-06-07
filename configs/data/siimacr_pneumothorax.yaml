@@ -1,0 +1,19 @@
+name: siimacr_pneumothorax
+root: data
+
+train_split: train
+val_split: val
+
+data_dir: siim-acr-pneumothorax
+image_dir: png_images
+mask_dir: png_masks
+val_ratio: 0.2
+split_seed: 0
+
+download: false
+
+batch_size: 128
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+persistent_workers: true

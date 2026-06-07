@@ -224,7 +224,7 @@ def _pushd(path: Path):
 
 
 def _dataset_experiment(dataset: str, args: argparse.Namespace) -> str:
-    if dataset == "vocseg":
+    if dataset in {"vocseg", "siimacr_pneumothorax"}:
         return str(args.segmentation_experiment)
     return str(args.classification_experiment)
 
@@ -249,7 +249,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> list[str]:
 
 
 def _dataset_task(dataset: str) -> str:
-    if dataset == "vocseg":
+    if dataset in {"vocseg", "siimacr_pneumothorax"}:
         return "segmentation_probe"
     return "linear_probe"
 
@@ -313,6 +313,9 @@ def _build_run_overrides(
     )
     if dataset == "fairface":
         overrides.append(f"data.target_attr={fairface_target_attr}")
+    if dataset == "siimacr_pneumothorax":
+        overrides.append("task.metric=fg_dice")
+        overrides.append("task.foreground_class=1")
     return overrides
 
 
@@ -414,10 +417,13 @@ def _format_checkpoint_table(
         if status == "ok":
             metrics = row["metrics"]
             if metrics["task_kind"] == "segmentation":
-                metric_name = "pixel_acc"
+                metric_name = str(metrics.get("metric_name", "miou"))
                 notes = (
-                    f"pixel_acc; val_miou={100.0 * float(metrics['val_miou']):.2f}; "
-                    f"best_val_miou={100.0 * float(metrics['best_val_miou']):.2f}"
+                    f"pixel_acc={100.0 * float(metrics['val_acc']):.2f}; "
+                    f"val_miou={100.0 * float(metrics['val_miou']):.2f}; "
+                    f"best_val_miou={100.0 * float(metrics['best_val_miou']):.2f}; "
+                    f"val_fg_dice={100.0 * float(metrics.get('val_fg_dice', 0.0)):.2f}; "
+                    f"best_val_fg_dice={100.0 * float(metrics.get('best_val_fg_dice', 0.0)):.2f}"
                 )
             else:
                 metric_name = str(metrics.get("metric_name", "acc1"))

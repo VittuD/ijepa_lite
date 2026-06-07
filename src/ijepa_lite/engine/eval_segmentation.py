@@ -61,15 +61,44 @@ def _miou_and_pixel_acc(confusion: torch.Tensor) -> tuple[float, float]:
     return miou, pixel_acc
 
 
+def _foreground_iou_and_dice(
+    confusion: torch.Tensor,
+    foreground_class: int = 1,
+) -> tuple[float, float]:
+    confusion = confusion.float()
+    cls = int(foreground_class)
+    if cls < 0 or cls >= confusion.shape[0]:
+        return 0.0, 0.0
+    tp = confusion[cls, cls]
+    fp = confusion[:, cls].sum() - tp
+    fn = confusion[cls, :].sum() - tp
+    iou = (tp / (tp + fp + fn).clamp(min=1.0)).item()
+    dice = ((2.0 * tp) / (2.0 * tp + fp + fn).clamp(min=1.0)).item()
+    return iou, dice
+
+
 class SegmentationProbeModel(nn.Module):
-    def __init__(self, encoder: nn.Module, head: nn.Module) -> None:
+    def __init__(self, encoder: nn.Module, head: nn.Module, pool: str = "mean") -> None:
         super().__init__()
         self.encoder = encoder
         self.head = head
+        self.pool = str(pool)
+
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
+        if self.pool == "mean":
+            return self.encoder(x)
+        if self.pool == "last4_mean":
+            if not hasattr(self.encoder, "forward_last_n"):
+                raise ValueError(
+                    "pool=last4_mean requires an encoder with forward_last_n support."
+                )
+            layer_tokens = self.encoder.forward_last_n(x, last_n=4)
+            return torch.cat(layer_tokens, dim=-1)
+        raise ValueError(f"Unsupported segmentation pool={self.pool}")
 
     def forward(self, x: torch.Tensor | None, mask_hw: tuple[int, int], feat: torch.Tensor | None = None):
         if feat is None:
-            feat = self.encoder(x)
+            feat = self._features(x)
 
         bsz, n_patches, dim = feat.shape
         grid = int(math.isqrt(n_patches))
@@ -102,15 +131,20 @@ def segmentation_probe_eval(
     amp = bool(getattr(cfg.task, "amp", True)) and (device.type == "cuda")
     epochs = int(cfg.train.epochs)
     ignore_index = int(getattr(cfg.task, "ignore_index", 255))
+    primary_metric = str(getattr(cfg.task, "metric", "miou")).lower()
+    foreground_class = int(getattr(cfg.task, "foreground_class", 1))
+    pool = str(getattr(cfg.task, "pool", "mean"))
+    head_in_dim = int(cfg.model.embed_dim) * (4 if pool == "last4_mean" else 1)
 
     head = _build_head(
-        int(cfg.model.embed_dim),
+        head_in_dim,
         int(num_classes),
         getattr(cfg.task, "head", None),
     ).to(device)
     model = SegmentationProbeModel(
         encoder=encoder,
         head=head,
+        pool=pool,
     ).to(device)
 
     if bool(getattr(cfg, "compile", False)) and hasattr(torch, "compile"):
@@ -142,7 +176,7 @@ def segmentation_probe_eval(
     scaler = GradScaler("cuda", enabled=amp)
 
     def encode_fn(x):
-        t = unwrap_model(model).encoder(x)
+        t = unwrap_model(model)._features(x)
         return F.layer_norm(t, (t.shape[-1],))
 
     feats_tr, masks_tr = _extract_dense_features(encode_fn, train_loader, device, amp)
@@ -161,10 +195,16 @@ def segmentation_probe_eval(
     best_epoch = -1
     best_val_miou = 0.0
     best_val_pixel_acc = 0.0
+    best_val_fg_iou = 0.0
+    best_val_fg_dice = 0.0
     last_train_miou = 0.0
     last_train_pixel_acc = 0.0
+    last_train_fg_iou = 0.0
+    last_train_fg_dice = 0.0
     last_val_miou = 0.0
     last_val_pixel_acc = 0.0
+    last_val_fg_iou = 0.0
+    last_val_fg_dice = 0.0
     last_val_loss = 0.0
 
     callbacks.on_run_start(cfg=cfg, state=state, model=unwrap_model(model))
@@ -212,6 +252,10 @@ def segmentation_probe_eval(
 
         train_conf = all_reduce_sum(train_conf)
         train_miou, train_pixel_acc = _miou_and_pixel_acc(train_conf)
+        train_fg_iou, train_fg_dice = _foreground_iou_and_dice(
+            train_conf,
+            foreground_class=foreground_class,
+        )
 
         unwrap_model(model).eval()
         val_loss_sum = torch.zeros((), device=device)
@@ -237,12 +281,27 @@ def segmentation_probe_eval(
 
         val_loss = (val_loss_sum / val_items.clamp(min=1)).item()
         val_miou, val_pixel_acc = _miou_and_pixel_acc(val_conf)
+        val_fg_iou, val_fg_dice = _foreground_iou_and_dice(
+            val_conf,
+            foreground_class=foreground_class,
+        )
+        metric_values = {
+            "miou": val_miou,
+            "pixel_acc": val_pixel_acc,
+            "fg_iou": val_fg_iou,
+            "fg_dice": val_fg_dice,
+        }
+        val_primary = float(metric_values.get(primary_metric, val_miou))
         last_train_miou = float(train_miou)
         last_train_pixel_acc = float(train_pixel_acc)
+        last_train_fg_iou = float(train_fg_iou)
+        last_train_fg_dice = float(train_fg_dice)
         last_val_miou = float(val_miou)
         last_val_pixel_acc = float(val_pixel_acc)
+        last_val_fg_iou = float(val_fg_iou)
+        last_val_fg_dice = float(val_fg_dice)
         last_val_loss = float(val_loss)
-        improved = val_miou > float(state["best_miou"]) + early_stop_min_delta
+        improved = val_primary > float(state["best_miou"]) + early_stop_min_delta
 
         if is_rank0():
             callbacks.on_epoch_end(
@@ -252,9 +311,13 @@ def segmentation_probe_eval(
                     "probe/train_epoch_loss": float(loss_meter.avg),
                     "probe/train_miou": float(train_miou),
                     "probe/train_pixel_acc": float(train_pixel_acc),
+                    "probe/train_fg_iou": float(train_fg_iou),
+                    "probe/train_fg_dice": float(train_fg_dice),
                     "probe/val_loss": float(val_loss),
                     "probe/val_miou": float(val_miou),
                     "probe/val_pixel_acc": float(val_pixel_acc),
+                    "probe/val_fg_iou": float(val_fg_iou),
+                    "probe/val_fg_dice": float(val_fg_dice),
                     "probe/lr": float(opt.param_groups[0]["lr"]),
                     "probe/epoch": float(epoch),
                 },
@@ -266,13 +329,19 @@ def segmentation_probe_eval(
             payload = {
                 "head": unwrap_model(model).head.state_dict(),
                 "val_miou": val_miou,
+                "val_fg_iou": val_fg_iou,
+                "val_fg_dice": val_fg_dice,
+                "metric_name": primary_metric,
+                "val_metric": val_primary,
                 "epoch": epoch,
             }
 
             if improved:
-                state["best_miou"] = float(val_miou)
+                state["best_miou"] = float(val_primary)
                 best_val_miou = float(val_miou)
                 best_val_pixel_acc = float(val_pixel_acc)
+                best_val_fg_iou = float(val_fg_iou)
+                best_val_fg_dice = float(val_fg_dice)
                 best_epoch = int(epoch)
                 no_improve_epochs = 0
                 torch.save(payload, os.path.join(ckpt_dir, "segmentation_probe_best.pt"))
@@ -306,8 +375,25 @@ def segmentation_probe_eval(
         best_epoch = int(state["epoch"])
         best_val_miou = float(last_val_miou)
         best_val_pixel_acc = float(last_val_pixel_acc)
+        best_val_fg_iou = float(last_val_fg_iou)
+        best_val_fg_dice = float(last_val_fg_dice)
+    primary_last = {
+        "miou": last_val_miou,
+        "pixel_acc": last_val_pixel_acc,
+        "fg_iou": last_val_fg_iou,
+        "fg_dice": last_val_fg_dice,
+    }.get(primary_metric, last_val_miou)
+    primary_best = {
+        "miou": best_val_miou,
+        "pixel_acc": best_val_pixel_acc,
+        "fg_iou": best_val_fg_iou,
+        "fg_dice": best_val_fg_dice,
+    }.get(primary_metric, best_val_miou)
     return {
         "task_kind": "segmentation",
+        "metric_name": primary_metric,
+        "val_metric": float(primary_last),
+        "best_val_metric": float(primary_best),
         "train_acc": float(last_train_pixel_acc),
         "val_acc": float(last_val_pixel_acc),
         "best_val_acc": float(best_val_pixel_acc),
@@ -317,4 +403,10 @@ def segmentation_probe_eval(
         "train_miou": float(last_train_miou),
         "val_miou": float(last_val_miou),
         "best_val_miou": float(best_val_miou),
+        "train_fg_iou": float(last_train_fg_iou),
+        "val_fg_iou": float(last_val_fg_iou),
+        "best_val_fg_iou": float(best_val_fg_iou),
+        "train_fg_dice": float(last_train_fg_dice),
+        "val_fg_dice": float(last_val_fg_dice),
+        "best_val_fg_dice": float(best_val_fg_dice),
     }

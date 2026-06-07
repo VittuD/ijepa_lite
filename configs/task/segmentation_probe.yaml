@@ -11,5 +11,12 @@ pretrained_ckpt: null
 # - shared: alias for the shared/context encoder path
 encoder: auto
 
+# Dense token feature mode
+# - mean: final-layer patch tokens, shape [B, N, D]
+# - last4_mean: concatenate last-4 layer patch tokens, shape [B, N, 4D]
+pool: mean
+
 amp: true
 ignore_index: 255
+metric: miou
+foreground_class: 1

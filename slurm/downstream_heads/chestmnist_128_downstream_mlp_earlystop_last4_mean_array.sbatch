@@ -19,6 +19,7 @@
 # Each array item evaluates one checkpoint on:
 #   - chestmnist
 #   - pneumoniamnist
+#   - siimacr_pneumothorax
 #
 # Checkpoints:
 #   0  array_0_vanilla_multiblock            epoch_00169
@@ -62,10 +63,13 @@ LOG_ROOT="${WORK}/vitturini/sbatch_logs/downstream_heads/chestmnist_128"
 
 CLASSIFICATION_BATCH_SIZE=512
 CLASSIFICATION_NUM_WORKERS=1
+SEGMENTATION_BATCH_SIZE=128
+SEGMENTATION_NUM_WORKERS=1
 
 DATASETS=(
   chestmnist
   pneumoniamnist
+  siimacr_pneumothorax
 )
 
 METHODS=(
@@ -148,6 +152,7 @@ CMD=(
   --logger-mode offline
   --continue-on-error
   --classification-experiment in1k_96_vits_ps8_downstream_mlp_earlystop
+  --segmentation-experiment in1k_96_vits_ps8_vocseg_probe_earlystop
   --run-suffix chestmnist128_es_probe_last4_mean
   --task-pool last4_mean
   --model-arch vit_small_16
@@ -158,6 +163,8 @@ CMD=(
   --model-depth 12
   --classification-batch-size "${CLASSIFICATION_BATCH_SIZE}"
   --classification-num-workers "${CLASSIFICATION_NUM_WORKERS}"
+  --segmentation-batch-size "${SEGMENTATION_BATCH_SIZE}"
+  --segmentation-num-workers "${SEGMENTATION_NUM_WORKERS}"
   --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
 )
 
@@ -175,6 +182,8 @@ echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CKPT_PATH=${CKPT_PATH}"
 echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
 echo "CLASSIFICATION_NUM_WORKERS=${CLASSIFICATION_NUM_WORKERS}"
+echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
+echo "SEGMENTATION_NUM_WORKERS=${SEGMENTATION_NUM_WORKERS}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
 nvidia-smi -L
 
