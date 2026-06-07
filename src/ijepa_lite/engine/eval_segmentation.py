@@ -77,6 +77,100 @@ def _foreground_iou_and_dice(
     return iou, dice
 
 
+def _class_weights(
+    num_classes: int,
+    foreground_class: int,
+    foreground_weight: float,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if foreground_weight <= 1.0:
+        return None
+    if foreground_class < 0 or foreground_class >= num_classes:
+        return None
+    weights = torch.ones(num_classes, device=device)
+    weights[int(foreground_class)] = float(foreground_weight)
+    return weights
+
+
+def _foreground_dice_loss(
+    logits: torch.Tensor,
+    masks: torch.Tensor,
+    *,
+    foreground_class: int,
+    ignore_index: int,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    valid = masks != ignore_index
+    if not valid.any():
+        return logits.sum() * 0.0
+
+    probs = torch.softmax(logits.float(), dim=1)[:, int(foreground_class)]
+    target = (masks == int(foreground_class)).float()
+    probs = probs[valid]
+    target = target[valid]
+    intersection = (probs * target).sum()
+    denom = probs.sum() + target.sum()
+    dice = (2.0 * intersection + eps) / (denom + eps)
+    return 1.0 - dice
+
+
+def _segmentation_loss(
+    logits: torch.Tensor,
+    masks: torch.Tensor,
+    *,
+    num_classes: int,
+    ignore_index: int,
+    loss_kind: str,
+    foreground_class: int,
+    foreground_weight: float,
+    ce_weight: float,
+    dice_weight: float,
+) -> torch.Tensor:
+    loss_kind = str(loss_kind).lower()
+    supported = {"ce", "weighted_ce", "ce_dice", "weighted_ce_dice", "dice"}
+    if loss_kind not in supported:
+        raise ValueError(
+            f"Unsupported segmentation loss={loss_kind}. "
+            f"Expected one of {sorted(supported)}."
+        )
+
+    weights = None
+    if loss_kind.startswith("weighted") or foreground_weight > 1.0:
+        weights = _class_weights(
+            num_classes=num_classes,
+            foreground_class=foreground_class,
+            foreground_weight=foreground_weight,
+            device=logits.device,
+        )
+
+    if loss_kind == "dice":
+        effective_dice_weight = dice_weight if dice_weight > 0.0 else 1.0
+        return effective_dice_weight * _foreground_dice_loss(
+            logits,
+            masks,
+            foreground_class=foreground_class,
+            ignore_index=ignore_index,
+        )
+
+    ce = F.cross_entropy(
+        logits,
+        masks,
+        ignore_index=ignore_index,
+        weight=weights,
+    )
+    if "dice" not in loss_kind and dice_weight <= 0.0:
+        return ce_weight * ce
+
+    effective_dice_weight = dice_weight if dice_weight > 0.0 else 1.0
+    dice = _foreground_dice_loss(
+        logits,
+        masks,
+        foreground_class=foreground_class,
+        ignore_index=ignore_index,
+    )
+    return ce_weight * ce + effective_dice_weight * dice
+
+
 class SegmentationProbeModel(nn.Module):
     def __init__(self, encoder: nn.Module, head: nn.Module, pool: str = "mean") -> None:
         super().__init__()
@@ -133,6 +227,10 @@ def segmentation_probe_eval(
     ignore_index = int(getattr(cfg.task, "ignore_index", 255))
     primary_metric = str(getattr(cfg.task, "metric", "miou")).lower()
     foreground_class = int(getattr(cfg.task, "foreground_class", 1))
+    loss_kind = str(getattr(cfg.task, "loss", "ce")).lower()
+    foreground_weight = float(getattr(cfg.task, "foreground_weight", 1.0))
+    ce_weight = float(getattr(cfg.task, "ce_weight", 1.0))
+    dice_weight = float(getattr(cfg.task, "dice_weight", 0.0))
     pool = str(getattr(cfg.task, "pool", "mean"))
     head_in_dim = int(cfg.model.embed_dim) * (4 if pool == "last4_mean" else 1)
 
@@ -222,7 +320,17 @@ def segmentation_probe_eval(
             opt.zero_grad(set_to_none=True)
             with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 logits = model(None, mask_hw=tuple(masks.shape[-2:]), feat=feat)
-                loss = F.cross_entropy(logits, masks, ignore_index=ignore_index)
+                loss = _segmentation_loss(
+                    logits,
+                    masks,
+                    num_classes=num_classes,
+                    ignore_index=ignore_index,
+                    loss_kind=loss_kind,
+                    foreground_class=foreground_class,
+                    foreground_weight=foreground_weight,
+                    ce_weight=ce_weight,
+                    dice_weight=dice_weight,
+                )
 
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -256,6 +364,13 @@ def segmentation_probe_eval(
             train_conf,
             foreground_class=foreground_class,
         )
+        train_metric_values = {
+            "miou": train_miou,
+            "pixel_acc": train_pixel_acc,
+            "fg_iou": train_fg_iou,
+            "fg_dice": train_fg_dice,
+        }
+        train_primary = float(train_metric_values.get(primary_metric, train_miou))
 
         unwrap_model(model).eval()
         val_loss_sum = torch.zeros((), device=device)
@@ -266,7 +381,17 @@ def segmentation_probe_eval(
             for feat, masks in val_cache:
                 with autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                     logits = model(None, mask_hw=tuple(masks.shape[-2:]), feat=feat)
-                    loss = F.cross_entropy(logits, masks, ignore_index=ignore_index)
+                    loss = _segmentation_loss(
+                        logits,
+                        masks,
+                        num_classes=num_classes,
+                        ignore_index=ignore_index,
+                        loss_kind=loss_kind,
+                        foreground_class=foreground_class,
+                        foreground_weight=foreground_weight,
+                        ce_weight=ce_weight,
+                        dice_weight=dice_weight,
+                    )
 
                 valid = (masks != ignore_index).sum()
                 val_loss_sum += loss.detach() * valid
@@ -332,6 +457,7 @@ def segmentation_probe_eval(
                 "val_fg_iou": val_fg_iou,
                 "val_fg_dice": val_fg_dice,
                 "metric_name": primary_metric,
+                "train_metric": train_primary,
                 "val_metric": val_primary,
                 "epoch": epoch,
             }
@@ -383,6 +509,12 @@ def segmentation_probe_eval(
         "fg_iou": last_val_fg_iou,
         "fg_dice": last_val_fg_dice,
     }.get(primary_metric, last_val_miou)
+    primary_train_last = {
+        "miou": last_train_miou,
+        "pixel_acc": last_train_pixel_acc,
+        "fg_iou": last_train_fg_iou,
+        "fg_dice": last_train_fg_dice,
+    }.get(primary_metric, last_train_miou)
     primary_best = {
         "miou": best_val_miou,
         "pixel_acc": best_val_pixel_acc,
@@ -392,6 +524,7 @@ def segmentation_probe_eval(
     return {
         "task_kind": "segmentation",
         "metric_name": primary_metric,
+        "train_metric": float(primary_train_last),
         "val_metric": float(primary_last),
         "best_val_metric": float(primary_best),
         "train_acc": float(last_train_pixel_acc),

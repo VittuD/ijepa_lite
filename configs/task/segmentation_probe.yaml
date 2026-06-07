@@ -20,3 +20,13 @@ amp: true
 ignore_index: 255
 metric: miou
 foreground_class: 1
+
+# Loss options:
+# - ce: standard cross entropy
+# - weighted_ce: cross entropy with foreground_class upweighted
+# - ce_dice / weighted_ce_dice: cross entropy plus soft foreground Dice
+# - dice: soft foreground Dice only
+loss: ce
+foreground_weight: 1.0
+ce_weight: 1.0
+dice_weight: 0.0

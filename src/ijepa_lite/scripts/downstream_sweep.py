@@ -316,6 +316,10 @@ def _build_run_overrides(
     if dataset == "siimacr_pneumothorax":
         overrides.append("task.metric=fg_dice")
         overrides.append("task.foreground_class=1")
+        overrides.append("task.loss=ce_dice")
+        overrides.append("task.foreground_weight=20.0")
+        overrides.append("task.ce_weight=1.0")
+        overrides.append("task.dice_weight=1.0")
     return overrides
 
 
@@ -422,6 +426,8 @@ def _format_checkpoint_table(
                     f"pixel_acc={100.0 * float(metrics['val_acc']):.2f}; "
                     f"val_miou={100.0 * float(metrics['val_miou']):.2f}; "
                     f"best_val_miou={100.0 * float(metrics['best_val_miou']):.2f}; "
+                    f"val_fg_iou={100.0 * float(metrics.get('val_fg_iou', 0.0)):.2f}; "
+                    f"best_val_fg_iou={100.0 * float(metrics.get('best_val_fg_iou', 0.0)):.2f}; "
                     f"val_fg_dice={100.0 * float(metrics.get('val_fg_dice', 0.0)):.2f}; "
                     f"best_val_fg_dice={100.0 * float(metrics.get('best_val_fg_dice', 0.0)):.2f}"
                 )
