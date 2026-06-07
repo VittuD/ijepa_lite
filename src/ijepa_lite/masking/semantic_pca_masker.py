@@ -110,34 +110,37 @@ class SemanticPCAMasker(LatentMasker):
         )
 
     def _pca_scores(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        x = x.detach().float()
-        x = x - x.mean(dim=0, keepdim=True)
-        if self.normalize_tokens:
-            x = x / x.norm(dim=-1, keepdim=True).clamp_min(self.eps)
+        # CUDA eigensolvers do not support bf16. AMP can autocast the Gram/cov
+        # matmul back to bf16, so keep the whole PCA block explicitly in fp32.
+        with torch.amp.autocast(device_type=x.device.type, enabled=False):
+            x = x.detach().to(dtype=torch.float32)
+            x = x - x.mean(dim=0, keepdim=True)
+            if self.normalize_tokens:
+                x = x / x.norm(dim=-1, keepdim=True).clamp_min(self.eps)
 
-        N, D = x.shape
-        k = min(self.pca_dim, N - 1, D)
-        if k <= 0:
-            zeros = x.new_zeros(N, 1)
-            explained = x.new_zeros(1)
-            return zeros, explained
+            N, D = x.shape
+            k = min(self.pca_dim, N - 1, D)
+            if k <= 0:
+                zeros = x.new_zeros(N, 1)
+                explained = x.new_zeros(1)
+                return zeros, explained
 
-        if N <= D:
-            gram = x @ x.T
-            evals, evecs = torch.linalg.eigh(gram)
-            top_vals = evals[-k:].flip(0).clamp_min(0.0)
-            top_vecs = evecs[:, -k:].flip(1)
-            scores = top_vecs * top_vals.sqrt().unsqueeze(0)
-        else:
-            cov = x.T @ x
-            evals, evecs = torch.linalg.eigh(cov)
-            top_vals = evals[-k:].flip(0).clamp_min(0.0)
-            top_vecs = evecs[:, -k:].flip(1)
-            scores = x @ top_vecs
+            if N <= D:
+                gram = x @ x.T
+                evals, evecs = torch.linalg.eigh(gram)
+                top_vals = evals[-k:].flip(0).clamp_min(0.0)
+                top_vecs = evecs[:, -k:].flip(1)
+                scores = top_vecs * top_vals.sqrt().unsqueeze(0)
+            else:
+                cov = x.T @ x
+                evals, evecs = torch.linalg.eigh(cov)
+                top_vals = evals[-k:].flip(0).clamp_min(0.0)
+                top_vecs = evecs[:, -k:].flip(1)
+                scores = x @ top_vecs
 
-        total_var = evals.clamp_min(0.0).sum().clamp_min(self.eps)
-        explained = top_vals / total_var
-        return scores, explained
+            total_var = evals.clamp_min(0.0).sum().clamp_min(self.eps)
+            explained = top_vals / total_var
+            return scores, explained
 
     def _project_scores(self, scores: torch.Tensor) -> torch.Tensor:
         dim = scores.shape[1]
