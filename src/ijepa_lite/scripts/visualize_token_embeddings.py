@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dataset-root",
         action="append",
-        default=(),
+        default=None,
         help=(
             "Optional per-dataset root override in the form name=/path. "
             "Repeat when datasets live under different roots."
@@ -701,7 +701,7 @@ def main() -> None:
     dataset_specs = [_parse_dataset_spec(spec) for spec in args.dataset]
     if not dataset_specs:
         raise ValueError("At least one --dataset is required.")
-    dataset_roots = _parse_dataset_roots(args.dataset_root)
+    dataset_roots = _parse_dataset_roots(args.dataset_root or [])
 
     base_cfg = _dataset_cfg(
         config_dir=config_dir,
