@@ -8,12 +8,12 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=02:30:00
-#SBATCH --array=0-4
+#SBATCH --array=0-5
 #SBATCH --output=sbatch_logs/continued_pretrain/chestmnist224to128_train_from_in1k96_e247_origlr_ema99925_nowarmup/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/chestmnist224to128_train_from_in1k96_e247_origlr_ema99925_nowarmup/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
-# Submit all five 128x128 / ps8 continued-pretraining variants from one command,
+# Submit all six 128x128 / ps8 continued-pretraining variants from one command,
 # starting from the IN1K 96x96 / ps8 vanilla-multiblock checkpoint and switching
 # the pretraining data to ChestMNIST 224px source train images.
 #
@@ -28,6 +28,7 @@
 #   2  mi_hmargbs_floor
 #   3  mi_hmargcosbs_floor
 #   4  mi_hmarg_sketchorthcosbs_floor
+#   5  semantic_pca
 #
 # Submit:
 #   sbatch slurm/continued_pretrain/continued_pretrain_chestmnist128_all_array.sbatch
@@ -145,6 +146,20 @@ case "${SLURM_ARRAY_TASK_ID}" in
       "masking.latent.warmup_epochs=0"
       "masking.latent.nctx_min=1"
       "masking.latent.ntgt_min=4"
+    )
+    ;;
+  5)
+    RUN_LABEL="semantic_pca"
+    EXPERIMENT="stl10_vits_ps8_multiblock"
+    EXP_NAME="chestmnist_128_vits_ps8_semantic_pca_from_in1k96_e247_origlr_ema99925_nowarmup"
+    LOSS_ARG="loss.kind=smooth_l1"
+    RUN_ARGS=(
+      "+masking/compressor=full"
+      "+masking/latent=semantic_pca"
+      "masking.latent.pca_dim=3"
+      "masking.latent.split_mode=band"
+      "masking.latent.context_mode=complement"
+      "masking.latent.normalize_tokens=true"
     )
     ;;
   *)

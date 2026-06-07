@@ -30,6 +30,7 @@ from ijepa_lite.utils.seed import set_seed
 import ijepa_lite.masking.example_latent_masker   # noqa: F401  registers "gumbel_topk"
 import ijepa_lite.masking.predictor_based_masker  # noqa: F401  registers "predictor_based"
 import ijepa_lite.masking.rd_masker               # noqa: F401  registers "rd_3way"
+import ijepa_lite.masking.semantic_pca_masker      # noqa: F401  registers "semantic_pca"
 # import my_project.my_masker                     # noqa: F401  registers "my_masker"
 
 

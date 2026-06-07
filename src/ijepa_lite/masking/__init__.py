@@ -7,6 +7,7 @@ from ijepa_lite.masking.predictor_based_masker import PredictorBasedMasker
 from ijepa_lite.masking.rd_masker import RateDist3WayMasker
 from ijepa_lite.masking.mi_masker import MIRateMasker, MINWayMasker
 from ijepa_lite.masking.goldilocks_masker import GoldilocksTeacherMasker  # noqa: F401
+from ijepa_lite.masking.semantic_pca_masker import SemanticPCAMasker  # noqa: F401
 from ijepa_lite.masking.registry import build_latent_masker, register, registered_names
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "MIRateMasker",
     "MINWayMasker",
     "GoldilocksTeacherMasker",
+    "SemanticPCAMasker",
     # Registry
     "register",
     "build_latent_masker",

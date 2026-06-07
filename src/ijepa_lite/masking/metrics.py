@@ -290,6 +290,20 @@ def mask_diagnostics(
         if key in aux:
             stats[f"mask/{key}"] = float(aux[key])
 
+    # Semantic PCA masker — algorithmic, no soft scores.
+    for key in (
+        "pca_dim",
+        "pca_explained_var_mean",
+        "pca_explained_var_top1",
+        "target_ratio_actual",
+        "context_ratio_actual",
+    ):
+        if key in aux:
+            value = aux[key]
+            stats[f"mask/{key}"] = (
+                float(value.item()) if torch.is_tensor(value) else float(value)
+            )
+
     # ------------------------------------------------------------------
     # Goldilocks error distribution diagnostics
     #

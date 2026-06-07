@@ -1,0 +1,19 @@
+# @package masking.latent
+name: semantic_pca
+
+# Number of per-image PCA components used as the semantic coordinate system.
+pca_dim: 3
+
+# "band": choose a contiguous quantile band along a random PCA direction.
+# "side": choose one high/low quantile side along a random PCA direction.
+split_mode: band
+
+# "complement": context is the non-target side up to context_ratio.
+# "balanced": context is evenly spread over the non-target PCA ordering.
+context_mode: complement
+
+# L2-normalize centered token vectors before PCA. This makes PCA less dominated
+# by token norm and more by angular token geometry.
+normalize_tokens: true
+
+eps: 1.0e-6
