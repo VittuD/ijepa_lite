@@ -780,6 +780,28 @@ def _resize_patch_only_pos_embedding(
     return patch_pos.permute(0, 2, 3, 1).reshape(1, dst_tokens, src_pos.shape[2])
 
 
+def _is_square_token_count(tokens: int) -> bool:
+    grid = int(math.isqrt(int(tokens)))
+    return grid * grid == int(tokens)
+
+
+def _resize_probe_pos_embedding(
+    src_pos: torch.Tensor,
+    dst_pos: torch.Tensor,
+) -> torch.Tensor:
+    src_tokens = int(src_pos.shape[1])
+    dst_tokens = int(dst_pos.shape[1])
+    if _is_square_token_count(src_tokens) and _is_square_token_count(dst_tokens):
+        return _resize_patch_only_pos_embedding(src_pos, dst_pos)
+    if _is_square_token_count(src_tokens - 1) and _is_square_token_count(dst_tokens - 1):
+        return _resize_torchvision_pos_embedding(src_pos, dst_pos)
+    raise ValueError(
+        "Cannot resize positional embeddings because neither patch-only nor "
+        "CLS-token square-grid layouts match: "
+        f"ckpt{tuple(src_pos.shape)} -> model{tuple(dst_pos.shape)}."
+    )
+
+
 def _looks_like_original_ijepa_encoder_state_dict(enc_sd: Dict[str, torch.Tensor]) -> bool:
     return (
         "patch_embed.proj.weight" in enc_sd
@@ -1017,7 +1039,7 @@ def _adapt_probe_encoder_state_dict(
         if src.shape == dst.shape:
             continue
         if key == "vit.encoder.pos_embedding":
-            adapted[key] = _resize_torchvision_pos_embedding(src, dst)
+            adapted[key] = _resize_probe_pos_embedding(src, dst)
             continue
         if key == "vit.conv_proj.weight":
             raise ValueError(
