@@ -3,7 +3,9 @@ torch>=2.5.1
 torchvision
 numpy
 pillow
+matplotlib
 medmnist
+scikit-learn
 
 # Config / experiment management
 hydra-core>=1.3.2
