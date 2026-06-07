@@ -1,21 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=viz-chest128-trials-448
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00
-#SBATCH --array=0-4
+#SBATCH --array=0-5
 #SBATCH --output=sbatch_logs/viz_token_emb/chestmnist128_trials_448/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/viz_token_emb/chestmnist128_trials_448/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
-# Token-embedding PCA and clustering visualization for the five ChestMNIST-128
-# continued-pretraining trial checkpoints, using each trial's last.pt at
-# 448x448.
+# Token-embedding PCA and clustering visualization for the ChestMNIST-128
+# continued-pretraining trial checkpoints plus their starting IN1K-96
+# checkpoint, using last.pt at 448x448.
 #
 # These checkpoints were trained at 128x128 / patch_size=8, so this relies on
 # learned positional embedding interpolation from a 16x16 token grid to a
@@ -27,6 +27,7 @@
 #   2  array_2_mi_hmargbs_floor
 #   3  array_3_mi_hmargcosbs_floor
 #   4  array_4_mi_hmarg_sketchorthcosbs_floor
+#   5  start_in1k96_vanilla_multiblock
 #
 # Uses:
 #   - imagenet:val from the CINECA imagenet module (IMAGENET2012_HOME)
@@ -77,6 +78,7 @@ METHODS=(
   array_2_mi_hmargbs_floor
   array_3_mi_hmargcosbs_floor
   array_4_mi_hmarg_sketchorthcosbs_floor
+  start_in1k96_vanilla_multiblock
 )
 
 RUN_ROOTS=(
@@ -85,6 +87,7 @@ RUN_ROOTS=(
   outputs/2026-06-06/20-13-24_chestmnist_128_vits_ps8_mi_hmargbs_floor_from_in1k96_e247_origlr_ema99925_nowarmup
   outputs/2026-06-06/20-13-24_chestmnist_128_vits_ps8_mi_hmargcosbs_floor_from_in1k96_e247_origlr_ema99925_nowarmup
   outputs/2026-06-06/20-13-24_chestmnist_128_vits_ps8_mi_hmarg_sketchorthcosbs_floor_from_in1k96_e247_origlr_ema99925_nowarmup
+  outputs/2026-05-04/19-30-19_in1k_96_vits_ps8_vanilla_multiblock_300ep
 )
 
 DATASETS=(
