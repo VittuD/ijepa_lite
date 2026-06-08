@@ -51,6 +51,7 @@ LOG_DIR="sbatch_logs/continued_pretrain/chestmnist224_vith14_meta_vanilla_4n_30e
 mkdir -p "${LOG_DIR}"
 
 CHECKPOINT_PATH="${WORK}/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.ijepa_lite.pt"
+export CHECKPOINT_PATH
 
 if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
   echo "Checkpoint not found: ${CHECKPOINT_PATH}"
@@ -76,6 +77,7 @@ echo "SLURM_NNODES=${SLURM_NNODES}"
 nvidia-smi -L
 
 srun bash -c '
+  echo "node_rank=$SLURM_NODEID CHECKPOINT_PATH=$CHECKPOINT_PATH"
   torchrun \
     --nnodes=$SLURM_NNODES \
     --nproc_per_node=4 \
