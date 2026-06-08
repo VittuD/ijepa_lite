@@ -33,14 +33,17 @@ class InlineEvalCallback(Callback):
     Opt-in inline downstream evaluation during pretraining.
 
     Runs a linear/MLP probe on a supervised dataset (e.g. STL-10) at a fixed
-    epoch cadence.  Mutates the ``metrics`` dict in-place so that downstream
-    loggers (e.g. WandbCallback) pick up the results automatically.
+    epoch and/or step cadence.  Mutates the ``metrics`` dict in-place so that
+    downstream loggers (e.g. WandbCallback) pick up the results automatically.
 
-    Activated when ``cfg.train.eval_every_epochs > 0``.  Rank 0 only.
+    Activated when ``cfg.train.eval_every_epochs > 0`` or
+    ``cfg.train.eval_every_steps > 0``.  Rank 0 only.
     """
 
     def __init__(self) -> None:
         self._eval_every: int = 0
+        self._eval_every_steps: int = 0
+        self._last_eval_step: int = -1
         self._train_loader: DataLoader | None = None
         self._val_loader: DataLoader | None = None
         self._num_classes: int = 10
@@ -54,7 +57,11 @@ class InlineEvalCallback(Callback):
 
     def on_run_start(self, cfg: Any, state: dict, model: Any) -> None:
         self._eval_every = int(getattr(cfg.train, "eval_every_epochs", 0))
-        if self._eval_every <= 0 or not is_rank0():
+        self._eval_every_steps = int(getattr(cfg.train, "eval_every_steps", 0))
+        if (
+            self._eval_every <= 0
+            and self._eval_every_steps <= 0
+        ) or not is_rank0():
             return
 
         self._embed_dim = int(cfg.model.embed_dim)
@@ -130,18 +137,27 @@ class InlineEvalCallback(Callback):
             drop_last=False,
         )
 
-        print(f"[InlineEval] Enabled: every {self._eval_every} epochs, "
+        cadence = []
+        if self._eval_every > 0:
+            cadence.append(f"every {self._eval_every} epochs")
+        if self._eval_every_steps > 0:
+            cadence.append(f"every {self._eval_every_steps} steps")
+        print(f"[InlineEval] Enabled: {', '.join(cadence)}, "
               f"dataset={dataset_name}, num_classes={self._num_classes}")
 
     def on_before_train_start(
         self, cfg: Any, state: dict, metrics: Dict[str, float]
     ) -> None:
-        if self._eval_every <= 0 or not is_rank0():
+        if (
+            self._eval_every <= 0
+            and self._eval_every_steps <= 0
+        ) or not is_rank0():
             return
         icfg = self._cfg_inline
         if not bool(getattr(icfg, "eval_at_start", False)):
             return
         self._run_and_record(cfg, state, metrics, label="start")
+        self._last_eval_step = int(state.get("global_step", 0))
 
     # ------------------------------------------------------------------
     # Epoch end — run probe
@@ -155,7 +171,28 @@ class InlineEvalCallback(Callback):
         if (epoch + 1) % self._eval_every != 0:
             return
 
+        step = int(state.get("global_step", 0))
+        if step == self._last_eval_step:
+            return
         self._run_and_record(cfg, state, metrics, label=f"epoch={epoch}")
+        self._last_eval_step = step
+
+    def on_step_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
+        if self._eval_every_steps <= 0 or not is_rank0():
+            return
+
+        step = int(state.get("global_step", 0))
+        if step <= 0 or step == self._last_eval_step:
+            return
+        if step % self._eval_every_steps != 0:
+            return
+        if bool(state.get("_prefer_epoch_cadence_step", False)):
+            epoch = int(state.get("epoch", 0))
+            if self._eval_every > 0 and ((epoch + 1) % self._eval_every) == 0:
+                return
+
+        self._run_and_record(cfg, state, metrics, label=f"step={step}")
+        self._last_eval_step = step
 
     def _run_and_record(
         self,

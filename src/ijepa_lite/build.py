@@ -240,11 +240,12 @@ def build_callbacks(cfg):
 
     # Opt-in inline eval (before WandbCallback so metrics are visible to wandb)
     eval_every = int(getattr(cfg.train, "eval_every_epochs", 0))
-    if eval_every > 0:
+    eval_every_steps = int(getattr(cfg.train, "eval_every_steps", 0))
+    if eval_every > 0 or eval_every_steps > 0:
         from ijepa_lite.callbacks.eval_cb import InlineEvalCallback
         cbs.append(InlineEvalCallback())
 
-    # Opt-in visualization (piggybacks on save_every cadence)
+    # Opt-in visualization (piggybacks on save_every cadence unless overridden)
     if bool(getattr(cfg.train, "viz_enabled", False)):
         from ijepa_lite.callbacks.viz_cb import VizCallback
         cbs.append(VizCallback())
@@ -565,14 +566,40 @@ def build_pretrain_optim_sched(cfg, model: torch.nn.Module):
     if getattr(cfg, "sched", None) is not None:
         name = str(getattr(cfg.sched, "name", "warmup_cosine")).lower()
         if name == "warmup_cosine":
-            warmup = int(getattr(cfg.sched, "warmup_epochs", 0))
+            interval = str(getattr(cfg.sched, "interval", "epoch")).lower()
+            warmup_epochs = int(getattr(cfg.sched, "warmup_epochs", 0))
+            warmup_steps = int(getattr(cfg.sched, "warmup_steps", 0))
+            configured_total_steps = int(getattr(cfg.sched, "total_steps", 0))
             min_lr = float(getattr(cfg.sched, "min_lr", 0.0))
-            total = int(cfg.train.epochs)
+            if interval == "step":
+                warmup = warmup_steps
+                total = configured_total_steps
+                if total <= 0:
+                    total = int(getattr(cfg.train, "max_steps", 0))
+                if total <= 0:
+                    raise ValueError(
+                        "Step-based warmup_cosine requires sched.total_steps "
+                        "or train.max_steps > 0."
+                    )
+            elif interval == "epoch":
+                if warmup_steps > 0 or configured_total_steps > 0:
+                    raise ValueError(
+                        "sched.warmup_steps and sched.total_steps require "
+                        "sched.interval=step. Epoch scheduling uses "
+                        "sched.warmup_epochs and train.epochs."
+                    )
+                warmup = warmup_epochs
+                total = int(cfg.train.epochs)
+            else:
+                raise ValueError(
+                    "sched.interval must be 'epoch' or 'step' "
+                    f"(got {interval!r})."
+                )
 
-            def _lr_lambda(epoch: int):
-                if warmup > 0 and epoch < warmup:
-                    return float(epoch + 1) / float(max(1, warmup))
-                progress = (epoch - warmup) / float(max(1, total - warmup))
+            def _lr_lambda(unit: int):
+                if warmup > 0 and unit < warmup:
+                    return float(unit + 1) / float(max(1, warmup))
+                progress = (unit - warmup) / float(max(1, total - warmup))
                 cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
                 return (min_lr / lr) + (1.0 - (min_lr / lr)) * cosine
 

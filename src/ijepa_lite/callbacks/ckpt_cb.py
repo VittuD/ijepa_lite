@@ -13,7 +13,7 @@ from ijepa_lite.utils.dist import is_rank0
 @dataclass
 class CheckpointCallback(Callback):
     """
-    Saves training checkpoints on a fixed epoch cadence.
+    Saves training checkpoints on fixed epoch and/or step cadences.
 
     Uses cfg.train.save_every (preferred) with fallback to save_every_epochs.
     Saves to cfg.train.ckpt_dir / cfg.train.ckpt_name with sensible defaults.
@@ -34,6 +34,7 @@ class CheckpointCallback(Callback):
     save_every: int = 1
     ckpt_dir: str = "checkpoints"
     ckpt_name: str = "last.pt"
+    _last_save_step: int = -1
 
     def on_epoch_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
         # We only checkpoint pretraining runs.
@@ -54,6 +55,55 @@ class CheckpointCallback(Callback):
 
         epoch = int(state.get("epoch", 0))
         if ((epoch + 1) % save_every) != 0:
+            return
+
+        self._save(cfg, state, next_epoch=epoch + 1, version_label=f"epoch_{epoch:05d}")
+
+    def on_step_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
+        # Step checkpoints are opt-in. Epoch checkpoints remain the default.
+        if str(getattr(cfg.task, "name", "")).lower() != "pretrain":
+            return
+        if not is_rank0():
+            return
+
+        save_every_steps = int(getattr(cfg.train, "save_every_steps", 0))
+        if save_every_steps <= 0:
+            return
+
+        step = int(state.get("global_step", 0))
+        if step <= 0 or step == self._last_save_step:
+            return
+        if (step % save_every_steps) != 0:
+            return
+        if bool(state.get("_prefer_epoch_cadence_step", False)):
+            epoch = int(state.get("epoch", 0))
+            save_every = int(
+                getattr(
+                    cfg.train,
+                    "save_every",
+                    getattr(cfg.train, "save_every_epochs", self.save_every),
+                )
+            )
+            if save_every > 0 and ((epoch + 1) % save_every) == 0:
+                return
+
+        self._save(
+            cfg,
+            state,
+            next_epoch=int(state.get("epoch", 0)),
+            version_label=f"step_{step:08d}",
+        )
+
+    def _save(
+        self,
+        cfg: Any,
+        state: dict,
+        *,
+        next_epoch: int,
+        version_label: str,
+    ) -> None:
+        step = int(state.get("global_step", 0))
+        if step == self._last_save_step:
             return
 
         bundle: Optional[dict] = state.get("_ckpt_bundle", None)
@@ -78,9 +128,9 @@ class CheckpointCallback(Callback):
         # Do NOT serialize private runtime keys.
         state_to_save = {k: v for k, v in state.items() if not str(k).startswith("_")}
 
-        # Store the epoch that should run *next* so resume doesn't re-run the
-        # last completed epoch (off-by-one fix).
-        state_to_save["next_epoch"] = epoch + 1
+        # Store the epoch that should run next. Epoch-end checkpoints move to
+        # epoch + 1; mid-epoch step checkpoints restart the current epoch.
+        state_to_save["next_epoch"] = int(next_epoch)
 
         ema_start = state.get(
             "_ema_start",
@@ -103,9 +153,10 @@ class CheckpointCallback(Callback):
 
         # Versioned copy: keep epoch-numbered snapshots alongside last.pt.
         if bool(getattr(cfg.train, "keep_all_checkpoints", False)):
-            versioned_path = os.path.join(ckpt_dir, f"epoch_{epoch:05d}.pt")
+            versioned_path = os.path.join(ckpt_dir, f"{version_label}.pt")
             shutil.copy2(path, versioned_path)
 
         # Signal to the training loop that we saved, so it can trigger
         # callbacks.on_checkpoint_saved (e.g., for W&B artifact logging).
         state["_checkpoint_path"] = path
+        self._last_save_step = step

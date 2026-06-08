@@ -99,7 +99,7 @@ class WandbCallback(Callback):
         return out
 
     def on_step_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
-        if self.run is None or not is_rank0():
+        if self.run is None or not is_rank0() or not metrics:
             return
         wandb.log(self._convert_histograms(metrics), step=int(state["global_step"]))
 

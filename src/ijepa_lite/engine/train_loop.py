@@ -129,7 +129,36 @@ def train(
     _masker_wd_end = masker_wd_end if masker_wd_end is not None else _masker_wd_start
     _do_masker_wd_sched = masker_optimizer is not None and (_masker_wd_start != _masker_wd_end)
 
-    total_steps = int(cfg.train.epochs) * len(loader)
+    max_steps = int(getattr(cfg.train, "max_steps", 0))
+    epoch_budget_steps = int(cfg.train.epochs) * len(loader)
+    total_steps = max_steps if max_steps > 0 else epoch_budget_steps
+    sched_cfg = getattr(cfg, "sched", None)
+    sched_interval = (
+        str(getattr(sched_cfg, "interval", "epoch")).lower()
+        if sched_cfg is not None
+        else "epoch"
+    )
+    step_lr_scheduler = bool(sched_interval == "step")
+
+    def _flush_checkpoint_saved_callback() -> None:
+        ckpt_path = state.pop("_checkpoint_path", None)
+        if ckpt_path:
+            callbacks.on_checkpoint_saved(cfg=cfg, state=state, path=str(ckpt_path))
+
+    def _cadence_hits(cadence: int) -> bool:
+        step = int(state.get("global_step", 0))
+        return cadence > 0 and step > 0 and (step % cadence) == 0
+
+    def _step_callbacks_need_sync() -> bool:
+        eval_every_steps = int(getattr(cfg.train, "eval_every_steps", 0))
+        save_every_steps = int(getattr(cfg.train, "save_every_steps", 0))
+        viz_every_steps = int(getattr(cfg.train, "viz_every_steps", 0))
+        viz_enabled = bool(getattr(cfg.train, "viz_enabled", False))
+        return (
+            _cadence_hits(eval_every_steps)
+            or _cadence_hits(save_every_steps)
+            or (viz_enabled and _cadence_hits(viz_every_steps))
+        )
 
     # ------------------------------------------------------------------
     # Resume fix: checkpoint "epoch" is the last completed epoch, so we resume
@@ -137,9 +166,12 @@ def train(
     # ------------------------------------------------------------------
     start_epoch = int(state.get("epoch", 0))
     if resumed_state:
-        start_epoch += 1
+        start_epoch = int(state.get("next_epoch", start_epoch + 1))
 
+    stop_training = False
     for epoch in range(start_epoch, int(cfg.train.epochs)):
+        if max_steps > 0 and int(state.get("global_step", 0)) >= max_steps:
+            break
         state["epoch"] = epoch
 
         # Grow λ sampling range according to warmup schedule.
@@ -198,7 +230,11 @@ def train(
         model.train()
         loss_meter = AverageMeter()
 
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
+            if max_steps > 0 and int(state.get("global_step", 0)) >= max_steps:
+                stop_training = True
+                break
+
             images = batch["images"].to(device, non_blocking=True)
 
             # ----------------------------------------------------------
@@ -327,12 +363,23 @@ def train(
             if _masker is not None and hasattr(_masker, "set_step"):
                 _masker.set_step(state["global_step"], total_steps)
 
+            if step_lr_scheduler:
+                if scheduler is not None:
+                    scheduler.step()
+                if masker_scheduler is not None:
+                    masker_scheduler.step()
+
             loss_meter.update(float(loss.item()), n=images.size(0))
 
             # Track progressive KL every step for adaptive phase switching.
             _pkv = out.get("mask_stats", {}).get("mask/prog_kl/loss")
             if _pkv is not None:
                 _prog_kl_meter.update(float(_pkv))
+
+            will_end_epoch = (batch_idx + 1) >= len(loader) or (
+                max_steps > 0 and int(state.get("global_step", 0)) >= max_steps
+            )
+            state["_prefer_epoch_cadence_step"] = bool(will_end_epoch)
 
             if do_log:
                 sum_t = torch.tensor(loss_meter.sum, device=device)
@@ -415,10 +462,22 @@ def train(
                         state=state,
                         metrics=metrics,
                     )
+                    _flush_checkpoint_saved_callback()
 
-        if scheduler is not None:
+            if not do_log and is_rank0():
+                callbacks.on_step_end(cfg=cfg, state=state, metrics={})
+                _flush_checkpoint_saved_callback()
+
+            if _step_callbacks_need_sync():
+                barrier(device)
+
+            if max_steps > 0 and int(state.get("global_step", 0)) >= max_steps:
+                stop_training = True
+                break
+
+        if scheduler is not None and not step_lr_scheduler:
             scheduler.step()
-        if masker_scheduler is not None:
+        if masker_scheduler is not None and not step_lr_scheduler:
             masker_scheduler.step()
 
         # Adaptive phase switching: notify masker of per-epoch KL average.
@@ -443,12 +502,14 @@ def train(
                 },
             )
 
-            ckpt_path = state.pop("_checkpoint_path", None)
-            if ckpt_path:
-                callbacks.on_checkpoint_saved(cfg=cfg, state=state, path=str(ckpt_path))
+            _flush_checkpoint_saved_callback()
+
+        state["_prefer_epoch_cadence_step"] = False
 
         # Synchronise all ranks at the end of every epoch
         barrier(device)
+        if stop_training:
+            break
 
     if is_rank0():
         callbacks.on_run_end(cfg=cfg, state=state)

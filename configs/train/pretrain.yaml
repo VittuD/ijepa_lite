@@ -1,12 +1,16 @@
 epochs: 100
+max_steps: 0
 amp: true
 grad_clip_norm: 1.0
 masker_step_every: 1
 log_every: 50
 save_every_epochs: 100
+save_every_steps: 0
 eval_every_epochs: 100
+eval_every_steps: 0
 keep_all_checkpoints: true
 viz_enabled: true
+viz_every_steps: 0
 
 inline_eval:
   dataset: stl10

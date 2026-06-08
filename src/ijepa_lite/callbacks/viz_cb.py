@@ -25,6 +25,8 @@ class VizCallback(Callback):
     def __init__(self) -> None:
         self._enabled: bool = False
         self._viz_every: int = 1
+        self._viz_every_steps: int = 0
+        self._last_viz_step: int = -1
         self._dataset = None
         self._cfg_viz: Any = None
         self._image_size: int = 96
@@ -64,6 +66,7 @@ class VizCallback(Callback):
             getattr(cfg.train, "viz_every",
                     getattr(cfg.train, "viz_every_epochs", save_every))
         )
+        self._viz_every_steps = int(getattr(cfg.train, "viz_every_steps", 0))
         self._image_size = int(cfg.model.image_size)
         self._patch_size = int(cfg.model.patch_size)
         self._cfg_viz = getattr(cfg.train, "viz", None)
@@ -128,25 +131,37 @@ class VizCallback(Callback):
             return
         if (epoch + 1) % self._viz_every != 0:
             return
+        step = int(state.get("global_step", 0))
+        if step == self._last_viz_step:
+            return
 
-        if not self._is_multiblock:
-            bundle = state.get("_ckpt_bundle")
-            if bundle is not None:
-                core = unwrap_model(bundle["model"])
-                masker = getattr(core, "latent_masker", None)
-                if (
-                    masker is not None
-                    and bool(getattr(masker, "warmup_use_vanilla_multiblock", False))
-                    and epoch < int(getattr(masker, "warmup_epochs", 0))
-                ):
-                    print(
-                        "[VizCallback] skipping visualization during "
-                        f"vanilla-multiblock warmup (epoch={epoch}, "
-                        f"warmup_epochs={int(getattr(masker, 'warmup_epochs', 0))})."
-                    )
-                    return
+        if self._should_skip_warmup_viz(state, epoch):
+            return
 
         self._run_viz(cfg, state, epoch)
+        self._last_viz_step = step
+
+    def on_step_end(self, cfg: Any, state: dict, metrics: Dict[str, float]) -> None:
+        if not self._enabled or not is_rank0():
+            return
+        if self._viz_every_steps <= 0:
+            return
+
+        step = int(state.get("global_step", 0))
+        if step <= 0 or step == self._last_viz_step:
+            return
+        if step % self._viz_every_steps != 0:
+            return
+        if bool(state.get("_prefer_epoch_cadence_step", False)):
+            epoch = int(state.get("epoch", 0))
+            if self._viz_every > 0 and ((epoch + 1) % self._viz_every) == 0:
+                return
+
+        epoch = int(state.get("epoch", 0))
+        if self._should_skip_warmup_viz(state, epoch):
+            return
+        self._run_viz(cfg, state, epoch, label=f"step_{step:08d}")
+        self._last_viz_step = step
 
     def on_before_train_start(
         self, cfg: Any, state: dict, metrics: Dict[str, float]
@@ -157,6 +172,28 @@ class VizCallback(Callback):
         if not bool(getattr(vcfg, "eval_at_start", False)):
             return
         self._run_viz(cfg, state, 0, label="start")
+        self._last_viz_step = int(state.get("global_step", 0))
+
+    def _should_skip_warmup_viz(self, state: dict, epoch: int) -> bool:
+        if self._is_multiblock:
+            return False
+        bundle = state.get("_ckpt_bundle")
+        if bundle is None:
+            return False
+        core = unwrap_model(bundle["model"])
+        masker = getattr(core, "latent_masker", None)
+        if (
+            masker is not None
+            and bool(getattr(masker, "warmup_use_vanilla_multiblock", False))
+            and epoch < int(getattr(masker, "warmup_epochs", 0))
+        ):
+            print(
+                "[VizCallback] skipping visualization during "
+                f"vanilla-multiblock warmup (epoch={epoch}, "
+                f"warmup_epochs={int(getattr(masker, 'warmup_epochs', 0))})."
+            )
+            return True
+        return False
 
     def _run_viz(
         self, cfg: Any, state: dict, epoch: int, label: str | None = None

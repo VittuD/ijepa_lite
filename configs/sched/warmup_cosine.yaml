@@ -1,2 +1,5 @@
 warmup_epochs: 10
+warmup_steps: 0
+total_steps: 0
+interval: epoch
 min_lr: 1e-6
