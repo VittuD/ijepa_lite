@@ -56,6 +56,7 @@ export OPENBLAS_NUM_THREADS=4
 export NUMEXPR_NUM_THREADS=4
 
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_TRACE_BUFFER_SIZE=1048576
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 LOG_DIR="${SLURM_SUBMIT_DIR:-$PWD}/sbatch_logs/task_relevance_masking/chestmnist224_vith14_meta_step_array"
@@ -226,6 +227,7 @@ COMMON_ARGS=(
   "train.epochs=30"
   "train.max_steps=1170"
   "train.log_every=50"
+  "distributed.timeout_minutes=60"
   "train.save_every_epochs=0"
   "train.save_every_steps=195"
   "train.eval_every_epochs=0"

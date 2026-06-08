@@ -380,6 +380,8 @@ def train(
                 max_steps > 0 and int(state.get("global_step", 0)) >= max_steps
             )
             state["_prefer_epoch_cadence_step"] = bool(will_end_epoch)
+            step_callbacks_need_sync = _step_callbacks_need_sync()
+            step_metrics: dict[str, float] | None = None
 
             if do_log:
                 sum_t = torch.tensor(loss_meter.sum, device=device)
@@ -456,19 +458,20 @@ def train(
                         metrics["train/ctx_loss"] = out["ctx_loss"]
                     if masker_lr != lr:
                         metrics["train/masker_lr"] = masker_lr
+                    step_metrics = metrics
 
-                    callbacks.on_step_end(
-                        cfg=cfg,
-                        state=state,
-                        metrics=metrics,
-                    )
-                    _flush_checkpoint_saved_callback()
+            if step_callbacks_need_sync:
+                barrier(device)
 
-            if not do_log and is_rank0():
-                callbacks.on_step_end(cfg=cfg, state=state, metrics={})
+            if is_rank0():
+                callbacks.on_step_end(
+                    cfg=cfg,
+                    state=state,
+                    metrics=step_metrics if step_metrics is not None else {},
+                )
                 _flush_checkpoint_saved_callback()
 
-            if _step_callbacks_need_sync():
+            if step_callbacks_need_sync:
                 barrier(device)
 
             if max_steps > 0 and int(state.get("global_step", 0)) >= max_steps:
