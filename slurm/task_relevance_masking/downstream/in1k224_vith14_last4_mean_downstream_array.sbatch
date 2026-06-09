@@ -1,21 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-trm-in1k-ds-l4m
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=03:00:00
-#SBATCH --array=0-6
+#SBATCH --time=01:00:00
+#SBATCH --array=0-1
 #SBATCH --output=sbatch_logs/task_relevance_masking/downstream/in1k224_vith14_last4_mean/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/task_relevance_masking/downstream/in1k224_vith14_last4_mean/%x_%A_%a.err
 
 # ---------------------------------------------------------------------------
 # Downstream claim-check array for IN1K-control ViT-H/14 task-relevance runs.
 #
-# Each array item evaluates one last.pt checkpoint on:
+# Each array item evaluates a chunk of three last.pt checkpoints on:
 #   - chestmnist
 #   - pneumoniamnist
 #   - siimacr_pneumothorax
@@ -63,40 +63,38 @@ DATASETS=(
 )
 
 CKPT_LABELS=(
-  in1k_semantic_pca_last
-  in1k_hmarg_sketchorthcosbs_floor_last
-  in1k_hmargcosbs_floor_last
-  in1k_hmargbs_floor_last
-  in1k_vanilla_multiblock_1748_last
+  in1k_vanilla_multiblock_last
   in1k_affinity_novelty_last
-  in1k_vanilla_multiblock_1559_last
+  in1k_hmargbs_floor_last
+  in1k_hmargcosbs_floor_last
+  in1k_hmarg_sketchorthcosbs_floor_last
+  in1k_semantic_pca_last
 )
 
 CKPT_RELS=(
-  outputs/2026-06-08/17-50-26_claim_in1k_224_vith14_semantic_pca_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
-  outputs/2026-06-08/17-50-26_claim_in1k_224_vith14_mi_hmarg_sketchorthcosbs_floor_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
-  outputs/2026-06-08/17-49-45_claim_in1k_224_vith14_mi_hmargcosbs_floor_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
-  outputs/2026-06-08/17-49-20_claim_in1k_224_vith14_mi_hmargbs_floor_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
   outputs/2026-06-08/17-48-36_claim_in1k_224_vith14_vanilla_multiblock_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
   outputs/2026-06-08/17-48-36_claim_in1k_224_vith14_mi_affinity_novelty_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
-  outputs/2026-06-08/15-59-29_claim_in1k_224_vith14_vanilla_multiblock_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
+  outputs/2026-06-08/17-49-20_claim_in1k_224_vith14_mi_hmargbs_floor_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
+  outputs/2026-06-08/17-49-45_claim_in1k_224_vith14_mi_hmargcosbs_floor_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
+  outputs/2026-06-08/17-50-26_claim_in1k_224_vith14_mi_hmarg_sketchorthcosbs_floor_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
+  outputs/2026-06-08/17-50-26_claim_in1k_224_vith14_semantic_pca_from_meta_step1170_b2048_chest_eval/rank0/checkpoints/last.pt
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID}"
-CKPT_LABEL="${CKPT_LABELS[$TASK_ID]}"
-CKPT_REL="${CKPT_RELS[$TASK_ID]}"
-CKPT_PATH="${WORK}/vitturini/${CKPT_REL}"
-LOG_DIR="${LOG_ROOT}/${CKPT_LABEL}"
-SUMMARY_PATH="${LOG_DIR}/${CKPT_LABEL}_last4_mean_results_summary.txt"
+CHUNK_SIZE=3
+START_IDX=$((TASK_ID * CHUNK_SIZE))
+END_IDX=$((START_IDX + CHUNK_SIZE - 1))
+TOTAL_CKPTS="${#CKPT_LABELS[@]}"
+if (( END_IDX >= TOTAL_CKPTS )); then
+  END_IDX=$((TOTAL_CKPTS - 1))
+fi
+
+LOG_DIR="${LOG_ROOT}/chunk_${TASK_ID}"
+SUMMARY_PATH="${LOG_DIR}/chunk_${TASK_ID}_last4_mean_results_summary.txt"
 
 mkdir -p "${LOG_DIR}"
-exec > >(tee -a "${LOG_DIR}/${CKPT_LABEL}_${SLURM_JOB_ID}_${TASK_ID}.out")
-exec 2> >(tee -a "${LOG_DIR}/${CKPT_LABEL}_${SLURM_JOB_ID}_${TASK_ID}.err" >&2)
-
-if [[ ! -f "${CKPT_PATH}" ]]; then
-  echo "Checkpoint not found: ${CKPT_PATH}"
-  exit 1
-fi
+exec > >(tee -a "${LOG_DIR}/chunk_${TASK_ID}_${SLURM_JOB_ID}.out")
+exec 2> >(tee -a "${LOG_DIR}/chunk_${TASK_ID}_${SLURM_JOB_ID}.err" >&2)
 
 CMD=(
   python -m torch.distributed.run --standalone --nproc_per_node "${NPROC_PER_NODE}" -m ijepa_lite.scripts.downstream_sweep
@@ -121,20 +119,34 @@ CMD=(
   --classification-num-workers "${CLASSIFICATION_NUM_WORKERS}"
   --segmentation-batch-size "${SEGMENTATION_BATCH_SIZE}"
   --segmentation-num-workers "${SEGMENTATION_NUM_WORKERS}"
-  --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
 )
+
+for idx in $(seq "${START_IDX}" "${END_IDX}"); do
+  CKPT_LABEL="${CKPT_LABELS[$idx]}"
+  CKPT_PATH="${WORK}/vitturini/${CKPT_RELS[$idx]}"
+  if [[ ! -f "${CKPT_PATH}" ]]; then
+    echo "Checkpoint not found: ${CKPT_PATH}"
+    exit 1
+  fi
+  CMD+=(--checkpoint "${CKPT_LABEL}=${CKPT_PATH}")
+done
 
 for dataset in "${DATASETS[@]}"; do
   CMD+=(--dataset "$dataset")
 done
 
 echo "TASK_ID=${TASK_ID}"
-echo "CKPT_LABEL=${CKPT_LABEL}"
+echo "CHUNK_SIZE=${CHUNK_SIZE}"
+echo "START_IDX=${START_IDX}"
+echo "END_IDX=${END_IDX}"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
 echo "LOG_DIR=${LOG_DIR}"
 echo "SUMMARY_PATH=${SUMMARY_PATH}"
-echo "CKPT_PATH=${CKPT_PATH}"
+echo "CHECKPOINTS:"
+for idx in $(seq "${START_IDX}" "${END_IDX}"); do
+  echo "  ${CKPT_LABELS[$idx]}=${WORK}/vitturini/${CKPT_RELS[$idx]}"
+done
 echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
 echo "CLASSIFICATION_NUM_WORKERS=${CLASSIFICATION_NUM_WORKERS}"
 echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
