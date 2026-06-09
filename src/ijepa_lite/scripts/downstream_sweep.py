@@ -131,6 +131,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional data.num_workers override for segmentation downstream tasks.",
     )
+    p.add_argument(
+        "--no-save-probe-checkpoints",
+        action="store_true",
+        help="Do not write linear/segmentation probe head checkpoints; summaries and logs are still written.",
+    )
     return p.parse_args()
 
 
@@ -301,6 +306,8 @@ def _build_run_overrides(
     ]
     if args.task_pool is not None:
         overrides.append(f"task.pool={args.task_pool}")
+    if args.no_save_probe_checkpoints:
+        overrides.append("train.save_probe_checkpoints=false")
     overrides.extend(model_overrides)
     overrides.extend(
         _batch_overrides_for_dataset(

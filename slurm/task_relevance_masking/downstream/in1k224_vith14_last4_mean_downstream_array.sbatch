@@ -105,6 +105,7 @@ CMD=(
   --summary-path "$SUMMARY_PATH"
   --logger-mode offline
   --continue-on-error
+  --no-save-probe-checkpoints
   --classification-experiment downstream_mlp_earlystop
   --segmentation-experiment downstream_vocseg_mlp_earlystop
   --run-suffix task_relevance_in1k224_vith14_last4_mean

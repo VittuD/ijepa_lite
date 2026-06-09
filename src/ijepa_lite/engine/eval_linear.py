@@ -604,9 +604,6 @@ def linear_probe_eval(
                 },
             )
 
-            ckpt_dir = str(getattr(cfg.train, "ckpt_dir", "checkpoints"))
-            os.makedirs(ckpt_dir, exist_ok=True)
-
             payload = {
                 "head": unwrap_model(model).head.state_dict(),
                 "metric_name": metric_name,
@@ -623,11 +620,17 @@ def linear_probe_eval(
                 best_val_metric = float(val_metric)
                 best_epoch = int(epoch)
                 no_improve_epochs = 0
-                torch.save(payload, os.path.join(ckpt_dir, "linear_probe_best.pt"))
+                if bool(getattr(cfg.train, "save_probe_checkpoints", True)):
+                    ckpt_dir = str(getattr(cfg.train, "ckpt_dir", "checkpoints"))
+                    os.makedirs(ckpt_dir, exist_ok=True)
+                    torch.save(payload, os.path.join(ckpt_dir, "linear_probe_best.pt"))
             else:
                 no_improve_epochs += 1
 
-            torch.save(payload, os.path.join(ckpt_dir, "linear_probe_last.pt"))
+            if bool(getattr(cfg.train, "save_probe_checkpoints", True)):
+                ckpt_dir = str(getattr(cfg.train, "ckpt_dir", "checkpoints"))
+                os.makedirs(ckpt_dir, exist_ok=True)
+                torch.save(payload, os.path.join(ckpt_dir, "linear_probe_last.pt"))
 
         should_stop = (
             early_stop_patience > 0

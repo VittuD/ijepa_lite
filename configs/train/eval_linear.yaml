@@ -3,3 +3,4 @@ lr: 0.1
 weight_decay: 0.0
 log_every: 50
 ckpt_dir: checkpoints
+save_probe_checkpoints: true
