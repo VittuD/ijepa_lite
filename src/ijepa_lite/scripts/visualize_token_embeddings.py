@@ -17,9 +17,16 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, Subset
 
 from ijepa_lite.build import build_linear_probe_model
-from ijepa_lite.data.collate import SupervisedCollate
-from ijepa_lite.data.datasets import build_dataset
-from ijepa_lite.data.transforms import build_linear_probe_transforms
+from ijepa_lite.data.datasets import (
+    build_box_target_dataset,
+    build_dataset,
+    build_segmentation_dataset,
+)
+from ijepa_lite.data.transforms import (
+    build_box_target_transforms,
+    build_linear_probe_transforms,
+    build_segmentation_transforms,
+)
 from ijepa_lite.utils.seed import set_seed
 
 
@@ -39,6 +46,13 @@ class ClusterResult:
     params: str
     labels: np.ndarray
     stats: dict[str, Any]
+
+
+class ImageLabelCollate:
+    def __call__(self, batch: list[Any]) -> dict[str, Any]:
+        images = torch.stack([item[0] for item in batch], dim=0)
+        labels = [item[1] for item in batch]
+        return {"images": images, "labels": labels}
 
 
 def _pyplot():
@@ -259,9 +273,28 @@ def _subset_indices(length: int, n_samples: int, mode: str, seed: int) -> list[i
     return sorted(int(x) for x in rng.choice(length, size=n, replace=False))
 
 
-def _make_loader(cfg: Any, split: str, indices: list[int]) -> DataLoader:
+def _dataset_kind(dataset_name: str) -> str:
+    name = str(dataset_name).lower()
+    if name == "rsna_pneumonia_detection":
+        return "box_target"
+    if name in {"siimacr_pneumothorax", "vocseg"}:
+        return "segmentation"
+    return "classification"
+
+
+def _build_viz_dataset(cfg: Any, split: str):
+    kind = _dataset_kind(str(cfg.data.name))
+    if kind == "box_target":
+        _, val_tfm = build_box_target_transforms(cfg)
+        return build_box_target_dataset(cfg.data, split=split, transforms=val_tfm)
+    if kind == "segmentation":
+        _, val_tfm = build_segmentation_transforms(cfg)
+        return build_segmentation_dataset(cfg.data, split=split, transforms=val_tfm)
     _, val_tfm = build_linear_probe_transforms(cfg)
-    dataset = build_dataset(cfg.data, split=split, transform=val_tfm)
+    return build_dataset(cfg.data, split=split, transform=val_tfm)
+
+
+def _make_loader(dataset: Any, cfg: Any, indices: list[int]) -> DataLoader:
     subset = Subset(dataset, indices)
     num_workers = int(getattr(cfg.data, "num_workers", 4))
     return DataLoader(
@@ -274,7 +307,7 @@ def _make_loader(cfg: Any, split: str, indices: list[int]) -> DataLoader:
             bool(getattr(cfg.data, "persistent_workers", True)) if num_workers > 0 else False
         ),
         prefetch_factor=int(getattr(cfg.data, "prefetch_factor", 2)) if num_workers > 0 else None,
-        collate_fn=SupervisedCollate(),
+        collate_fn=ImageLabelCollate(),
     )
 
 
@@ -284,8 +317,25 @@ def _denormalize_image(image: torch.Tensor) -> np.ndarray:
     return np.clip(arr, 0.0, 1.0)
 
 
-def _label_summary(label: torch.Tensor, class_names: list[str]) -> str:
+def _label_summary(label: Any, class_names: list[str]) -> str:
+    if isinstance(label, dict):
+        boxes = label.get("boxes")
+        n_boxes = int(boxes.shape[0]) if isinstance(boxes, torch.Tensor) else 0
+        image_id = label.get("image_id")
+        prefix = f"id={image_id}; " if image_id is not None else ""
+        return f"{prefix}boxes={n_boxes}"
+    if isinstance(label, (int, np.integer)):
+        idx = int(label)
+        if 0 <= idx < len(class_names):
+            return class_names[idx]
+        return str(idx)
+    if not isinstance(label, torch.Tensor):
+        return str(label)
+
     y = label.detach().cpu()
+    if y.ndim >= 2:
+        fg = float((y > 0).float().mean().item())
+        return f"fg_fraction={fg:.4f}"
     if y.ndim == 0 or y.numel() == 1:
         idx = int(y.reshape(-1)[0].item())
         if 0 <= idx < len(class_names):
@@ -737,15 +787,14 @@ def main() -> None:
             data_root=dataset_roots.get(spec.name, args.data_root),
         )
         split = spec.split or _default_split(cfg)
-        _, val_tfm = build_linear_probe_transforms(cfg)
-        full_ds = build_dataset(cfg.data, split=split, transform=val_tfm)
+        full_ds = _build_viz_dataset(cfg, split)
         indices = _subset_indices(
             len(full_ds),
             n_samples=int(args.n_samples),
             mode=str(args.sample_mode),
             seed=int(args.seed),
         )
-        loader = _make_loader(cfg, split, indices)
+        loader = _make_loader(full_ds, cfg, indices)
         class_names = list(getattr(cfg.data, "class_names", []))
 
         dataset_out = out_dir / spec.name
