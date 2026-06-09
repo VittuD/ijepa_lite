@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import random
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -727,13 +728,35 @@ class RSNAPneumoniaDetectionDataset(Dataset):
         self.samples = [
             (pid, image_by_id[pid], boxes_by_id.get(pid, [])) for pid in selected
         ]
+        self._bad_images: set[Path] = set()
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx):
-        patient_id, image_path, boxes = self.samples[idx]
-        image = Image.open(image_path).convert("RGB")
+        last_error: Exception | None = None
+        for offset in range(len(self.samples)):
+            sample_idx = (int(idx) + offset) % len(self.samples)
+            patient_id, image_path, boxes = self.samples[sample_idx]
+            try:
+                with Image.open(image_path) as raw:
+                    image = raw.convert("RGB")
+                break
+            except (OSError, ValueError) as exc:
+                last_error = exc
+                if image_path not in self._bad_images:
+                    self._bad_images.add(image_path)
+                    warnings.warn(
+                        "[RSNAPneumoniaDetectionDataset] skipping unreadable "
+                        f"image '{image_path}': {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+        else:
+            raise RuntimeError(
+                "All RSNA images attempted by this dataset worker were unreadable."
+            ) from last_error
+
         target = {
             "boxes": torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4),
             "labels": torch.ones((len(boxes),), dtype=torch.long),
