@@ -14,9 +14,19 @@ from ijepa_lite.callbacks.ckpt_cb import CheckpointCallback
 from ijepa_lite.callbacks.handler import CallbackHandler
 from ijepa_lite.callbacks.progress_cb import ProgressCallback
 from ijepa_lite.data.classes import infer_num_classes
-from ijepa_lite.data.collate import IJEPACollate, SegmentationCollate, SupervisedCollate
-from ijepa_lite.data.datasets import build_dataset, build_segmentation_dataset
+from ijepa_lite.data.collate import (
+    DetectionCollate,
+    IJEPACollate,
+    SegmentationCollate,
+    SupervisedCollate,
+)
+from ijepa_lite.data.datasets import (
+    build_dataset,
+    build_detection_dataset,
+    build_segmentation_dataset,
+)
 from ijepa_lite.data.transforms import (
+    build_detection_transforms,
     build_linear_probe_transforms,
     build_pretrain_transform,
     build_segmentation_transforms,
@@ -1206,6 +1216,53 @@ def build_segmentation_probe_loaders(cfg):
     return train_loader, val_loader, num_classes
 
 
+def build_detection_probe_loaders(cfg):
+    train_tfm, val_tfm = build_detection_transforms(cfg)
+
+    train_split = str(getattr(cfg.data, "train_split", "train"))
+    val_split = str(getattr(cfg.data, "val_split", "val"))
+
+    ds_train = build_detection_dataset(cfg.data, split=train_split, transforms=train_tfm)
+    ds_val = build_detection_dataset(cfg.data, split=val_split, transforms=val_tfm)
+
+    sampler_train = _build_sampler(ds_train, shuffle=True, drop_last=True)
+    sampler_val = _build_sampler(ds_val, shuffle=False, drop_last=False)
+
+    collate = DetectionCollate()
+
+    from torch.utils.data import DataLoader
+
+    def _loader(ds, sampler, shuffle, drop_last):
+        return DataLoader(
+            ds,
+            batch_size=int(cfg.data.batch_size),
+            shuffle=shuffle,
+            sampler=sampler,
+            num_workers=int(cfg.data.num_workers),
+            pin_memory=bool(getattr(cfg.data, "pin_memory", True)),
+            persistent_workers=(
+                bool(getattr(cfg.data, "persistent_workers", True))
+                if int(cfg.data.num_workers) > 0
+                else False
+            ),
+            prefetch_factor=(
+                int(getattr(cfg.data, "prefetch_factor", 2))
+                if int(cfg.data.num_workers) > 0
+                else None
+            ),
+            worker_init_fn=seed_worker,
+            collate_fn=collate,
+            drop_last=drop_last,
+        )
+
+    train_loader = _loader(
+        ds_train, sampler_train, shuffle=(sampler_train is None), drop_last=True
+    )
+    val_loader = _loader(ds_val, sampler_val, shuffle=False, drop_last=False)
+
+    return train_loader, val_loader, 1
+
+
 # ------------------------------------------------------------------
 # Top-level entry point (unchanged)
 # ------------------------------------------------------------------
@@ -1308,6 +1365,19 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
     if task == "segmentation_probe":
         encoder = build_linear_probe_model(cfg).to(device)
         train_loader, val_loader, num_classes = build_segmentation_probe_loaders(cfg)
+
+        return {
+            "encoder": encoder,
+            "train_loader": train_loader,
+            "val_loader": val_loader,
+            "num_classes": num_classes,
+            "callbacks": callbacks,
+            "device": device,
+        }
+
+    if task == "detection_probe":
+        encoder = build_linear_probe_model(cfg).to(device)
+        train_loader, val_loader, num_classes = build_detection_probe_loaders(cfg)
 
         return {
             "encoder": encoder,

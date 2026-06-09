@@ -75,3 +75,13 @@ class SegmentationCollate:
         images = torch.stack(imgs, dim=0)
         seg_masks = torch.stack(masks, dim=0).long()
         return {"images": images, "masks": seg_masks}
+
+
+class DetectionCollate:
+    def __call__(self, batch: List[Any]) -> Dict[str, Any]:
+        imgs, targets = [], []
+        for image, target in batch:
+            imgs.append(image)
+            targets.append(target)
+        images = torch.stack(imgs, dim=0)
+        return {"images": images, "targets": targets}

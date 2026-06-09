@@ -106,3 +106,58 @@ def build_segmentation_transforms(cfg):
         SegmentationPairTransform(image_size=image_size, train=True),
         SegmentationPairTransform(image_size=image_size, train=False),
     )
+
+
+class DetectionPairTransform:
+    def __init__(self, image_size: int, train: bool) -> None:
+        self.image_size = int(image_size)
+        self.train = bool(train)
+        self.mean = (0.485, 0.456, 0.406)
+        self.std = (0.229, 0.224, 0.225)
+
+    def __call__(self, image, target):
+        width, height = image.size
+        boxes = target["boxes"].clone().float()
+
+        image = TF.resize(
+            image,
+            [self.image_size, self.image_size],
+            interpolation=InterpolationMode.BILINEAR,
+            antialias=True,
+        )
+
+        if boxes.numel() > 0:
+            scale_x = float(self.image_size) / float(width)
+            scale_y = float(self.image_size) / float(height)
+            boxes[:, [0, 2]] *= scale_x
+            boxes[:, [1, 3]] *= scale_y
+
+        if self.train and random.random() < 0.5:
+            image = TF.hflip(image)
+            if boxes.numel() > 0:
+                x0 = boxes[:, 0].clone()
+                x1 = boxes[:, 2].clone()
+                boxes[:, 0] = float(self.image_size) - x1
+                boxes[:, 2] = float(self.image_size) - x0
+
+        if boxes.numel() > 0:
+            boxes[:, 0::2].clamp_(0.0, float(self.image_size))
+            boxes[:, 1::2].clamp_(0.0, float(self.image_size))
+            boxes = boxes / float(self.image_size)
+
+        out = dict(target)
+        out["boxes"] = boxes
+        out["labels"] = target["labels"].long()
+        out["orig_size"] = torch.as_tensor([height, width], dtype=torch.long)
+
+        image = TF.to_tensor(image)
+        image = TF.normalize(image, mean=self.mean, std=self.std)
+        return image, out
+
+
+def build_detection_transforms(cfg):
+    image_size = int(cfg.model.image_size)
+    return (
+        DetectionPairTransform(image_size=image_size, train=True),
+        DetectionPairTransform(image_size=image_size, train=False),
+    )

@@ -1,0 +1,54 @@
+# @package _global_
+#
+# Geometry-configurable early-stopped RSNA pneumonia detection MLP probe.
+# Override model.arch / image_size / patch_size / embed_dim / num_heads / depth
+# from the launcher to match the pretrained encoder geometry.
+
+defaults:
+  - /task: detection_probe
+  - /model: vit_torchvision
+  - /data: rsna_pneumonia_detection
+  - /train: eval_linear
+  - _self_
+
+compile: false
+
+model:
+  arch: vit_small
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+
+data:
+  root: ${oc.env:FAST,/scratch}/datasets/
+  batch_size: 64
+  num_workers: 4
+  download: false
+
+task:
+  head:
+    type: mlp
+    hidden_dim: 512
+    num_layers: 1
+    dropout: 0.2
+  sched:
+    name: step
+    step_size: 20
+    gamma: 0.1
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
+  metric: ap50
+  objectness_loss: focal
+  positive_radius: 0
+  box_weight: 5.0
+  score_threshold: 0.05
+  max_detections: 100
+
+train:
+  epochs: 40
+  lr: 0.05
+  weight_decay: 0.001
+  early_stop_patience: 8
+  early_stop_min_epochs: 10
+  early_stop_min_delta: 0.0

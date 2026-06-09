@@ -17,10 +17,12 @@ from omegaconf import OmegaConf
 
 from ijepa_lite.build import (
     build_callbacks,
+    build_detection_probe_loaders,
     build_linear_probe_loaders,
     build_linear_probe_model,
     build_segmentation_probe_loaders,
 )
+from ijepa_lite.engine.eval_detection import detection_probe_eval
 from ijepa_lite.engine.eval_linear import linear_probe_eval
 from ijepa_lite.engine.eval_segmentation import segmentation_probe_eval
 from ijepa_lite.utils.dist import (
@@ -86,6 +88,11 @@ def parse_args() -> argparse.Namespace:
         help="Experiment name to use for segmentation downstream tasks.",
     )
     p.add_argument(
+        "--detection-experiment",
+        default="downstream_rsna_detection_mlp_earlystop",
+        help="Experiment name to use for detection downstream tasks.",
+    )
+    p.add_argument(
         "--run-suffix",
         default="es_probe",
         help="Suffix appended to per-dataset run names.",
@@ -120,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional data.batch_size override for segmentation downstream tasks.",
     )
     p.add_argument(
+        "--detection-batch-size",
+        type=int,
+        default=None,
+        help="Optional data.batch_size override for detection downstream tasks.",
+    )
+    p.add_argument(
         "--classification-num-workers",
         type=int,
         default=None,
@@ -132,9 +145,33 @@ def parse_args() -> argparse.Namespace:
         help="Optional data.num_workers override for segmentation downstream tasks.",
     )
     p.add_argument(
+        "--detection-num-workers",
+        type=int,
+        default=None,
+        help="Optional data.num_workers override for detection downstream tasks.",
+    )
+    p.add_argument(
         "--no-save-probe-checkpoints",
         action="store_true",
-        help="Do not write linear/segmentation probe head checkpoints; summaries and logs are still written.",
+        help="Do not write probe head checkpoints; summaries and logs are still written.",
+    )
+    p.add_argument(
+        "--train-epochs",
+        type=int,
+        default=None,
+        help="Optional train.epochs override for all downstream tasks.",
+    )
+    p.add_argument(
+        "--train-early-stop-patience",
+        type=int,
+        default=None,
+        help="Optional train.early_stop_patience override for all downstream tasks.",
+    )
+    p.add_argument(
+        "--train-early-stop-min-epochs",
+        type=int,
+        default=None,
+        help="Optional train.early_stop_min_epochs override for all downstream tasks.",
     )
     return p.parse_args()
 
@@ -229,6 +266,8 @@ def _pushd(path: Path):
 
 
 def _dataset_experiment(dataset: str, args: argparse.Namespace) -> str:
+    if dataset in {"rsna_pneumonia_detection"}:
+        return str(args.detection_experiment)
     if dataset in {"vocseg", "siimacr_pneumothorax"}:
         return str(args.segmentation_experiment)
     return str(args.classification_experiment)
@@ -254,6 +293,8 @@ def _model_overrides_from_args(args: argparse.Namespace) -> list[str]:
 
 
 def _dataset_task(dataset: str) -> str:
+    if dataset in {"rsna_pneumonia_detection"}:
+        return "detection_probe"
     if dataset in {"vocseg", "siimacr_pneumothorax"}:
         return "segmentation_probe"
     return "linear_probe"
@@ -264,10 +305,18 @@ def _batch_overrides_for_dataset(
     *,
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    detection_batch_size: int | None,
     classification_num_workers: int | None,
     segmentation_num_workers: int | None,
+    detection_num_workers: int | None,
 ) -> list[str]:
     overrides: list[str] = []
+    if _dataset_task(dataset) == "detection_probe":
+        if detection_batch_size is not None:
+            overrides.append(f"data.batch_size={detection_batch_size}")
+        if detection_num_workers is not None:
+            overrides.append(f"data.num_workers={detection_num_workers}")
+        return overrides
     if _dataset_task(dataset) == "segmentation_probe":
         if segmentation_batch_size is not None:
             overrides.append(f"data.batch_size={segmentation_batch_size}")
@@ -292,8 +341,10 @@ def _build_run_overrides(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    detection_batch_size: int | None,
     classification_num_workers: int | None,
     segmentation_num_workers: int | None,
+    detection_num_workers: int | None,
     args: argparse.Namespace,
 ) -> list[str]:
     overrides = [
@@ -308,14 +359,22 @@ def _build_run_overrides(
         overrides.append(f"task.pool={args.task_pool}")
     if args.no_save_probe_checkpoints:
         overrides.append("train.save_probe_checkpoints=false")
+    if args.train_epochs is not None:
+        overrides.append(f"train.epochs={args.train_epochs}")
+    if args.train_early_stop_patience is not None:
+        overrides.append(f"train.early_stop_patience={args.train_early_stop_patience}")
+    if args.train_early_stop_min_epochs is not None:
+        overrides.append(f"train.early_stop_min_epochs={args.train_early_stop_min_epochs}")
     overrides.extend(model_overrides)
     overrides.extend(
         _batch_overrides_for_dataset(
             dataset,
             classification_batch_size=classification_batch_size,
             segmentation_batch_size=segmentation_batch_size,
+            detection_batch_size=detection_batch_size,
             classification_num_workers=classification_num_workers,
             segmentation_num_workers=segmentation_num_workers,
+            detection_num_workers=detection_num_workers,
         )
     )
     if dataset == "fairface":
@@ -344,8 +403,10 @@ def _run_one_dataset(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
+    detection_batch_size: int | None,
     classification_num_workers: int | None,
     segmentation_num_workers: int | None,
+    detection_num_workers: int | None,
     args: argparse.Namespace,
 ) -> tuple[str, Path, dict[str, Any]]:
     exp_name = f"downstream_{ckpt_label}_{dataset}_{args.run_suffix}"
@@ -359,8 +420,10 @@ def _run_one_dataset(
         model_overrides=model_overrides,
         classification_batch_size=classification_batch_size,
         segmentation_batch_size=segmentation_batch_size,
+        detection_batch_size=detection_batch_size,
         classification_num_workers=classification_num_workers,
         segmentation_num_workers=segmentation_num_workers,
+        detection_num_workers=detection_num_workers,
         args=args,
     )
     cfg = _compose_cfg(config_dir, overrides)
@@ -372,7 +435,20 @@ def _run_one_dataset(
 
     with _pushd(run_dir):
         callbacks = build_callbacks(cfg)
-        if _dataset_task(dataset) == "segmentation_probe":
+        task = _dataset_task(dataset)
+        if task == "detection_probe":
+            train_loader, val_loader, num_classes = build_detection_probe_loaders(cfg)
+            metrics = detection_probe_eval(
+                cfg=cfg,
+                encoder=encoder,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                num_classes=num_classes,
+                callbacks=callbacks,
+                device=next(encoder.parameters()).device,
+            )
+            del train_loader, val_loader, callbacks
+        elif task == "segmentation_probe":
             train_loader, val_loader, num_classes = build_segmentation_probe_loaders(cfg)
             metrics = segmentation_probe_eval(
                 cfg=cfg,
@@ -437,6 +513,16 @@ def _format_checkpoint_table(
                     f"best_val_fg_iou={100.0 * float(metrics.get('best_val_fg_iou', 0.0)):.2f}; "
                     f"val_fg_dice={100.0 * float(metrics.get('val_fg_dice', 0.0)):.2f}; "
                     f"best_val_fg_dice={100.0 * float(metrics.get('best_val_fg_dice', 0.0)):.2f}"
+                )
+            elif metrics["task_kind"] == "detection":
+                metric_name = str(metrics.get("metric_name", "ap50"))
+                notes = (
+                    f"val_ap50={100.0 * float(metrics.get('val_ap50', 0.0)):.2f}; "
+                    f"best_val_ap50={100.0 * float(metrics.get('best_val_ap50', 0.0)):.2f}; "
+                    f"val_froc={100.0 * float(metrics.get('val_froc_mean', 0.0)):.2f}; "
+                    f"best_val_froc={100.0 * float(metrics.get('best_val_froc_mean', 0.0)):.2f}; "
+                    f"image_auroc={100.0 * float(metrics.get('val_image_auroc', 0.0)):.2f}; "
+                    f"num_gt={int(float(metrics.get('num_gt', 0.0)))}"
                 )
             else:
                 metric_name = str(metrics.get("metric_name", "acc1"))
@@ -575,8 +661,10 @@ def main() -> None:
                         model_overrides=model_overrides,
                         classification_batch_size=args.classification_batch_size,
                         segmentation_batch_size=args.segmentation_batch_size,
+                        detection_batch_size=args.detection_batch_size,
                         classification_num_workers=args.classification_num_workers,
                         segmentation_num_workers=args.segmentation_num_workers,
+                        detection_num_workers=args.detection_num_workers,
                         args=args,
                     )
                     _append_summary(

@@ -621,6 +621,130 @@ class SIIMACRPneumothoraxSegmentation(Dataset):
         return image, mask
 
 
+class RSNAPneumoniaDetectionDataset(Dataset):
+    """
+    RSNA Pneumonia Detection Challenge wrapper using pre-converted images.
+
+    Expected default layout under ``root``:
+      rsna-pneumonia-detection/
+        stage_2_train_labels.csv
+        png_images/<patientId>.png
+
+    The CSV can contain multiple positive rows per patient. Negative rows have
+    ``Target=0`` and no boxes. Boxes are returned as absolute xyxy pixel
+    coordinates and should be normalized by the detection transform.
+    """
+
+    _EXTS = {".png", ".jpg", ".jpeg"}
+
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transforms=None,
+        data_dir: str = "rsna-pneumonia-detection",
+        image_dir: str = "png_images",
+        annotations_csv: str = "stage_2_train_labels.csv",
+        val_ratio: float = 0.2,
+        split_seed: int = 0,
+    ) -> None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(
+                f"Unknown split='{split}' for rsna_pneumonia_detection. "
+                "Expected: train|val|test."
+            )
+        self.transforms = transforms
+
+        base = Path(root) / data_dir
+        if not base.exists():
+            base = Path(root)
+        self.image_dir = base / image_dir
+        self.annotations_path = base / annotations_csv
+        if not self.image_dir.is_dir():
+            raise FileNotFoundError(f"RSNA image_dir not found: {self.image_dir}")
+        if not self.annotations_path.is_file():
+            matches = sorted(base.rglob(annotations_csv))
+            if not matches:
+                raise FileNotFoundError(
+                    f"RSNA annotations_csv not found: {self.annotations_path}"
+                )
+            self.annotations_path = matches[0]
+
+        image_by_id = {
+            path.stem: path
+            for path in self.image_dir.rglob("*")
+            if path.suffix.lower() in self._EXTS
+        }
+        if not image_by_id:
+            raise RuntimeError(f"No RSNA images found under {self.image_dir}.")
+
+        boxes_by_id: dict[str, list[list[float]]] = {}
+        seen_ids: set[str] = set()
+        with self.annotations_path.open(newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                patient_id = str(row.get("patientId", "")).strip()
+                if not patient_id:
+                    continue
+                seen_ids.add(patient_id)
+                boxes_by_id.setdefault(patient_id, [])
+                target = int(float(row.get("Target") or 0))
+                if target <= 0:
+                    continue
+                x = float(row.get("x") or 0.0)
+                y = float(row.get("y") or 0.0)
+                w = float(row.get("width") or 0.0)
+                h = float(row.get("height") or 0.0)
+                if w <= 0.0 or h <= 0.0:
+                    continue
+                boxes_by_id[patient_id].append([x, y, x + w, y + h])
+
+        patient_ids = sorted(pid for pid in seen_ids if pid in image_by_id)
+        missing = sorted(pid for pid in seen_ids if pid not in image_by_id)
+        if missing:
+            print(
+                "[RSNAPneumoniaDetectionDataset] ignoring "
+                f"{len(missing)} annotated patients without converted images."
+            )
+        if not patient_ids:
+            raise RuntimeError(
+                "No RSNA annotated patients with matching converted images found."
+            )
+
+        rng = random.Random(int(split_seed))
+        shuffled = list(patient_ids)
+        rng.shuffle(shuffled)
+        n_val = max(1, int(round(len(shuffled) * float(val_ratio))))
+        val_ids = set(shuffled[:n_val])
+        if split == "train":
+            selected = [pid for pid in patient_ids if pid not in val_ids]
+        else:
+            selected = [pid for pid in patient_ids if pid in val_ids]
+
+        if not selected:
+            raise RuntimeError(f"No RSNA samples available for split='{split}'.")
+
+        self.samples = [
+            (pid, image_by_id[pid], boxes_by_id.get(pid, [])) for pid in selected
+        ]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        patient_id, image_path, boxes = self.samples[idx]
+        image = Image.open(image_path).convert("RGB")
+        target = {
+            "boxes": torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4),
+            "labels": torch.ones((len(boxes),), dtype=torch.long),
+            "image_id": patient_id,
+            "orig_size": torch.as_tensor([image.height, image.width], dtype=torch.long),
+        }
+        if self.transforms is not None:
+            return self.transforms(image, target)
+        return image, target
+
+
 class CLEVRCountDataset(Dataset):
     """
     Downstream classification wrapper for torchvision CLEVRClassification.
@@ -1081,4 +1205,34 @@ def build_segmentation_dataset(cfg, split: str, transforms):
         image_set=str(split),
         download=False,
         transforms=transforms,
+    )
+
+
+def build_detection_dataset(cfg, split: str, transforms):
+    name = str(cfg.name).lower()
+    root = str(cfg.root)
+    download = bool(getattr(cfg, "download", True))
+
+    if name == "rsna_pneumonia_detection":
+        if download:
+            raise ValueError(
+                "rsna_pneumonia_detection cannot be downloaded automatically. "
+                "Pre-convert RSNA DICOMs to PNG/JPG under data.root first."
+            )
+        barrier()
+        return RSNAPneumoniaDetectionDataset(
+            root=root,
+            split=split,
+            transforms=transforms,
+            data_dir=str(getattr(cfg, "data_dir", "rsna-pneumonia-detection")),
+            image_dir=str(getattr(cfg, "image_dir", "png_images")),
+            annotations_csv=str(
+                getattr(cfg, "annotations_csv", "stage_2_train_labels.csv")
+            ),
+            val_ratio=float(getattr(cfg, "val_ratio", 0.2)),
+            split_seed=int(getattr(cfg, "split_seed", 0)),
+        )
+
+    raise ValueError(
+        f"Unknown detection dataset name={name}. Add it to build_detection_dataset()."
     )

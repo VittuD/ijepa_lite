@@ -1,0 +1,19 @@
+name: rsna_pneumonia_detection
+root: data
+
+train_split: train
+val_split: val
+
+data_dir: rsna-pneumonia-detection
+image_dir: png_images
+annotations_csv: stage_2_train_labels.csv
+val_ratio: 0.2
+split_seed: 0
+
+download: false
+
+batch_size: 64
+num_workers: 4
+pin_memory: true
+prefetch_factor: 2
+persistent_workers: true
