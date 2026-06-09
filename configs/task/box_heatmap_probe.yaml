@@ -1,0 +1,31 @@
+name: box_heatmap_probe
+
+# Path to a pretraining checkpoint produced by this repo or original I-JEPA weights.
+pretrained_ckpt: null
+
+# Which encoder weights to use from the checkpoint.
+encoder: auto
+
+# Dense token feature mode:
+# - mean: final-layer patch tokens, shape [B, N, D]
+# - last4_mean: concatenate last-4 layer patch tokens, shape [B, N, 4D]
+pool: mean
+
+amp: true
+metric: patch_ap
+
+# Rasterize each RSNA box into the patch grid and optionally dilate by this many cells.
+positive_radius: 0
+
+# Loss options:
+# - focal: focal BCE over patch heatmap cells
+# - bce: standard BCE over patch heatmap cells
+# - weighted_bce: BCE with positive-cell upweighting
+loss: focal
+focal_alpha: 0.25
+focal_gamma: 2.0
+bce_weight: 1.0
+dice_weight: 1.0
+
+# Threshold used only for reporting heatmap Dice.
+threshold: 0.5

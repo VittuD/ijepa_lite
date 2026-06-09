@@ -16,13 +16,13 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
 from ijepa_lite.build import (
+    build_box_heatmap_probe_loaders,
     build_callbacks,
-    build_detection_probe_loaders,
     build_linear_probe_loaders,
     build_linear_probe_model,
     build_segmentation_probe_loaders,
 )
-from ijepa_lite.engine.eval_detection import detection_probe_eval
+from ijepa_lite.engine.eval_box_heatmap import box_heatmap_probe_eval
 from ijepa_lite.engine.eval_linear import linear_probe_eval
 from ijepa_lite.engine.eval_segmentation import segmentation_probe_eval
 from ijepa_lite.utils.dist import (
@@ -96,9 +96,9 @@ def parse_args() -> argparse.Namespace:
         help="Experiment name to use for segmentation downstream tasks.",
     )
     p.add_argument(
-        "--detection-experiment",
-        default="downstream_rsna_detection_mlp_earlystop",
-        help="Experiment name to use for detection downstream tasks.",
+        "--heatmap-experiment",
+        default="downstream_rsna_box_heatmap_mlp_earlystop",
+        help="Experiment name to use for box-heatmap downstream tasks.",
     )
     p.add_argument(
         "--run-suffix",
@@ -135,10 +135,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional data.batch_size override for segmentation downstream tasks.",
     )
     p.add_argument(
-        "--detection-batch-size",
+        "--heatmap-batch-size",
         type=int,
         default=None,
-        help="Optional data.batch_size override for detection downstream tasks.",
+        help="Optional data.batch_size override for box-heatmap downstream tasks.",
     )
     p.add_argument(
         "--classification-num-workers",
@@ -153,10 +153,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional data.num_workers override for segmentation downstream tasks.",
     )
     p.add_argument(
-        "--detection-num-workers",
+        "--heatmap-num-workers",
         type=int,
         default=None,
-        help="Optional data.num_workers override for detection downstream tasks.",
+        help="Optional data.num_workers override for box-heatmap downstream tasks.",
     )
     p.add_argument(
         "--no-save-probe-checkpoints",
@@ -188,10 +188,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional train.early_stop_min_epochs override for all downstream tasks.",
     )
     p.add_argument(
-        "--detection-positive-radius",
+        "--heatmap-positive-radius",
         type=int,
         default=None,
-        help="Optional task.positive_radius override for detection downstream tasks.",
+        help="Optional task.positive_radius override for box-heatmap downstream tasks.",
     )
     return p.parse_args()
 
@@ -286,7 +286,7 @@ def _pushd(path: Path):
 
 def _dataset_experiment(dataset: str, args: argparse.Namespace) -> str:
     if dataset in {"rsna_pneumonia_detection"}:
-        return str(args.detection_experiment)
+        return str(args.heatmap_experiment)
     if dataset in {"vocseg", "siimacr_pneumothorax"}:
         return str(args.segmentation_experiment)
     return str(args.classification_experiment)
@@ -313,7 +313,7 @@ def _model_overrides_from_args(args: argparse.Namespace) -> list[str]:
 
 def _dataset_task(dataset: str) -> str:
     if dataset in {"rsna_pneumonia_detection"}:
-        return "detection_probe"
+        return "box_heatmap_probe"
     if dataset in {"vocseg", "siimacr_pneumothorax"}:
         return "segmentation_probe"
     return "linear_probe"
@@ -324,17 +324,17 @@ def _batch_overrides_for_dataset(
     *,
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
-    detection_batch_size: int | None,
+    heatmap_batch_size: int | None,
     classification_num_workers: int | None,
     segmentation_num_workers: int | None,
-    detection_num_workers: int | None,
+    heatmap_num_workers: int | None,
 ) -> list[str]:
     overrides: list[str] = []
-    if _dataset_task(dataset) == "detection_probe":
-        if detection_batch_size is not None:
-            overrides.append(f"data.batch_size={detection_batch_size}")
-        if detection_num_workers is not None:
-            overrides.append(f"data.num_workers={detection_num_workers}")
+    if _dataset_task(dataset) == "box_heatmap_probe":
+        if heatmap_batch_size is not None:
+            overrides.append(f"data.batch_size={heatmap_batch_size}")
+        if heatmap_num_workers is not None:
+            overrides.append(f"data.num_workers={heatmap_num_workers}")
         return overrides
     if _dataset_task(dataset) == "segmentation_probe":
         if segmentation_batch_size is not None:
@@ -360,10 +360,10 @@ def _build_run_overrides(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
-    detection_batch_size: int | None,
+    heatmap_batch_size: int | None,
     classification_num_workers: int | None,
     segmentation_num_workers: int | None,
-    detection_num_workers: int | None,
+    heatmap_num_workers: int | None,
     args: argparse.Namespace,
 ) -> list[str]:
     overrides = [
@@ -392,10 +392,10 @@ def _build_run_overrides(
             dataset,
             classification_batch_size=classification_batch_size,
             segmentation_batch_size=segmentation_batch_size,
-            detection_batch_size=detection_batch_size,
+            heatmap_batch_size=heatmap_batch_size,
             classification_num_workers=classification_num_workers,
             segmentation_num_workers=segmentation_num_workers,
-            detection_num_workers=detection_num_workers,
+            heatmap_num_workers=heatmap_num_workers,
         )
     )
     if dataset == "fairface":
@@ -408,10 +408,10 @@ def _build_run_overrides(
         overrides.append("task.ce_weight=1.0")
         overrides.append("task.dice_weight=1.0")
     if (
-        _dataset_task(dataset) == "detection_probe"
-        and args.detection_positive_radius is not None
+        _dataset_task(dataset) == "box_heatmap_probe"
+        and args.heatmap_positive_radius is not None
     ):
-        overrides.append(f"task.positive_radius={args.detection_positive_radius}")
+        overrides.append(f"task.positive_radius={args.heatmap_positive_radius}")
     return overrides
 
 
@@ -429,10 +429,10 @@ def _run_one_dataset(
     model_overrides: list[str],
     classification_batch_size: int | None,
     segmentation_batch_size: int | None,
-    detection_batch_size: int | None,
+    heatmap_batch_size: int | None,
     classification_num_workers: int | None,
     segmentation_num_workers: int | None,
-    detection_num_workers: int | None,
+    heatmap_num_workers: int | None,
     args: argparse.Namespace,
 ) -> tuple[str, Path, dict[str, Any]]:
     exp_name = f"downstream_{ckpt_label}_{dataset}_{args.run_suffix}"
@@ -446,10 +446,10 @@ def _run_one_dataset(
         model_overrides=model_overrides,
         classification_batch_size=classification_batch_size,
         segmentation_batch_size=segmentation_batch_size,
-        detection_batch_size=detection_batch_size,
+        heatmap_batch_size=heatmap_batch_size,
         classification_num_workers=classification_num_workers,
         segmentation_num_workers=segmentation_num_workers,
-        detection_num_workers=detection_num_workers,
+        heatmap_num_workers=heatmap_num_workers,
         args=args,
     )
     cfg = _compose_cfg(config_dir, overrides)
@@ -462,9 +462,9 @@ def _run_one_dataset(
     with _pushd(run_dir):
         callbacks = build_callbacks(cfg)
         task = _dataset_task(dataset)
-        if task == "detection_probe":
-            train_loader, val_loader, num_classes = build_detection_probe_loaders(cfg)
-            metrics = detection_probe_eval(
+        if task == "box_heatmap_probe":
+            train_loader, val_loader, num_classes = build_box_heatmap_probe_loaders(cfg)
+            metrics = box_heatmap_probe_eval(
                 cfg=cfg,
                 encoder=encoder,
                 train_loader=train_loader,
@@ -540,17 +540,15 @@ def _format_checkpoint_table(
                     f"val_fg_dice={100.0 * float(metrics.get('val_fg_dice', 0.0)):.2f}; "
                     f"best_val_fg_dice={100.0 * float(metrics.get('best_val_fg_dice', 0.0)):.2f}"
                 )
-            elif metrics["task_kind"] == "detection":
-                metric_name = str(metrics.get("metric_name", "map"))
+            elif metrics["task_kind"] == "box_heatmap":
+                metric_name = str(metrics.get("metric_name", "patch_ap"))
                 notes = (
-                    f"val_map={100.0 * float(metrics.get('val_map', 0.0)):.2f}; "
-                    f"best_val_map={100.0 * float(metrics.get('best_val_map', 0.0)):.2f}; "
-                    f"val_ap50={100.0 * float(metrics.get('val_ap50', 0.0)):.2f}; "
-                    f"best_val_ap50={100.0 * float(metrics.get('best_val_ap50', 0.0)):.2f}; "
-                    f"val_froc={100.0 * float(metrics.get('val_froc_mean', 0.0)):.2f}; "
-                    f"best_val_froc={100.0 * float(metrics.get('best_val_froc_mean', 0.0)):.2f}; "
+                    f"val_patch_ap={100.0 * float(metrics.get('val_patch_ap', 0.0)):.2f}; "
+                    f"best_val_patch_ap={100.0 * float(metrics.get('best_val_patch_ap', 0.0)):.2f}; "
+                    f"patch_auroc={100.0 * float(metrics.get('val_patch_auroc', 0.0)):.2f}; "
+                    f"heatmap_dice={100.0 * float(metrics.get('val_heatmap_dice', 0.0)):.2f}; "
                     f"image_auroc={100.0 * float(metrics.get('val_image_auroc', 0.0)):.2f}; "
-                    f"num_gt={int(float(metrics.get('num_gt', 0.0)))}"
+                    f"pos_patches={int(float(metrics.get('num_positive_patches', 0.0)))}"
                 )
             else:
                 metric_name = str(metrics.get("metric_name", "acc1"))
@@ -695,10 +693,10 @@ def main() -> None:
                         model_overrides=model_overrides,
                         classification_batch_size=args.classification_batch_size,
                         segmentation_batch_size=args.segmentation_batch_size,
-                        detection_batch_size=args.detection_batch_size,
+                        heatmap_batch_size=args.heatmap_batch_size,
                         classification_num_workers=args.classification_num_workers,
                         segmentation_num_workers=args.segmentation_num_workers,
-                        detection_num_workers=args.detection_num_workers,
+                        heatmap_num_workers=args.heatmap_num_workers,
                         args=args,
                     )
                     _append_summary(

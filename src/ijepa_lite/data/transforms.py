@@ -108,7 +108,7 @@ def build_segmentation_transforms(cfg):
     )
 
 
-class DetectionPairTransform:
+class BoxTargetTransform:
     def __init__(self, image_size: int, train: bool) -> None:
         self.image_size = int(image_size)
         self.train = bool(train)
@@ -155,9 +155,9 @@ class DetectionPairTransform:
         return image, out
 
 
-def build_detection_transforms(cfg):
+def build_box_target_transforms(cfg):
     image_size = int(cfg.model.image_size)
     return (
-        DetectionPairTransform(image_size=image_size, train=True),
-        DetectionPairTransform(image_size=image_size, train=False),
+        BoxTargetTransform(image_size=image_size, train=True),
+        BoxTargetTransform(image_size=image_size, train=False),
     )

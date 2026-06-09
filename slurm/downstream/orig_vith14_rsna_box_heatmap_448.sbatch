@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-rsna-det-448
+#SBATCH --job-name=ijepa-rsna-heat-448
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
@@ -8,19 +8,19 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=02:00:00
-#SBATCH --output=sbatch_logs/downstream/rsna_detection_orig_vith14_448/%x_%j.out
-#SBATCH --error=sbatch_logs/downstream/rsna_detection_orig_vith14_448/%x_%j.err
+#SBATCH --output=sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448/%x_%j.out
+#SBATCH --error=sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# RSNA pneumonia detection probe for original I-JEPA ImageNet-1K ViT-H/14.
+# RSNA pneumonia box-heatmap probe for original I-JEPA ImageNet-1K ViT-H/14.
 #
 # Expected data layout:
 #   ${DATA_ROOT}/rsna-pneumonia-detection/stage_2_train_labels.csv
 #   ${DATA_ROOT}/rsna-pneumonia-detection/png_images/<patientId>.png
 #
 # Submit:
-#   mkdir -p sbatch_logs/downstream/rsna_detection_orig_vith14_448
-#   sbatch slurm/downstream/orig_vith14_rsna_detection_dbg.sbatch
+#   mkdir -p sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448
+#   sbatch slurm/downstream/orig_vith14_rsna_box_heatmap_448.sbatch
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -45,13 +45,13 @@ export NPROC_PER_NODE=4
 REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${DATA_ROOT:-${FAST:-/scratch}/datasets}"
 OUTPUT_ROOT="${WORK}/vitturini/outputs"
-LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_detection_orig_vith14_448"
-SUMMARY_PATH="${LOG_DIR}/orig_vith14_rsna_detection_448_summary.txt"
+LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448"
+SUMMARY_PATH="${LOG_DIR}/orig_vith14_rsna_box_heatmap_448_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k_ijepalite"
 CKPT_PATH="${WORK}/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.ijepa_lite.pt"
 
-DETECTION_BATCH_SIZE=32
-DETECTION_NUM_WORKERS=4
+HEATMAP_BATCH_SIZE=32
+HEATMAP_NUM_WORKERS=4
 
 mkdir -p "${LOG_DIR}"
 
@@ -72,9 +72,9 @@ CMD=(
   --train-epochs 20
   --train-early-stop-patience 0
   --train-early-stop-min-epochs 0
-  --detection-positive-radius 1
-  --detection-experiment downstream_rsna_detection_mlp_earlystop
-  --run-suffix rsna_detection_448_r1
+  --heatmap-positive-radius 1
+  --heatmap-experiment downstream_rsna_box_heatmap_mlp_earlystop
+  --run-suffix rsna_box_heatmap_448_r1
   --task-pool last4_mean
   --model-arch vit_huge
   --model-image-size 448
@@ -83,8 +83,8 @@ CMD=(
   --model-num-heads 16
   --model-depth 32
   --model-use-cls-token false
-  --detection-batch-size "${DETECTION_BATCH_SIZE}"
-  --detection-num-workers "${DETECTION_NUM_WORKERS}"
+  --heatmap-batch-size "${HEATMAP_BATCH_SIZE}"
+  --heatmap-num-workers "${HEATMAP_NUM_WORKERS}"
   --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
   --dataset rsna_pneumonia_detection
 )
@@ -95,8 +95,8 @@ echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "LOG_DIR=${LOG_DIR}"
 echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CKPT_PATH=${CKPT_PATH}"
-echo "DETECTION_BATCH_SIZE=${DETECTION_BATCH_SIZE}"
-echo "DETECTION_NUM_WORKERS=${DETECTION_NUM_WORKERS}"
+echo "HEATMAP_BATCH_SIZE=${HEATMAP_BATCH_SIZE}"
+echo "HEATMAP_NUM_WORKERS=${HEATMAP_NUM_WORKERS}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
 nvidia-smi -L
 

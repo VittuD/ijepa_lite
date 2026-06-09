@@ -15,18 +15,18 @@ from ijepa_lite.callbacks.handler import CallbackHandler
 from ijepa_lite.callbacks.progress_cb import ProgressCallback
 from ijepa_lite.data.classes import infer_num_classes
 from ijepa_lite.data.collate import (
-    DetectionCollate,
+    BoxTargetCollate,
     IJEPACollate,
     SegmentationCollate,
     SupervisedCollate,
 )
 from ijepa_lite.data.datasets import (
+    build_box_target_dataset,
     build_dataset,
-    build_detection_dataset,
     build_segmentation_dataset,
 )
 from ijepa_lite.data.transforms import (
-    build_detection_transforms,
+    build_box_target_transforms,
     build_linear_probe_transforms,
     build_pretrain_transform,
     build_segmentation_transforms,
@@ -1216,19 +1216,19 @@ def build_segmentation_probe_loaders(cfg):
     return train_loader, val_loader, num_classes
 
 
-def build_detection_probe_loaders(cfg):
-    train_tfm, val_tfm = build_detection_transforms(cfg)
+def build_box_heatmap_probe_loaders(cfg):
+    train_tfm, val_tfm = build_box_target_transforms(cfg)
 
     train_split = str(getattr(cfg.data, "train_split", "train"))
     val_split = str(getattr(cfg.data, "val_split", "val"))
 
-    ds_train = build_detection_dataset(cfg.data, split=train_split, transforms=train_tfm)
-    ds_val = build_detection_dataset(cfg.data, split=val_split, transforms=val_tfm)
+    ds_train = build_box_target_dataset(cfg.data, split=train_split, transforms=train_tfm)
+    ds_val = build_box_target_dataset(cfg.data, split=val_split, transforms=val_tfm)
 
     sampler_train = _build_sampler(ds_train, shuffle=True, drop_last=True)
     sampler_val = _build_sampler(ds_val, shuffle=False, drop_last=False)
 
-    collate = DetectionCollate()
+    collate = BoxTargetCollate()
 
     from torch.utils.data import DataLoader
 
@@ -1375,9 +1375,9 @@ def build_for_task(cfg, device: torch.device) -> Dict[str, Any]:
             "device": device,
         }
 
-    if task == "detection_probe":
+    if task == "box_heatmap_probe":
         encoder = build_linear_probe_model(cfg).to(device)
-        train_loader, val_loader, num_classes = build_detection_probe_loaders(cfg)
+        train_loader, val_loader, num_classes = build_box_heatmap_probe_loaders(cfg)
 
         return {
             "encoder": encoder,

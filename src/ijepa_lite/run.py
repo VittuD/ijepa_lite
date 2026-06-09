@@ -7,7 +7,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from ijepa_lite.build import build_for_task
-from ijepa_lite.engine.eval_detection import detection_probe_eval
+from ijepa_lite.engine.eval_box_heatmap import box_heatmap_probe_eval
 from ijepa_lite.engine.eval_linear import linear_probe_eval
 from ijepa_lite.engine.eval_segmentation import segmentation_probe_eval
 from ijepa_lite.engine.eval_suite import eval_suite
@@ -70,8 +70,8 @@ def main(cfg: DictConfig) -> None:
             linear_probe_eval(cfg, **bundle)
         elif task == "segmentation_probe":
             segmentation_probe_eval(cfg, **bundle)
-        elif task == "detection_probe":
-            detection_probe_eval(cfg, **bundle)
+        elif task == "box_heatmap_probe":
+            box_heatmap_probe_eval(cfg, **bundle)
         elif task == "eval_suite":
             eval_suite(cfg, **bundle)
         else:

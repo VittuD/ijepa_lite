@@ -633,7 +633,7 @@ class RSNAPneumoniaDetectionDataset(Dataset):
 
     The CSV can contain multiple positive rows per patient. Negative rows have
     ``Target=0`` and no boxes. Boxes are returned as absolute xyxy pixel
-    coordinates and should be normalized by the detection transform.
+    coordinates and should be normalized by the box-target transform.
     """
 
     _EXTS = {".png", ".jpg", ".jpeg"}
@@ -1231,7 +1231,7 @@ def build_segmentation_dataset(cfg, split: str, transforms):
     )
 
 
-def build_detection_dataset(cfg, split: str, transforms):
+def build_box_target_dataset(cfg, split: str, transforms):
     name = str(cfg.name).lower()
     root = str(cfg.root)
     download = bool(getattr(cfg, "download", True))
@@ -1257,5 +1257,5 @@ def build_detection_dataset(cfg, split: str, transforms):
         )
 
     raise ValueError(
-        f"Unknown detection dataset name={name}. Add it to build_detection_dataset()."
+        f"Unknown box-target dataset name={name}. Add it to build_box_target_dataset()."
     )

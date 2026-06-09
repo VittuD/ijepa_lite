@@ -77,7 +77,7 @@ class SegmentationCollate:
         return {"images": images, "masks": seg_masks}
 
 
-class DetectionCollate:
+class BoxTargetCollate:
     def __call__(self, batch: List[Any]) -> Dict[str, Any]:
         imgs, targets = [], []
         for image, target in batch:
