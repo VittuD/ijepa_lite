@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-rsna-heat-448
+#SBATCH --job-name=ijepa-rsna-heat-224
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
-#SBATCH --output=sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448/%x_%j.out
-#SBATCH --error=sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448/%x_%j.err
+#SBATCH --time=00:30:00
+#SBATCH --output=sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_224_fast/%x_%j.out
+#SBATCH --error=sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_224_fast/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # RSNA pneumonia box-heatmap probe for original I-JEPA ImageNet-1K ViT-H/14.
@@ -19,8 +19,8 @@
 #   ${DATA_ROOT}/rsna-pneumonia-detection/png_images/<patientId>.png
 #
 # Submit:
-#   mkdir -p sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448
-#   sbatch slurm/downstream/orig_vith14_rsna_box_heatmap_448.sbatch
+#   mkdir -p sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_224_fast
+#   sbatch slurm/downstream/orig_vith14_rsna_box_heatmap_224_fast.sbatch
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -45,12 +45,12 @@ export NPROC_PER_NODE=4
 REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${DATA_ROOT:-${FAST:-/scratch}/datasets}"
 OUTPUT_ROOT="${WORK}/vitturini/outputs"
-LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_448"
-SUMMARY_PATH="${LOG_DIR}/orig_vith14_rsna_box_heatmap_448_summary.txt"
+LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_box_heatmap_orig_vith14_224_fast"
+SUMMARY_PATH="${LOG_DIR}/orig_vith14_rsna_box_heatmap_224_fast_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k_ijepalite"
 CKPT_PATH="${WORK}/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.ijepa_lite.pt"
 
-HEATMAP_BATCH_SIZE=32
+HEATMAP_BATCH_SIZE=128
 HEATMAP_NUM_WORKERS=4
 
 mkdir -p "${LOG_DIR}"
@@ -74,10 +74,10 @@ CMD=(
   --train-early-stop-min-epochs 0
   --heatmap-positive-radius 1
   --heatmap-experiment downstream_rsna_box_heatmap_mlp_earlystop
-  --run-suffix rsna_box_heatmap_448_r1
+  --run-suffix rsna_box_heatmap_224_fast_r1
   --task-pool last4_mean
   --model-arch vit_huge
-  --model-image-size 448
+  --model-image-size 224
   --model-patch-size 14
   --model-embed-dim 1280
   --model-num-heads 16
