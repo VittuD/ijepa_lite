@@ -12,7 +12,7 @@ encoder: auto
 pool: mean
 
 amp: true
-metric: ap50
+metric: map
 
 # One-anchor-per-patch assignment. positive_radius=0 assigns only the GT center cell.
 positive_radius: 0
@@ -27,6 +27,7 @@ max_box_size: 1.0
 
 # Evaluation.
 ap_iou_threshold: 0.5
+map_iou_thresholds: [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75]
 score_threshold: 0.05
 objectness_recall_threshold: 0.05
 nms_iou_threshold: 0.5

@@ -46,6 +46,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--repo-root", required=True, help="Absolute repo root.")
     p.add_argument("--data-root", required=True, help="Dataset root.")
     p.add_argument(
+        "--output-root",
+        default=None,
+        help=(
+            "Root directory for downstream run outputs. Defaults to "
+            "<repo-root>/../outputs."
+        ),
+    )
+    p.add_argument(
         "--checkpoint",
         action="append",
         required=True,
@@ -199,7 +207,7 @@ def _compose_cfg(config_dir: Path, overrides: list[str]):
     return cfg
 
 
-def _make_run_dir(repo_root: Path, exp_name: str) -> Path:
+def _make_run_dir(output_root: Path, exp_name: str) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
     if is_distributed():
         obj = [stamp] if is_rank0() else [None]
@@ -207,8 +215,7 @@ def _make_run_dir(repo_root: Path, exp_name: str) -> Path:
         stamp = str(obj[0])
     day, clock = stamp.split("/", 1)
     run_dir = (
-        repo_root
-        / "outputs"
+        output_root
         / day
         / f"{clock}_{exp_name}"
         / "rank0"
@@ -391,7 +398,7 @@ def _build_run_overrides(
 
 def _run_one_dataset(
     *,
-    repo_root: Path,
+    output_root: Path,
     config_dir: Path,
     encoder: torch.nn.Module,
     dataset: str,
@@ -427,7 +434,7 @@ def _run_one_dataset(
         args=args,
     )
     cfg = _compose_cfg(config_dir, overrides)
-    run_dir = _make_run_dir(repo_root, exp_name)
+    run_dir = _make_run_dir(output_root, exp_name)
     _write_hydra_snapshots(run_dir, cfg, overrides)
 
     # Reset RNG so each probe behaves like an independent one-off job.
@@ -515,8 +522,10 @@ def _format_checkpoint_table(
                     f"best_val_fg_dice={100.0 * float(metrics.get('best_val_fg_dice', 0.0)):.2f}"
                 )
             elif metrics["task_kind"] == "detection":
-                metric_name = str(metrics.get("metric_name", "ap50"))
+                metric_name = str(metrics.get("metric_name", "map"))
                 notes = (
+                    f"val_map={100.0 * float(metrics.get('val_map', 0.0)):.2f}; "
+                    f"best_val_map={100.0 * float(metrics.get('best_val_map', 0.0)):.2f}; "
                     f"val_ap50={100.0 * float(metrics.get('val_ap50', 0.0)):.2f}; "
                     f"best_val_ap50={100.0 * float(metrics.get('best_val_ap50', 0.0)):.2f}; "
                     f"val_froc={100.0 * float(metrics.get('val_froc_mean', 0.0)):.2f}; "
@@ -581,6 +590,11 @@ def main() -> None:
     args = parse_args()
 
     repo_root = Path(args.repo_root).resolve()
+    output_root = (
+        Path(args.output_root).resolve()
+        if args.output_root is not None
+        else (repo_root.parent / "outputs").resolve()
+    )
     config_dir = repo_root / "configs"
     summary_path = (
         Path(args.summary_path).resolve() if args.summary_path is not None else None
@@ -608,7 +622,8 @@ def main() -> None:
         (
             "starting downstream sweep "
             f"checkpoints={len(checkpoints)} datasets={len(datasets)} "
-            f"device={device} world_size={dist.get_world_size() if is_distributed() else 1}"
+            f"device={device} world_size={dist.get_world_size() if is_distributed() else 1} "
+            f"output_root={output_root}"
         ),
     )
 
@@ -649,7 +664,7 @@ def main() -> None:
                 try:
                     _append_summary(summary_path, f"start ckpt={ckpt_label} dataset={dataset}")
                     exp_name, run_dir, metrics = _run_one_dataset(
-                        repo_root=repo_root,
+                        output_root=output_root,
                         config_dir=config_dir,
                         encoder=encoder,
                         dataset=dataset,

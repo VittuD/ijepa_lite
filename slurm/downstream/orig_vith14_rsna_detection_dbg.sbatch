@@ -44,6 +44,7 @@ export NPROC_PER_NODE=4
 
 REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${DATA_ROOT:-${FAST:-/scratch}/datasets}"
+OUTPUT_ROOT="${WORK}/vitturini/outputs"
 LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_detection_orig_vith14_dbg"
 SUMMARY_PATH="${LOG_DIR}/orig_vith14_rsna_detection_dbg_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k_ijepalite"
@@ -63,6 +64,7 @@ CMD=(
   python -m torch.distributed.run --standalone --nproc_per_node "${NPROC_PER_NODE}" -m ijepa_lite.scripts.downstream_sweep
   --repo-root "$REPO_ROOT"
   --data-root "$DATA_ROOT"
+  --output-root "$OUTPUT_ROOT"
   --summary-path "$SUMMARY_PATH"
   --logger-mode offline
   --continue-on-error
@@ -88,6 +90,7 @@ CMD=(
 
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
+echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "LOG_DIR=${LOG_DIR}"
 echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CKPT_PATH=${CKPT_PATH}"

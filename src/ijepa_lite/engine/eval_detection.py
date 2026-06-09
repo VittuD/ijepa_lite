@@ -303,15 +303,12 @@ def _detection_metrics(
     records: list[dict[str, Any]],
     *,
     iou_threshold: float,
+    map_iou_thresholds: list[float],
     froc_fp_per_image: list[float],
 ) -> dict[str, float]:
     records = _gather_records(records)
     num_images = max(1, len(records))
     gt_by_image = {record["image_id"]: record["gt_boxes"] for record in records}
-    matched = {
-        image_id: torch.zeros((gt.shape[0],), dtype=torch.bool)
-        for image_id, gt in gt_by_image.items()
-    }
     total_gt = int(sum(gt.shape[0] for gt in gt_by_image.values()))
 
     preds = []
@@ -327,28 +324,35 @@ def _detection_metrics(
         image_targets.append(1 if record["gt_boxes"].numel() > 0 else 0)
 
     preds.sort(key=lambda item: item[0], reverse=True)
-    tp, fp = [], []
-    for _, image_id, box in preds:
-        gt = gt_by_image[image_id]
-        if gt.numel() == 0:
-            tp.append(0.0)
-            fp.append(1.0)
-            continue
-        ious = _box_iou(box.unsqueeze(0), gt).squeeze(0)
-        best_iou, best_idx = ious.max(dim=0)
-        if float(best_iou.item()) >= float(iou_threshold) and not matched[image_id][best_idx]:
-            matched[image_id][best_idx] = True
-            tp.append(1.0)
-            fp.append(0.0)
-        else:
-            tp.append(0.0)
-            fp.append(1.0)
 
-    if total_gt <= 0 or not preds:
-        ap50 = 0.0
-        froc_mean = 0.0
-        froc_values = {float(thr): 0.0 for thr in froc_fp_per_image}
-    else:
+    def _ap_curve_for_iou(threshold: float) -> tuple[float, torch.Tensor, torch.Tensor]:
+        if total_gt <= 0 or not preds:
+            empty = torch.empty((0,), dtype=torch.float64)
+            return 0.0, empty, empty
+        matched = {
+            image_id: torch.zeros((gt.shape[0],), dtype=torch.bool)
+            for image_id, gt in gt_by_image.items()
+        }
+        tp, fp = [], []
+        for _, image_id, box in preds:
+            gt = gt_by_image[image_id]
+            if gt.numel() == 0:
+                tp.append(0.0)
+                fp.append(1.0)
+                continue
+            ious = _box_iou(box.unsqueeze(0), gt).squeeze(0)
+            best_iou, best_idx = ious.max(dim=0)
+            if (
+                float(best_iou.item()) >= float(threshold)
+                and not matched[image_id][best_idx]
+            ):
+                matched[image_id][best_idx] = True
+                tp.append(1.0)
+                fp.append(0.0)
+            else:
+                tp.append(0.0)
+                fp.append(1.0)
+
         tp_t = torch.as_tensor(tp, dtype=torch.float64).cumsum(0)
         fp_t = torch.as_tensor(fp, dtype=torch.float64).cumsum(0)
         recall = tp_t / float(total_gt)
@@ -358,18 +362,33 @@ def _detection_metrics(
         for idx in range(mpre.numel() - 2, -1, -1):
             mpre[idx] = torch.maximum(mpre[idx], mpre[idx + 1])
         changing = torch.where(mrec[1:] != mrec[:-1])[0]
-        ap50 = float(((mrec[changing + 1] - mrec[changing]) * mpre[changing + 1]).sum().item())
+        ap = float(
+            ((mrec[changing + 1] - mrec[changing]) * mpre[changing + 1]).sum().item()
+        )
+        return ap, recall, fp_t
 
+    ap50, recall_for_froc, fp_for_froc = _ap_curve_for_iou(iou_threshold)
+    map_thresholds = [float(thr) for thr in map_iou_thresholds]
+    if not map_thresholds:
+        map_thresholds = [float(iou_threshold)]
+    ap_values = [_ap_curve_for_iou(thr)[0] for thr in map_thresholds]
+    map_value = float(sum(ap_values) / max(1, len(ap_values)))
+
+    if total_gt <= 0 or recall_for_froc.numel() == 0:
+        froc_mean = 0.0
+        froc_values = {float(thr): 0.0 for thr in froc_fp_per_image}
+    else:
         froc_values = {}
-        fp_per_image = fp_t / float(num_images)
+        fp_per_image = fp_for_froc / float(num_images)
         for threshold in froc_fp_per_image:
             valid = fp_per_image <= float(threshold)
             froc_values[float(threshold)] = (
-                float(recall[valid].max().item()) if valid.any() else 0.0
+                float(recall_for_froc[valid].max().item()) if valid.any() else 0.0
             )
         froc_mean = float(sum(froc_values.values()) / max(1, len(froc_values)))
 
     out = {
+        "map": map_value,
         "ap50": ap50,
         "froc_mean": froc_mean,
         "image_auroc": _binary_auc(image_scores, image_targets),
@@ -409,6 +428,14 @@ def detection_probe_eval(
     nms_iou_threshold = float(getattr(cfg.task, "nms_iou_threshold", 0.5))
     max_detections = int(getattr(cfg.task, "max_detections", 100))
     ap_iou_threshold = float(getattr(cfg.task, "ap_iou_threshold", 0.5))
+    map_iou_thresholds = [
+        float(x)
+        for x in getattr(
+            cfg.task,
+            "map_iou_thresholds",
+            [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75],
+        )
+    ]
     objectness_recall_threshold = float(
         getattr(cfg.task, "objectness_recall_threshold", score_threshold)
     )
@@ -567,6 +594,7 @@ def detection_probe_eval(
         metric_values = _detection_metrics(
             records,
             iou_threshold=ap_iou_threshold,
+            map_iou_thresholds=map_iou_thresholds,
             froc_fp_per_image=froc_fp_per_image,
         )
         val_primary = float(metric_values.get(primary_metric, metric_values["ap50"]))
@@ -581,6 +609,7 @@ def detection_probe_eval(
                 "probe/train_epoch_loss": float(loss_meter.avg),
                 "probe/train_pos_recall": float(train_pos_recall),
                 "probe/val_loss": float(val_loss),
+                "probe/val_map": float(metric_values["map"]),
                 "probe/val_ap50": float(metric_values["ap50"]),
                 "probe/val_froc_mean": float(metric_values["froc_mean"]),
                 "probe/val_image_auroc": float(metric_values["image_auroc"]),
@@ -652,6 +681,8 @@ def detection_probe_eval(
         "best_epoch": int(best_epoch),
         "last_epoch": int(state["epoch"]),
         "val_loss": float(last_val_loss),
+        "val_map": float(last_metrics.get("map", 0.0)),
+        "best_val_map": float(best_metrics.get("map", 0.0)),
         "val_ap50": float(last_metrics.get("ap50", 0.0)),
         "best_val_ap50": float(best_metrics.get("ap50", 0.0)),
         "val_froc_mean": float(last_metrics.get("froc_mean", 0.0)),
