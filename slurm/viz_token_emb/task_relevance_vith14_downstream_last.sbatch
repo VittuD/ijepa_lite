@@ -2,21 +2,20 @@
 #SBATCH --job-name=viz-trm-vith14-last
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-#SBATCH --time=00:30:00
-#SBATCH --array=0-10
-#SBATCH --output=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%A_%a.out
-#SBATCH --error=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%A_%a.err
+#SBATCH --time=02:00:00
+#SBATCH --output=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%j.out
+#SBATCH --error=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # Token-embedding PCA and clustering visualization for the ViT-H/14
 # task-relevance checkpoints used by the downstream claim-check arrays.
 #
-# Each array item runs one last.pt checkpoint:
+# The single job runs all last.pt checkpoints sequentially:
 #   0   chest_vanilla_multiblock_last
 #   1   chest_affinity_novelty_last
 #   2   chest_hmargcosbs_floor_last
@@ -36,12 +35,12 @@
 #
 # Submit:
 #   mkdir -p sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last
-#   sbatch slurm/viz_token_emb/task_relevance_vith14_downstream_last_array.sbatch
+#   sbatch slurm/viz_token_emb/task_relevance_vith14_downstream_last.sbatch
 #
 # Useful overrides:
 #   N_SAMPLES=24 SAMPLE_MODE=first sbatch ...
 #   FEATURE_MODE=last4_mean sbatch ...
-#   OUT_ROOT=/path/to/output sbatch ...
+#   OUT_ROOT=/path/to/output CKPT_START=5 CKPT_END=10 sbatch ...
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -124,62 +123,80 @@ DBSCAN_EPS=(
   4.0
 )
 
-TASK_ID="${SLURM_ARRAY_TASK_ID}"
-CKPT_LABEL="${CKPT_LABELS[$TASK_ID]}"
-CKPT_PATH="${WORK}/vitturini/${CKPT_RELS[$TASK_ID]}"
-OUT_DIR="${OUT_ROOT}/${CKPT_LABEL}_${SLURM_JOB_ID}_${TASK_ID}"
-
-if [[ ! -f "${CKPT_PATH}" ]]; then
-  echo "Checkpoint not found: ${CKPT_PATH}"
-  exit 1
-fi
-
-mkdir -p "${OUT_DIR}"
-
-CMD=(
-  python -m ijepa_lite.scripts.visualize_token_embeddings
-  --repo-root "${REPO_ROOT}"
-  --data-root "${DATA_ROOT}"
-  --dataset-root "chestmnist=${DATA_ROOT}"
-  --dataset-root "rsna_pneumonia_detection=${DATA_ROOT}"
-  --dataset-root "siimacr_pneumothorax=${DATA_ROOT}"
-  --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
-  --out-dir "${OUT_DIR}"
-  --experiment downstream_mlp_earlystop
-  --feature-mode "${FEATURE_MODE}"
-  --n-samples "${N_SAMPLES}"
-  --sample-mode "${SAMPLE_MODE}"
-  --seed "${SEED}"
-  --batch-size "${BATCH_SIZE}"
-  --num-workers "${NUM_WORKERS}"
-  --model-arch vit_huge
-  --model-image-size 224
-  --model-patch-size 14
-  --model-embed-dim 1280
-  --model-num-heads 16
-  --model-depth 32
-  --model-use-cls-token false
-  --methods "${METHODS[@]}"
-  --cluster-k "${CLUSTER_K[@]}"
-  --dbscan-eps "${DBSCAN_EPS[@]}"
-)
-
-for dataset in "${DATASETS[@]}"; do
-  CMD+=(--dataset "${dataset}")
-done
-
-echo "TASK_ID=${TASK_ID}"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
-echo "CKPT_LABEL=${CKPT_LABEL}"
-echo "CKPT_PATH=${CKPT_PATH}"
-echo "OUT_DIR=${OUT_DIR}"
+echo "OUT_ROOT=${OUT_ROOT}"
 echo "N_SAMPLES=${N_SAMPLES}"
 echo "SAMPLE_MODE=${SAMPLE_MODE}"
 echo "FEATURE_MODE=${FEATURE_MODE}"
 echo "BATCH_SIZE=${BATCH_SIZE}"
 echo "NUM_WORKERS=${NUM_WORKERS}"
-echo "CMD=${CMD[*]}"
+echo "CKPT_START=${CKPT_START:-0}"
+echo "CKPT_END=${CKPT_END:-$(( ${#CKPT_LABELS[@]} - 1 ))}"
 
 cd "${REPO_ROOT}"
-srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK}" "${CMD[@]}"
+
+START_IDX="${CKPT_START:-0}"
+END_IDX="${CKPT_END:-$(( ${#CKPT_LABELS[@]} - 1 ))}"
+TOTAL_CKPTS="${#CKPT_LABELS[@]}"
+
+if (( START_IDX < 0 || START_IDX >= TOTAL_CKPTS )); then
+  echo "Invalid CKPT_START=${START_IDX}; expected 0..$((TOTAL_CKPTS - 1))"
+  exit 1
+fi
+if (( END_IDX < START_IDX || END_IDX >= TOTAL_CKPTS )); then
+  echo "Invalid CKPT_END=${END_IDX}; expected ${START_IDX}..$((TOTAL_CKPTS - 1))"
+  exit 1
+fi
+
+for idx in $(seq "${START_IDX}" "${END_IDX}"); do
+  CKPT_LABEL="${CKPT_LABELS[$idx]}"
+  CKPT_PATH="${WORK}/vitturini/${CKPT_RELS[$idx]}"
+  OUT_DIR="${OUT_ROOT}/${CKPT_LABEL}_${SLURM_JOB_ID}_${idx}"
+
+  if [[ ! -f "${CKPT_PATH}" ]]; then
+    echo "Checkpoint not found: ${CKPT_PATH}"
+    exit 1
+  fi
+
+  mkdir -p "${OUT_DIR}"
+
+  CMD=(
+    python -m ijepa_lite.scripts.visualize_token_embeddings
+    --repo-root "${REPO_ROOT}"
+    --data-root "${DATA_ROOT}"
+    --dataset-root "chestmnist=${DATA_ROOT}"
+    --dataset-root "rsna_pneumonia_detection=${DATA_ROOT}"
+    --dataset-root "siimacr_pneumothorax=${DATA_ROOT}"
+    --checkpoint "${CKPT_LABEL}=${CKPT_PATH}"
+    --out-dir "${OUT_DIR}"
+    --experiment downstream_mlp_earlystop
+    --feature-mode "${FEATURE_MODE}"
+    --n-samples "${N_SAMPLES}"
+    --sample-mode "${SAMPLE_MODE}"
+    --seed "${SEED}"
+    --batch-size "${BATCH_SIZE}"
+    --num-workers "${NUM_WORKERS}"
+    --model-arch vit_huge
+    --model-image-size 224
+    --model-patch-size 14
+    --model-embed-dim 1280
+    --model-num-heads 16
+    --model-depth 32
+    --model-use-cls-token false
+    --methods "${METHODS[@]}"
+    --cluster-k "${CLUSTER_K[@]}"
+    --dbscan-eps "${DBSCAN_EPS[@]}"
+  )
+
+  for dataset in "${DATASETS[@]}"; do
+    CMD+=(--dataset "${dataset}")
+  done
+
+  echo "---- checkpoint ${idx}/${TOTAL_CKPTS}: ${CKPT_LABEL} ----"
+  echo "CKPT_PATH=${CKPT_PATH}"
+  echo "OUT_DIR=${OUT_DIR}"
+  echo "CMD=${CMD[*]}"
+
+  srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK}" "${CMD[@]}"
+done
