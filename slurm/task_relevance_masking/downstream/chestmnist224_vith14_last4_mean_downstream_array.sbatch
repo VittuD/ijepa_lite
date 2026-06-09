@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --array=0-1
 #SBATCH --output=sbatch_logs/task_relevance_masking/downstream/chestmnist224_vith14_last4_mean/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/task_relevance_masking/downstream/chestmnist224_vith14_last4_mean/%x_%A_%a.err
@@ -57,9 +57,9 @@ LOG_ROOT="${WORK}/vitturini/sbatch_logs/task_relevance_masking/downstream/chestm
 CLASSIFICATION_BATCH_SIZE=512
 CLASSIFICATION_NUM_WORKERS=1
 HEATMAP_BATCH_SIZE=128
-HEATMAP_NUM_WORKERS=4
+HEATMAP_NUM_WORKERS=2
 SEGMENTATION_BATCH_SIZE=128
-SEGMENTATION_NUM_WORKERS=1
+SEGMENTATION_NUM_WORKERS=2
 
 DATASETS=(
   chestmnist
