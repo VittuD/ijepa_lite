@@ -1,25 +1,25 @@
 #!/bin/bash
-#SBATCH --job-name=ijepa-rsna-det-dbg
+#SBATCH --job-name=ijepa-rsna-det-448
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=boost_qos_dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
-#SBATCH --output=sbatch_logs/downstream/rsna_detection_orig_vith14_dbg/%x_%j.out
-#SBATCH --error=sbatch_logs/downstream/rsna_detection_orig_vith14_dbg/%x_%j.err
+#SBATCH --time=02:00:00
+#SBATCH --output=sbatch_logs/downstream/rsna_detection_orig_vith14_448/%x_%j.out
+#SBATCH --error=sbatch_logs/downstream/rsna_detection_orig_vith14_448/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# Debug RSNA pneumonia detection probe for original I-JEPA ImageNet-1K ViT-H/14.
+# RSNA pneumonia detection probe for original I-JEPA ImageNet-1K ViT-H/14.
 #
 # Expected data layout:
 #   ${DATA_ROOT}/rsna-pneumonia-detection/stage_2_train_labels.csv
 #   ${DATA_ROOT}/rsna-pneumonia-detection/png_images/<patientId>.png
 #
 # Submit:
-#   mkdir -p sbatch_logs/downstream/rsna_detection_orig_vith14_dbg
+#   mkdir -p sbatch_logs/downstream/rsna_detection_orig_vith14_448
 #   sbatch slurm/downstream/orig_vith14_rsna_detection_dbg.sbatch
 # ---------------------------------------------------------------------------
 
@@ -45,13 +45,13 @@ export NPROC_PER_NODE=4
 REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${DATA_ROOT:-${FAST:-/scratch}/datasets}"
 OUTPUT_ROOT="${WORK}/vitturini/outputs"
-LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_detection_orig_vith14_dbg"
-SUMMARY_PATH="${LOG_DIR}/orig_vith14_rsna_detection_dbg_summary.txt"
+LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_detection_orig_vith14_448"
+SUMMARY_PATH="${LOG_DIR}/orig_vith14_rsna_detection_448_summary.txt"
 CKPT_LABEL="orig_ijepa_vith14_1k_ijepalite"
 CKPT_PATH="${WORK}/vitturini/original_jepa_weights/IN1K-vit.h.14-300e.ijepa_lite.pt"
 
 DETECTION_BATCH_SIZE=32
-DETECTION_NUM_WORKERS=1
+DETECTION_NUM_WORKERS=4
 
 mkdir -p "${LOG_DIR}"
 
@@ -69,14 +69,15 @@ CMD=(
   --logger-mode offline
   --continue-on-error
   --no-save-probe-checkpoints
-  --train-epochs 2
+  --train-epochs 20
   --train-early-stop-patience 0
   --train-early-stop-min-epochs 0
+  --detection-positive-radius 1
   --detection-experiment downstream_rsna_detection_mlp_earlystop
-  --run-suffix rsna_detection_dbg
+  --run-suffix rsna_detection_448_r1
   --task-pool last4_mean
   --model-arch vit_huge
-  --model-image-size 224
+  --model-image-size 448
   --model-patch-size 14
   --model-embed-dim 1280
   --model-num-heads 16

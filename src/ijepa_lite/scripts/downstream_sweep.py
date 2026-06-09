@@ -170,6 +170,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional train.epochs override for all downstream tasks.",
     )
     p.add_argument(
+        "--train-lr",
+        type=float,
+        default=None,
+        help="Optional train.lr override for all downstream tasks.",
+    )
+    p.add_argument(
         "--train-early-stop-patience",
         type=int,
         default=None,
@@ -180,6 +186,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional train.early_stop_min_epochs override for all downstream tasks.",
+    )
+    p.add_argument(
+        "--detection-positive-radius",
+        type=int,
+        default=None,
+        help="Optional task.positive_radius override for detection downstream tasks.",
     )
     return p.parse_args()
 
@@ -368,6 +380,8 @@ def _build_run_overrides(
         overrides.append("train.save_probe_checkpoints=false")
     if args.train_epochs is not None:
         overrides.append(f"train.epochs={args.train_epochs}")
+    if args.train_lr is not None:
+        overrides.append(f"train.lr={args.train_lr}")
     if args.train_early_stop_patience is not None:
         overrides.append(f"train.early_stop_patience={args.train_early_stop_patience}")
     if args.train_early_stop_min_epochs is not None:
@@ -393,6 +407,11 @@ def _build_run_overrides(
         overrides.append("task.foreground_weight=20.0")
         overrides.append("task.ce_weight=1.0")
         overrides.append("task.dice_weight=1.0")
+    if (
+        _dataset_task(dataset) == "detection_probe"
+        and args.detection_positive_radius is not None
+    ):
+        overrides.append(f"task.positive_radius={args.detection_positive_radius}")
     return overrides
 
 
