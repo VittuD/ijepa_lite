@@ -1,0 +1,54 @@
+# @package _global_
+#
+# Fast RSNA box-heatmap MLP probe for broad checkpoint sweeps.
+# Keeps the same probe geometry as the early-stop variant, but caps training
+# early because the 224 benchmark plateaus quickly enough for ranking.
+
+defaults:
+  - /task: box_heatmap_probe
+  - /model: vit_torchvision
+  - /data: rsna_pneumonia_detection
+  - /train: eval_linear
+  - _self_
+
+compile: false
+
+model:
+  arch: vit_small
+  image_size: 96
+  patch_size: 8
+  embed_dim: 384
+  num_heads: 6
+  depth: 12
+
+data:
+  root: ${oc.env:FAST,/scratch}/datasets/
+  batch_size: 128
+  num_workers: 4
+  download: false
+
+task:
+  head:
+    type: mlp
+    hidden_dim: 512
+    num_layers: 1
+    dropout: 0.2
+  sched:
+    name: step
+    step_size: 20
+    gamma: 0.1
+  pretrained_ckpt: ${oc.env:PRETRAIN_CKPT,null}
+  metric: patch_ap
+  loss: focal
+  positive_radius: 1
+  bce_weight: 1.0
+  dice_weight: 1.0
+  threshold: 0.5
+
+train:
+  epochs: 8
+  lr: 0.05
+  weight_decay: 0.001
+  early_stop_patience: 0
+  early_stop_min_epochs: 0
+  early_stop_min_delta: 0.0

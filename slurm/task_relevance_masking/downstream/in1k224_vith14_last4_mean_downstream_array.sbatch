@@ -17,11 +17,12 @@
 #
 # Each array item evaluates a chunk of three last.pt checkpoints on:
 #   - chestmnist
-#   - pneumoniamnist
+#   - rsna_pneumonia_detection
 #   - siimacr_pneumothorax
 #
-# Uses early-stopped MLP probes with task.pool=last4_mean. SIIM is evaluated
-# with foreground Dice as the primary metric via downstream_sweep overrides.
+# Uses early-stopped MLP probes with task.pool=last4_mean. RSNA is evaluated
+# with the box-heatmap patch-AP probe; SIIM is evaluated with foreground Dice
+# as the primary metric via downstream_sweep overrides.
 #
 # Submit:
 #   mkdir -p sbatch_logs/task_relevance_masking/downstream/in1k224_vith14_last4_mean
@@ -49,16 +50,19 @@ export NPROC_PER_NODE=4
 
 REPO_ROOT="${WORK}/vitturini/ijepa_lite"
 DATA_ROOT="${DATA_ROOT:-${CHESTMNIST_ROOT:-${FAST:-/scratch}/datasets}}"
+OUTPUT_ROOT="${WORK}/vitturini/outputs"
 LOG_ROOT="${WORK}/vitturini/sbatch_logs/task_relevance_masking/downstream/in1k224_vith14_last4_mean"
 
 CLASSIFICATION_BATCH_SIZE=512
 CLASSIFICATION_NUM_WORKERS=1
+HEATMAP_BATCH_SIZE=128
+HEATMAP_NUM_WORKERS=4
 SEGMENTATION_BATCH_SIZE=128
 SEGMENTATION_NUM_WORKERS=1
 
 DATASETS=(
   chestmnist
-  pneumoniamnist
+  rsna_pneumonia_detection
   siimacr_pneumothorax
 )
 
@@ -100,11 +104,13 @@ CMD=(
   python -m torch.distributed.run --standalone --nproc_per_node "${NPROC_PER_NODE}" -m ijepa_lite.scripts.downstream_sweep
   --repo-root "$REPO_ROOT"
   --data-root "$DATA_ROOT"
+  --output-root "$OUTPUT_ROOT"
   --summary-path "$SUMMARY_PATH"
   --logger-mode offline
   --continue-on-error
   --no-save-probe-checkpoints
   --classification-experiment downstream_mlp_earlystop
+  --heatmap-experiment downstream_rsna_box_heatmap_mlp_fast
   --segmentation-experiment downstream_vocseg_mlp_earlystop
   --run-suffix task_relevance_in1k224_vith14_last4_mean
   --task-pool last4_mean
@@ -117,6 +123,8 @@ CMD=(
   --model-use-cls-token false
   --classification-batch-size "${CLASSIFICATION_BATCH_SIZE}"
   --classification-num-workers "${CLASSIFICATION_NUM_WORKERS}"
+  --heatmap-batch-size "${HEATMAP_BATCH_SIZE}"
+  --heatmap-num-workers "${HEATMAP_NUM_WORKERS}"
   --segmentation-batch-size "${SEGMENTATION_BATCH_SIZE}"
   --segmentation-num-workers "${SEGMENTATION_NUM_WORKERS}"
 )
@@ -141,6 +149,7 @@ echo "START_IDX=${START_IDX}"
 echo "END_IDX=${END_IDX}"
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
+echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "LOG_DIR=${LOG_DIR}"
 echo "SUMMARY_PATH=${SUMMARY_PATH}"
 echo "CHECKPOINTS:"
@@ -149,6 +158,8 @@ for idx in $(seq "${START_IDX}" "${END_IDX}"); do
 done
 echo "CLASSIFICATION_BATCH_SIZE=${CLASSIFICATION_BATCH_SIZE}"
 echo "CLASSIFICATION_NUM_WORKERS=${CLASSIFICATION_NUM_WORKERS}"
+echo "HEATMAP_BATCH_SIZE=${HEATMAP_BATCH_SIZE}"
+echo "HEATMAP_NUM_WORKERS=${HEATMAP_NUM_WORKERS}"
 echo "SEGMENTATION_BATCH_SIZE=${SEGMENTATION_BATCH_SIZE}"
 echo "SEGMENTATION_NUM_WORKERS=${SEGMENTATION_NUM_WORKERS}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
