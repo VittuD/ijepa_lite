@@ -28,6 +28,7 @@ max_box_size: 1.0
 # Evaluation.
 ap_iou_threshold: 0.5
 score_threshold: 0.05
+objectness_recall_threshold: 0.05
 nms_iou_threshold: 0.5
 max_detections: 100
 froc_fp_per_image: [0.5, 1.0, 2.0, 4.0]

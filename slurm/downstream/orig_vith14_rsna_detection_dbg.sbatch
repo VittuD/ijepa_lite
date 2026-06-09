@@ -53,8 +53,6 @@ DETECTION_BATCH_SIZE=32
 DETECTION_NUM_WORKERS=1
 
 mkdir -p "${LOG_DIR}"
-exec > >(tee -a "${LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.out")
-exec 2> >(tee -a "${LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.err" >&2)
 
 if [[ ! -f "${CKPT_PATH}" ]]; then
   echo "Checkpoint not found: ${CKPT_PATH}"

@@ -42,8 +42,6 @@ DATA_ROOT="${DATA_ROOT:-${FAST:-/scratch}/datasets}"
 LOG_DIR="${WORK}/vitturini/sbatch_logs/downstream/rsna_prepare_png"
 
 mkdir -p "${LOG_DIR}"
-exec > >(tee -a "${LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.out")
-exec 2> >(tee -a "${LOG_DIR}/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.err" >&2)
 
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"

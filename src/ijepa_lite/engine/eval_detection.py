@@ -171,6 +171,7 @@ def _detection_loss(
     focal_gamma: float,
     obj_weight: float,
     box_weight: float,
+    objectness_recall_threshold: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     obj_targets, box_targets, pos_mask = _build_targets(
         targets,
@@ -214,7 +215,10 @@ def _detection_loss(
         "box_loss": box_loss.detach(),
         "num_pos": pos_mask.sum().detach(),
         "pos_recall": (
-            ((outputs["obj_logits"].sigmoid() > 0.5) & pos_mask).sum().float()
+            (
+                (outputs["obj_logits"].sigmoid() > float(objectness_recall_threshold))
+                & pos_mask
+            ).sum().float()
             / pos_mask.sum().clamp(min=1).float()
         ).detach(),
     }
@@ -405,6 +409,9 @@ def detection_probe_eval(
     nms_iou_threshold = float(getattr(cfg.task, "nms_iou_threshold", 0.5))
     max_detections = int(getattr(cfg.task, "max_detections", 100))
     ap_iou_threshold = float(getattr(cfg.task, "ap_iou_threshold", 0.5))
+    objectness_recall_threshold = float(
+        getattr(cfg.task, "objectness_recall_threshold", score_threshold)
+    )
     froc_fp_per_image = [
         float(x) for x in getattr(cfg.task, "froc_fp_per_image", [0.5, 1.0, 2.0, 4.0])
     ]
@@ -485,6 +492,7 @@ def detection_probe_eval(
                     focal_gamma=focal_gamma,
                     obj_weight=obj_weight,
                     box_weight=box_weight,
+                    objectness_recall_threshold=objectness_recall_threshold,
                 )
 
             scaler.scale(loss).backward()
@@ -539,6 +547,7 @@ def detection_probe_eval(
                         focal_gamma=focal_gamma,
                         obj_weight=obj_weight,
                         box_weight=box_weight,
+                        objectness_recall_threshold=objectness_recall_threshold,
                     )
                 val_loss_sum += loss.detach() * x.size(0)
                 val_count += x.size(0)
