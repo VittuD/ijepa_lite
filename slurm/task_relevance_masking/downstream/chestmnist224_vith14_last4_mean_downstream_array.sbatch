@@ -66,7 +66,6 @@ DATASETS=(
 CKPT_LABELS=(
   chest_vanilla_multiblock_last
   chest_affinity_novelty_last
-  chest_hmargbs_floor_last
   chest_hmargcosbs_floor_last
   chest_hmarg_sketchorthcosbs_floor_last
   chest_semantic_pca_last
@@ -75,7 +74,6 @@ CKPT_LABELS=(
 CKPT_RELS=(
   outputs/2026-06-08/13-35-55_claim_chestmnist_224_vith14_vanilla_multiblock_from_meta_step1170_b2048/rank0/checkpoints/last.pt
   outputs/2026-06-08/13-35-55_claim_chestmnist_224_vith14_mi_affinity_novelty_from_meta_step1170_b2048/rank0/checkpoints/last.pt
-  outputs/2026-06-08/13-36-37_claim_chestmnist_224_vith14_mi_hmargbs_floor_from_meta_step1170_b2048/rank0/checkpoints/last.pt
   outputs/2026-06-08/13-37-50_claim_chestmnist_224_vith14_mi_hmargcosbs_floor_from_meta_step1170_b2048/rank0/checkpoints/last.pt
   outputs/2026-06-08/13-37-50_claim_chestmnist_224_vith14_mi_hmarg_sketchorthcosbs_floor_from_meta_step1170_b2048/rank0/checkpoints/last.pt
   outputs/2026-06-08/16-36-21_claim_chestmnist_224_vith14_semantic_pca_from_meta_step1170_b2048/rank0/checkpoints/last.pt

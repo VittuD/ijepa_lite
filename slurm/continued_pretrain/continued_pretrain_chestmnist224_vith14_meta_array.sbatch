@@ -2,12 +2,12 @@
 #SBATCH --job-name=ijepa-ctp-chest224-vith14
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=dbg
+#SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
+#SBATCH --time=02:30:00
 #SBATCH --array=0-5
 #SBATCH --output=sbatch_logs/continued_pretrain/chestmnist224_vith14_meta_e4_b16_ema99925_nowarmup/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/chestmnist224_vith14_meta_e4_b16_ema99925_nowarmup/%x_%A_%a.err

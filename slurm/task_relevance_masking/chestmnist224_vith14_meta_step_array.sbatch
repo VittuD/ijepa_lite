@@ -2,13 +2,13 @@
 #SBATCH --job-name=ijepa-claim-chest224
 #SBATCH --account=IscrC_PRIMAL
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
+#SBATCH --time=00:30:00
 #SBATCH --array=0-5
 #SBATCH --output=sbatch_logs/task_relevance_masking/chestmnist224_vith14_meta_step_array/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/task_relevance_masking/chestmnist224_vith14_meta_step_array/%x_%A_%a.err

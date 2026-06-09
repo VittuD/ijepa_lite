@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ijepa-ctp-chest128-tr
-#SBATCH --account=IscrC_PRIMAL
+#SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:30:00
+#SBATCH --time=04:30:00
 #SBATCH --array=0-5
 #SBATCH --output=sbatch_logs/continued_pretrain/chestmnist224to128_train_from_in1k96_e247_origlr_ema99925_nowarmup/%x_%A_%a.out
 #SBATCH --error=sbatch_logs/continued_pretrain/chestmnist224to128_train_from_in1k96_e247_origlr_ema99925_nowarmup/%x_%A_%a.err
