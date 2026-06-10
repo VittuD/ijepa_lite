@@ -16,3 +16,8 @@ datasets/
 # Ignore outputs
 outputs/
 # slurm/
+
+.venv/
+sbatch_logs/
+
+*.tex
