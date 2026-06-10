@@ -255,31 +255,20 @@ def write_rankings_by_method(bundle_dir: Path, rows: list[dict]) -> dict[str, di
         rows,
         ("method", "checkpoint", "family", "variant"),
     )
-    variant_tables = compact_rows_by_method(rows, ("method", "variant"))
 
-    for method in sorted(set(checkpoint_tables) | set(variant_tables)):
+    for method in sorted(checkpoint_tables):
         checkpoint_rows = checkpoint_tables.get(method, [])
-        variant_rows = variant_tables.get(method, [])
         checkpoint_csv = method_dir / f"{method}_ranking_by_checkpoint.csv"
         checkpoint_md = method_dir / f"{method}_ranking_by_checkpoint.md"
-        variant_csv = method_dir / f"{method}_ranking_by_variant.csv"
-        variant_md = method_dir / f"{method}_ranking_by_variant.md"
 
         write_csv(checkpoint_csv, checkpoint_rows)
-        write_csv(variant_csv, variant_rows)
         write_compact_markdown(
             checkpoint_md,
             f"{method} Ranking By Checkpoint",
             checkpoint_rows,
         )
-        write_compact_markdown(
-            variant_md,
-            f"{method} Ranking By Variant",
-            variant_rows,
-        )
         out[method] = {
             "ranking_by_checkpoint": str(checkpoint_csv),
-            "ranking_by_variant": str(variant_csv),
         }
     return out
 
@@ -299,7 +288,6 @@ def write_bundle(
     rows = read_rows(paths)
     aggregates = aggregate_rows(rows, group_by=group_by, metrics=metrics)
     ranking_by_checkpoint = compact_rows(rows, ("checkpoint", "family", "variant"))
-    ranking_by_variant = compact_rows(rows, ("variant",))
     rankings_by_method = write_rankings_by_method(bundle_dir, rows)
 
     pairs = automatic_pairs(rows)
@@ -322,25 +310,16 @@ def write_bundle(
     write_csv(bundle_dir / "aggregates.csv", aggregates)
     write_csv(bundle_dir / "comparisons.csv", comparisons)
     write_csv(bundle_dir / "ranking_by_checkpoint.csv", ranking_by_checkpoint)
-    write_csv(bundle_dir / "ranking_by_variant.csv", ranking_by_variant)
     (bundle_dir / "aggregates.json").write_text(json.dumps(aggregates, indent=2) + "\n")
     (bundle_dir / "comparisons.json").write_text(json.dumps(comparisons, indent=2) + "\n")
     (bundle_dir / "ranking_by_checkpoint.json").write_text(
         json.dumps(ranking_by_checkpoint, indent=2) + "\n"
-    )
-    (bundle_dir / "ranking_by_variant.json").write_text(
-        json.dumps(ranking_by_variant, indent=2) + "\n"
     )
     (bundle_dir / "report.md").write_text(report)
     write_compact_markdown(
         bundle_dir / "ranking_by_checkpoint.md",
         f"{name} Pooled Ranking By Checkpoint",
         ranking_by_checkpoint,
-    )
-    write_compact_markdown(
-        bundle_dir / "ranking_by_variant.md",
-        f"{name} Pooled Ranking By Variant",
-        ranking_by_variant,
     )
 
     return {
@@ -351,7 +330,6 @@ def write_bundle(
         "n_aggregates": len(aggregates),
         "n_comparisons": len(comparisons),
         "ranking_by_checkpoint": str(bundle_dir / "ranking_by_checkpoint.csv"),
-        "ranking_by_variant": str(bundle_dir / "ranking_by_variant.csv"),
         "rankings_by_method": rankings_by_method,
         "report": str(bundle_dir / "report.md"),
     }
