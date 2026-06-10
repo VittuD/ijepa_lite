@@ -34,6 +34,16 @@ from analyze_token_embedding_viz_stats import (
 )
 
 
+RANKING_METRICS = (
+    "boundary_fraction",
+    "extra_connected_components",
+    "total_connected_components",
+    "max_connected_components",
+    "silhouette",
+    "pca_top3_sum",
+)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
@@ -105,6 +115,175 @@ def cross_family_pairs(rows: list[dict]) -> list[tuple[str, str]]:
     return pairs
 
 
+def mean_finite(rows: list[dict], metric: str) -> float | None:
+    values = []
+    for row in rows:
+        value = row.get(metric)
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+        else:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+        if numeric == numeric:
+            values.append(numeric)
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def compact_rows(rows: list[dict], group_by: tuple[str, ...]) -> list[dict]:
+    grouped: dict[tuple[str, ...], list[dict]] = {}
+    for row in rows:
+        key = tuple(str(row.get(col, "")) for col in group_by)
+        grouped.setdefault(key, []).append(row)
+
+    out: list[dict] = []
+    for key, group_rows in sorted(grouped.items()):
+        compact = {col: value for col, value in zip(group_by, key)}
+        compact["n_rows"] = len(group_rows)
+        compact["n_samples"] = len(
+            {
+                (
+                    str(row.get("dataset", "")),
+                    str(row.get("split", "")),
+                    str(row.get("sample_id", "")),
+                )
+                for row in group_rows
+            }
+        )
+        for metric in RANKING_METRICS:
+            value = mean_finite(group_rows, metric)
+            if value is not None:
+                compact[f"{metric}_mean"] = value
+        out.append(compact)
+
+    add_smoothness_score(out)
+    return sorted(
+        out,
+        key=lambda row: (
+            float(row.get("smoothness_score", float("inf"))),
+            str(row.get("family", "")),
+            str(row.get("variant", "")),
+            str(row.get("checkpoint", "")),
+        ),
+    )
+
+
+def compact_rows_by_method(rows: list[dict], group_by: tuple[str, ...]) -> dict[str, list[dict]]:
+    methods = sorted({str(row.get("method", "")) for row in rows if row.get("method", "")})
+    return {
+        method: compact_rows(
+            [row for row in rows if str(row.get("method", "")) == method],
+            group_by,
+        )
+        for method in methods
+    }
+
+
+def add_smoothness_score(rows: list[dict]) -> None:
+    """Add a lower-is-smoother z-score over boundary and fragmentation metrics."""
+    score_metrics = (
+        "boundary_fraction_mean",
+        "extra_connected_components_mean",
+        "total_connected_components_mean",
+    )
+    means: dict[str, float] = {}
+    sds: dict[str, float] = {}
+    for metric in score_metrics:
+        values = [
+            float(row[metric])
+            for row in rows
+            if metric in row and float(row[metric]) == float(row[metric])
+        ]
+        if not values:
+            continue
+        mu = sum(values) / len(values)
+        var = sum((value - mu) ** 2 for value in values) / max(len(values) - 1, 1)
+        means[metric] = mu
+        sds[metric] = var ** 0.5
+
+    for row in rows:
+        z_values = []
+        for metric in score_metrics:
+            if metric not in row or metric not in means:
+                continue
+            sd = sds.get(metric, 0.0)
+            if sd <= 1e-12:
+                continue
+            z_values.append((float(row[metric]) - means[metric]) / sd)
+        if z_values:
+            row["smoothness_score"] = sum(z_values) / len(z_values)
+
+
+def write_compact_markdown(path: Path, title: str, rows: list[dict]) -> None:
+    columns = [
+        "smoothness_score",
+        "checkpoint",
+        "family",
+        "variant",
+        "method",
+        "n_samples",
+        "boundary_fraction_mean",
+        "extra_connected_components_mean",
+        "total_connected_components_mean",
+        "silhouette_mean",
+        "pca_top3_sum_mean",
+    ]
+    columns = [col for col in columns if any(col in row for row in rows)]
+    lines = [f"# {title}", "", "Lower `smoothness_score` is smoother.", ""]
+    if rows:
+        lines.append("| " + " | ".join(columns) + " |")
+        lines.append("| " + " | ".join("---" for _ in columns) + " |")
+        for row in rows:
+            cells = []
+            for col in columns:
+                value = row.get(col, "")
+                cells.append(f"{value:.4g}" if isinstance(value, float) else str(value))
+            lines.append("| " + " | ".join(cells) + " |")
+    else:
+        lines.append("_No rows._")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def write_rankings_by_method(bundle_dir: Path, rows: list[dict]) -> dict[str, dict[str, str]]:
+    method_dir = bundle_dir / "rankings_by_method"
+    method_dir.mkdir(parents=True, exist_ok=True)
+    out: dict[str, dict[str, str]] = {}
+    checkpoint_tables = compact_rows_by_method(
+        rows,
+        ("method", "checkpoint", "family", "variant"),
+    )
+    variant_tables = compact_rows_by_method(rows, ("method", "variant"))
+
+    for method in sorted(set(checkpoint_tables) | set(variant_tables)):
+        checkpoint_rows = checkpoint_tables.get(method, [])
+        variant_rows = variant_tables.get(method, [])
+        checkpoint_csv = method_dir / f"{method}_ranking_by_checkpoint.csv"
+        checkpoint_md = method_dir / f"{method}_ranking_by_checkpoint.md"
+        variant_csv = method_dir / f"{method}_ranking_by_variant.csv"
+        variant_md = method_dir / f"{method}_ranking_by_variant.md"
+
+        write_csv(checkpoint_csv, checkpoint_rows)
+        write_csv(variant_csv, variant_rows)
+        write_compact_markdown(
+            checkpoint_md,
+            f"{method} Ranking By Checkpoint",
+            checkpoint_rows,
+        )
+        write_compact_markdown(
+            variant_md,
+            f"{method} Ranking By Variant",
+            variant_rows,
+        )
+        out[method] = {
+            "ranking_by_checkpoint": str(checkpoint_csv),
+            "ranking_by_variant": str(variant_csv),
+        }
+    return out
+
+
 def write_bundle(
     *,
     name: str,
@@ -119,6 +298,9 @@ def write_bundle(
 
     rows = read_rows(paths)
     aggregates = aggregate_rows(rows, group_by=group_by, metrics=metrics)
+    ranking_by_checkpoint = compact_rows(rows, ("checkpoint", "family", "variant"))
+    ranking_by_variant = compact_rows(rows, ("variant",))
+    rankings_by_method = write_rankings_by_method(bundle_dir, rows)
 
     pairs = automatic_pairs(rows)
     if include_cross_family:
@@ -139,9 +321,27 @@ def write_bundle(
 
     write_csv(bundle_dir / "aggregates.csv", aggregates)
     write_csv(bundle_dir / "comparisons.csv", comparisons)
+    write_csv(bundle_dir / "ranking_by_checkpoint.csv", ranking_by_checkpoint)
+    write_csv(bundle_dir / "ranking_by_variant.csv", ranking_by_variant)
     (bundle_dir / "aggregates.json").write_text(json.dumps(aggregates, indent=2) + "\n")
     (bundle_dir / "comparisons.json").write_text(json.dumps(comparisons, indent=2) + "\n")
+    (bundle_dir / "ranking_by_checkpoint.json").write_text(
+        json.dumps(ranking_by_checkpoint, indent=2) + "\n"
+    )
+    (bundle_dir / "ranking_by_variant.json").write_text(
+        json.dumps(ranking_by_variant, indent=2) + "\n"
+    )
     (bundle_dir / "report.md").write_text(report)
+    write_compact_markdown(
+        bundle_dir / "ranking_by_checkpoint.md",
+        f"{name} Pooled Ranking By Checkpoint",
+        ranking_by_checkpoint,
+    )
+    write_compact_markdown(
+        bundle_dir / "ranking_by_variant.md",
+        f"{name} Pooled Ranking By Variant",
+        ranking_by_variant,
+    )
 
     return {
         "name": name,
@@ -150,6 +350,9 @@ def write_bundle(
         "n_rows": len(rows),
         "n_aggregates": len(aggregates),
         "n_comparisons": len(comparisons),
+        "ranking_by_checkpoint": str(bundle_dir / "ranking_by_checkpoint.csv"),
+        "ranking_by_variant": str(bundle_dir / "ranking_by_variant.csv"),
+        "rankings_by_method": rankings_by_method,
         "report": str(bundle_dir / "report.md"),
     }
 
