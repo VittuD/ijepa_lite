@@ -2,12 +2,12 @@
 #SBATCH --job-name=viz-trm-vith14-448
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
-#SBATCH --time=04:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last_448/%x_%j.out
 #SBATCH --error=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last_448/%x_%j.err
 
@@ -66,7 +66,7 @@ N_SAMPLES="${N_SAMPLES:-8}"
 SAMPLE_MODE="${SAMPLE_MODE:-random}"
 SEED="${SEED:-0}"
 FEATURE_MODE="${FEATURE_MODE:-final}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-2}"
 
 CKPT_LABELS=(

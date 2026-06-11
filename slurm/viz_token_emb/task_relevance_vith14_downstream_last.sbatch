@@ -2,12 +2,12 @@
 #SBATCH --job-name=viz-trm-vith14-last
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
-#SBATCH --qos=normal
+#SBATCH --qos=boost_qos_dbg
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
-#SBATCH --time=02:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%j.out
 #SBATCH --error=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%j.err
 
