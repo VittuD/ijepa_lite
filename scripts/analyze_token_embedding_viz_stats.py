@@ -266,6 +266,7 @@ def aggregate_rows(
 
 def match_key(row: dict[str, Any]) -> tuple[str, ...]:
     return (
+        str(row.get("viz_root", "")),
         str(row.get("dataset", "")),
         str(row.get("split", "")),
         str(row.get("sample_id", "")),
@@ -288,16 +289,24 @@ def compare_pair(
     common_keys = sorted(set(baseline_by_key) & set(other_by_key))
 
     pair_rows: list[dict[str, Any]] = []
-    by_dataset_method: dict[tuple[str, str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
+    by_dataset_method: dict[tuple[str, str, str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = defaultdict(list)
     for key in common_keys:
         b = baseline_by_key[key]
         o = other_by_key[key]
-        by_dataset_method[(str(b["dataset"]), str(b["method"]), str(b["params"]))].append((b, o))
+        by_dataset_method[
+            (
+                str(b.get("viz_root", "")),
+                str(b["dataset"]),
+                str(b["method"]),
+                str(b["params"]),
+            )
+        ].append((b, o))
 
-    for (dataset, method, params), pairs in sorted(by_dataset_method.items()):
+    for (viz_root, dataset, method, params), pairs in sorted(by_dataset_method.items()):
         row: dict[str, Any] = {
             "baseline": baseline,
             "other": other,
+            "viz_root": viz_root,
             "baseline_family": infer_family(baseline),
             "other_family": infer_family(other),
             "baseline_variant": infer_variant(baseline),
@@ -403,6 +412,7 @@ def write_report(
     report.append(f"Metrics: {', '.join(metrics)}\n")
 
     compact_cols = [
+        "viz_root",
         "checkpoint",
         "dataset",
         "method",
@@ -425,6 +435,7 @@ def write_report(
         compare_cols = [
             "baseline",
             "other",
+            "viz_root",
             "dataset",
             "method",
             "params",

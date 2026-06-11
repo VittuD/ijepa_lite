@@ -14,12 +14,23 @@ wrapper writes three analysis bundles:
 
 The ``all`` bundle includes both within-family vanilla-vs-variant comparisons
 and same-variant chest-vs-IN1K comparisons.
+
+Multiple roots can be passed to compute one aggregate analysis with a shared
+smoothness-score normalization across all roots, for example:
+
+    scripts/analyze_task_relevance_token_viz_groups.py \
+        token_embedding_viz/task_relevance_vith14_downstream_last_224 \
+        token_embedding_viz/task_relevance_vith14_downstream_last_448 \
+        token_embedding_viz/task_relevance_random_controls_vith14_downstream_last_224 \
+        token_embedding_viz/task_relevance_random_controls_vith14_downstream_last_448 \
+        --out-dir token_embedding_viz/task_relevance_aggregate_analysis
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from os.path import commonpath
 from pathlib import Path
 
 from analyze_token_embedding_viz_stats import (
@@ -54,21 +65,23 @@ def parse_args() -> argparse.Namespace:
         )
     )
     p.add_argument(
-        "viz_root",
+        "viz_roots",
+        nargs="+",
         help="Root containing checkpoint output folders with summary.csv files.",
     )
     p.add_argument(
         "--out-dir",
         default=None,
         help=(
-            "Output directory. Defaults to <viz_root>/stats_by_family."
+            "Output directory. Defaults to <viz_root>/analysis for one root, "
+            "or <common-parent>/task_relevance_aggregate_analysis for multiple roots."
         ),
     )
     p.add_argument(
         "--group-by",
         nargs="+",
-        default=("checkpoint", "dataset", "method", "params"),
-        choices=("checkpoint", "family", "variant", "dataset", "split", "method", "params"),
+        default=("viz_root", "checkpoint", "dataset", "method", "params"),
+        choices=("viz_root", "checkpoint", "family", "variant", "dataset", "split", "method", "params"),
         help="Columns used for aggregate rows.",
     )
     p.add_argument(
@@ -96,6 +109,23 @@ def find_grouped_summary_csvs(viz_root: Path) -> dict[str, list[Path]]:
             groups["in1k"].append(path)
             groups["all"].append(path)
     return groups
+
+
+def default_out_dir(viz_roots: list[Path]) -> Path:
+    if len(viz_roots) == 1:
+        return viz_roots[0] / "analysis"
+
+    common = Path(commonpath([str(path.resolve()) for path in viz_roots]))
+    if common.is_file():
+        common = common.parent
+    return common / "task_relevance_aggregate_analysis"
+
+
+def read_rows_with_viz_root(viz_root: Path, paths: list[Path]) -> list[dict]:
+    rows = read_rows(paths)
+    for row in rows:
+        row["viz_root"] = viz_root.name
+    return rows
 
 
 def checkpoint_by_variant(rows: list[dict], family: str) -> dict[str, str]:
@@ -222,6 +252,7 @@ def add_smoothness_score(rows: list[dict]) -> None:
 def write_compact_markdown(path: Path, title: str, rows: list[dict]) -> None:
     columns = [
         "smoothness_score",
+        "viz_root",
         "checkpoint",
         "family",
         "variant",
@@ -257,7 +288,7 @@ def write_rankings_by_method(bundle_dir: Path, rows: list[dict]) -> dict[str, di
     out: dict[str, dict[str, str]] = {}
     checkpoint_tables = compact_rows_by_method(
         rows,
-        ("method", "checkpoint", "family", "variant"),
+        ("method", "viz_root", "checkpoint", "family", "variant"),
     )
 
     for method in sorted(checkpoint_tables):
@@ -280,7 +311,8 @@ def write_rankings_by_method(bundle_dir: Path, rows: list[dict]) -> dict[str, di
 def write_bundle(
     *,
     name: str,
-    paths: list[Path],
+    rows: list[dict],
+    source_csvs: list[Path],
     out_dir: Path,
     group_by: tuple[str, ...],
     metrics: tuple[str, ...],
@@ -289,9 +321,8 @@ def write_bundle(
     bundle_dir = out_dir / name
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = read_rows(paths)
     aggregates = aggregate_rows(rows, group_by=group_by, metrics=metrics)
-    ranking_by_checkpoint = compact_rows(rows, ("checkpoint", "family", "variant"))
+    ranking_by_checkpoint = compact_rows(rows, ("viz_root", "checkpoint", "family", "variant"))
     rankings_by_method = write_rankings_by_method(bundle_dir, rows)
 
     pairs = automatic_pairs(rows)
@@ -328,8 +359,8 @@ def write_bundle(
 
     return {
         "name": name,
-        "summary_csvs": [str(path) for path in paths],
-        "n_summary_csvs": len(paths),
+        "summary_csvs": [str(path) for path in source_csvs],
+        "n_summary_csvs": len(source_csvs),
         "n_rows": len(rows),
         "n_aggregates": len(aggregates),
         "n_comparisons": len(comparisons),
@@ -341,24 +372,42 @@ def write_bundle(
 
 def main() -> None:
     args = parse_args()
-    viz_root = Path(args.viz_root).resolve()
-    if not viz_root.is_dir():
-        raise SystemExit(f"viz_root is not a directory: {viz_root}")
+    viz_roots = [Path(root).resolve() for root in args.viz_roots]
+    for viz_root in viz_roots:
+        if not viz_root.is_dir():
+            raise SystemExit(f"viz_root is not a directory: {viz_root}")
 
-    out_dir = Path(args.out_dir).resolve() if args.out_dir else viz_root / "stats_by_family"
-    groups = find_grouped_summary_csvs(viz_root)
+    out_dir = Path(args.out_dir).resolve() if args.out_dir else default_out_dir(viz_roots)
+    grouped_paths = {"chest": [], "in1k": [], "all": []}
+    grouped_rows = {"chest": [], "in1k": [], "all": []}
+    roots_manifest = []
 
-    missing = [name for name in ("in1k", "chest") if not groups[name]]
+    for viz_root in viz_roots:
+        groups = find_grouped_summary_csvs(viz_root)
+        roots_manifest.append(
+            {
+                "viz_root": str(viz_root),
+                "n_chest_summary_csvs": len(groups["chest"]),
+                "n_in1k_summary_csvs": len(groups["in1k"]),
+                "n_all_summary_csvs": len(groups["all"]),
+            }
+        )
+        for name in ("chest", "in1k", "all"):
+            grouped_paths[name].extend(groups[name])
+            grouped_rows[name].extend(read_rows_with_viz_root(viz_root, groups[name]))
+
+    missing = [name for name in ("in1k", "chest") if not grouped_paths[name]]
     if missing:
         raise SystemExit(
             "Missing expected summary groups: "
             + ", ".join(missing)
-            + f". Looked under {viz_root}"
+            + f". Looked under {', '.join(str(path) for path in viz_roots)}"
         )
 
     manifest = {
-        "viz_root": str(viz_root),
+        "viz_roots": [str(path) for path in viz_roots],
         "out_dir": str(out_dir),
+        "roots": roots_manifest,
         "bundles": [],
     }
 
@@ -366,7 +415,8 @@ def main() -> None:
         include_cross = name == "all" and not args.no_cross_family
         bundle = write_bundle(
             name=name,
-            paths=groups[name],
+            rows=grouped_rows[name],
+            source_csvs=grouped_paths[name],
             out_dir=out_dir,
             group_by=tuple(args.group_by),
             metrics=tuple(args.metrics),
