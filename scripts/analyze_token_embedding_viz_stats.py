@@ -39,6 +39,9 @@ PRIMARY_METRICS = (
     "silhouette",
     "calinski_harabasz",
     "davies_bouldin",
+    "adjacent_cosine_distance",
+    "adjacent_cosine_distance_sd",
+    "adjacent_cosine_similarity",
     "pca_pc1",
     "pca_pc2",
     "pca_pc3",
@@ -193,6 +196,9 @@ def enrich_row(row: dict[str, str], source_csv: Path) -> dict[str, Any]:
         "silhouette",
         "calinski_harabasz",
         "davies_bouldin",
+        "adjacent_cosine_distance",
+        "adjacent_cosine_distance_sd",
+        "adjacent_cosine_similarity",
     ):
         out[key] = parse_float(row.get(key))
     return out
@@ -406,6 +412,8 @@ def write_report(
         "boundary_fraction_sd",
         "total_connected_components_mean",
         "extra_connected_components_mean",
+        "adjacent_cosine_distance_mean",
+        "adjacent_cosine_similarity_mean",
         "silhouette_mean",
         "pca_top3_sum_mean",
     ]
@@ -429,6 +437,10 @@ def write_report(
             "total_connected_components_other_mean",
             "total_connected_components_delta_mean",
             "total_connected_components_relative_delta_pct",
+            "adjacent_cosine_distance_baseline_mean",
+            "adjacent_cosine_distance_other_mean",
+            "adjacent_cosine_distance_delta_mean",
+            "adjacent_cosine_distance_relative_delta_pct",
             "pca_top3_sum_delta_mean",
         ]
         existing_compare_cols = [
@@ -441,6 +453,7 @@ def write_report(
     report.append(
         "- Lower `boundary_fraction` means fewer neighboring patch-label changes.\n"
         "- Lower `total_connected_components` / `extra_connected_components` means fewer spatial islands.\n"
+        "- Lower `adjacent_cosine_distance` means neighboring raw patch tokens are more similar before clustering.\n"
         "- Similar silhouette/Calinski/Davies-Bouldin with lower fragmentation suggests smoother spatial organization, not merely easier feature-space clustering.\n"
         "- Similar `pca_top3_sum` means smoothness is not explained by a large change in top-3 PCA variance alone.\n"
     )

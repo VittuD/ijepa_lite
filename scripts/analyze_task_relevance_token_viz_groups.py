@@ -39,6 +39,8 @@ RANKING_METRICS = (
     "extra_connected_components",
     "total_connected_components",
     "max_connected_components",
+    "adjacent_cosine_distance",
+    "adjacent_cosine_similarity",
     "silhouette",
     "pca_top3_sum",
 )
@@ -228,6 +230,8 @@ def write_compact_markdown(path: Path, title: str, rows: list[dict]) -> None:
         "boundary_fraction_mean",
         "extra_connected_components_mean",
         "total_connected_components_mean",
+        "adjacent_cosine_distance_mean",
+        "adjacent_cosine_similarity_mean",
         "silhouette_mean",
         "pca_top3_sum_mean",
     ]

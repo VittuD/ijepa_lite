@@ -415,6 +415,27 @@ def _token_pca_maps(tokens: np.ndarray, grid: int) -> tuple[np.ndarray, np.ndarr
     return rgb.reshape(grid, grid, 3), pc1.reshape(grid, grid), stats
 
 
+def _adjacent_cosine_stats(tokens: np.ndarray, grid: int) -> dict[str, float]:
+    x = tokens.astype(np.float32)
+    x = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-12)
+    x = x.reshape(grid, grid, -1)
+
+    distances: list[np.ndarray] = []
+    for a, b in (
+        (x[:-1, :, :], x[1:, :, :]),
+        (x[:, :-1, :], x[:, 1:, :]),
+    ):
+        cosine = np.clip(np.sum(a * b, axis=-1), -1.0, 1.0)
+        distances.append((1.0 - cosine).reshape(-1))
+
+    d = np.concatenate(distances)
+    return {
+        "adjacent_cosine_distance": float(d.mean()),
+        "adjacent_cosine_distance_sd": float(d.std(ddof=1)) if d.size > 1 else 0.0,
+        "adjacent_cosine_similarity": float(1.0 - d.mean()),
+    }
+
+
 def _cluster_space(tokens: np.ndarray, pca_dim: int) -> np.ndarray:
     x = _standardize(tokens.astype(np.float32))
     if pca_dim <= 0:
@@ -726,6 +747,9 @@ def _write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "proportions",
         "connected_components",
         "pca_explained_variance",
+        "adjacent_cosine_distance",
+        "adjacent_cosine_distance_sd",
+        "adjacent_cosine_similarity",
     ]
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -824,6 +848,7 @@ def main() -> None:
                 tokens = tokens_b[local_idx].numpy().astype(np.float32)
                 grid = _grid_size(tokens.shape[0])
                 pca_rgb, pc1, pca_stats = _token_pca_maps(tokens, grid)
+                continuous_stats = _adjacent_cosine_stats(tokens, grid)
                 x_cluster = _cluster_space(tokens, int(args.cluster_pca_dim))
                 clusters = _run_clustering(
                     x_cluster,
@@ -860,6 +885,7 @@ def main() -> None:
                             pca_stats["pca_explained_variance"]
                         ),
                     }
+                    row.update(continuous_stats)
                     row.update(
                         {
                             key: json.dumps(value) if isinstance(value, dict) else value
