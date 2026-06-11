@@ -47,6 +47,7 @@ set -euo pipefail
 module purge
 module load profile/deeplrn
 module load python/3.11.6--gcc--8.5.0
+module load imagenet
 
 source "${WORK}/vitturini/ijepa_venv/bin/activate"
 
@@ -59,6 +60,7 @@ export NUMEXPR_NUM_THREADS=4
 nvidia-smi -L || true
 
 REPO_ROOT="${REPO_ROOT:-${WORK}/vitturini/ijepa_lite}"
+IN1K_ROOT="${IN1K_ROOT:-${IMAGENET2012_HOME}}"
 DATA_ROOT="${DATA_ROOT:-${FAST:-/scratch}/datasets}"
 OUT_ROOT="${OUT_ROOT:-${WORK}/vitturini/token_embedding_viz/task_relevance_vith14_downstream_last_448}"
 
@@ -98,6 +100,7 @@ CKPT_RELS=(
 )
 
 DATASETS=(
+  imagenet:val
   chestmnist:val
   rsna_pneumonia_detection:val
   siimacr_pneumothorax:val
@@ -121,6 +124,7 @@ DBSCAN_EPS=(
 )
 
 echo "REPO_ROOT=${REPO_ROOT}"
+echo "IN1K_ROOT=${IN1K_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
 echo "OUT_ROOT=${OUT_ROOT}"
 echo "N_SAMPLES=${N_SAMPLES}"
@@ -162,6 +166,7 @@ for idx in $(seq "${START_IDX}" "${END_IDX}"); do
     python -m ijepa_lite.scripts.visualize_token_embeddings
     --repo-root "${REPO_ROOT}"
     --data-root "${DATA_ROOT}"
+    --dataset-root "imagenet=${IN1K_ROOT}"
     --dataset-root "chestmnist=${DATA_ROOT}"
     --dataset-root "rsna_pneumonia_detection=${DATA_ROOT}"
     --dataset-root "siimacr_pneumothorax=${DATA_ROOT}"

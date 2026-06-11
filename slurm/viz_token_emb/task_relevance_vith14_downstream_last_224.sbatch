@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=viz-trm-vith14-last
+#SBATCH --job-name=viz-trm-vith14-224
 #SBATCH --account=IscrC_TBoneAI
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_dbg
@@ -8,8 +8,8 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:30:00
-#SBATCH --output=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%j.out
-#SBATCH --error=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last/%x_%j.err
+#SBATCH --output=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last_224/%x_%j.out
+#SBATCH --error=sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last_224/%x_%j.err
 
 # ---------------------------------------------------------------------------
 # Token-embedding PCA and clustering visualization for the ViT-H/14
@@ -29,13 +29,14 @@
 #   10  in1k_semantic_pca_last
 #
 # Default visualization datasets mirror the downstream medical readouts:
+#   - imagenet:val
 #   - chestmnist:val
 #   - rsna_pneumonia_detection:val
 #   - siimacr_pneumothorax:val
 #
 # Submit:
-#   mkdir -p sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last
-#   sbatch slurm/viz_token_emb/task_relevance_vith14_downstream_last.sbatch
+#   mkdir -p sbatch_logs/viz_token_emb/task_relevance_vith14_downstream_last_224
+#   sbatch slurm/viz_token_emb/task_relevance_vith14_downstream_last_224.sbatch
 #
 # Useful overrides:
 #   N_SAMPLES=24 SAMPLE_MODE=first sbatch ...
@@ -48,6 +49,7 @@ set -euo pipefail
 module purge
 module load profile/deeplrn
 module load python/3.11.6--gcc--8.5.0
+module load imagenet
 
 source "${WORK}/vitturini/ijepa_venv/bin/activate"
 
@@ -60,8 +62,9 @@ export NUMEXPR_NUM_THREADS=4
 nvidia-smi -L || true
 
 REPO_ROOT="${REPO_ROOT:-${WORK}/vitturini/ijepa_lite}"
+IN1K_ROOT="${IN1K_ROOT:-${IMAGENET2012_HOME}}"
 DATA_ROOT="${DATA_ROOT:-${FAST:-/scratch}/datasets}"
-OUT_ROOT="${OUT_ROOT:-${WORK}/vitturini/token_embedding_viz/task_relevance_vith14_downstream_last}"
+OUT_ROOT="${OUT_ROOT:-${WORK}/vitturini/token_embedding_viz/task_relevance_vith14_downstream_last_224}"
 
 N_SAMPLES="${N_SAMPLES:-12}"
 SAMPLE_MODE="${SAMPLE_MODE:-random}"
@@ -99,6 +102,7 @@ CKPT_RELS=(
 )
 
 DATASETS=(
+  imagenet:val
   chestmnist:val
   rsna_pneumonia_detection:val
   siimacr_pneumothorax:val
@@ -124,6 +128,7 @@ DBSCAN_EPS=(
 )
 
 echo "REPO_ROOT=${REPO_ROOT}"
+echo "IN1K_ROOT=${IN1K_ROOT}"
 echo "DATA_ROOT=${DATA_ROOT}"
 echo "OUT_ROOT=${OUT_ROOT}"
 echo "N_SAMPLES=${N_SAMPLES}"
@@ -165,6 +170,7 @@ for idx in $(seq "${START_IDX}" "${END_IDX}"); do
     python -m ijepa_lite.scripts.visualize_token_embeddings
     --repo-root "${REPO_ROOT}"
     --data-root "${DATA_ROOT}"
+    --dataset-root "imagenet=${IN1K_ROOT}"
     --dataset-root "chestmnist=${DATA_ROOT}"
     --dataset-root "rsna_pneumonia_detection=${DATA_ROOT}"
     --dataset-root "siimacr_pneumothorax=${DATA_ROOT}"
