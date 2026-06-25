@@ -633,33 +633,42 @@ def _save_sample_figure(
 ) -> None:
     plt = _pyplot()
 
-    panels = 3 + len(clusters)
-    cols = min(5, panels)
-    rows = int(math.ceil(panels / cols))
+    cluster_rows: list[list[ClusterResult]] = []
+    for result in clusters:
+        if not cluster_rows or cluster_rows[-1][0].method != result.method:
+            cluster_rows.append([])
+        if len(cluster_rows[-1]) == 3:
+            cluster_rows.append([])
+        cluster_rows[-1].append(result)
+
+    cols = 3
+    rows = 1 + len(cluster_rows)
     fig, axes = plt.subplots(rows, cols, figsize=(3.0 * cols, 3.0 * rows), squeeze=False)
-    flat = list(axes.reshape(-1))
 
-    flat[0].imshow(image)
-    flat[0].set_title("image", fontsize=8)
-    flat[0].set_axis_off()
+    axes[0, 0].imshow(image)
+    axes[0, 0].set_title("image", fontsize=8)
+    axes[0, 0].set_axis_off()
 
-    flat[1].imshow(pca_rgb, interpolation="nearest")
-    flat[1].set_title("token PCA RGB", fontsize=8)
-    flat[1].set_axis_off()
+    axes[0, 1].imshow(pca_rgb, interpolation="nearest")
+    axes[0, 1].set_title("token PCA RGB", fontsize=8)
+    axes[0, 1].set_axis_off()
 
-    flat[2].imshow(pc1, interpolation="nearest", cmap="magma")
-    flat[2].set_title("token PC1", fontsize=8)
-    flat[2].set_axis_off()
+    axes[0, 2].imshow(pc1, interpolation="nearest", cmap="magma")
+    axes[0, 2].set_title("token PC1", fontsize=8)
+    axes[0, 2].set_axis_off()
 
-    for ax, result in zip(flat[3:], clusters):
-        _render_label_map(
-            ax,
-            result.labels,
-            grid,
-            f"{result.method}\n{result.params}",
-        )
+    for row_idx, row_clusters in enumerate(cluster_rows, start=1):
+        for col_idx, result in enumerate(row_clusters):
+            _render_label_map(
+                axes[row_idx, col_idx],
+                result.labels,
+                grid,
+                f"{result.method}\n{result.params}",
+            )
 
-    for ax in flat[3 + len(clusters):]:
+    for ax in axes.reshape(-1):
+        if ax.has_data():
+            continue
         ax.set_axis_off()
 
     fig.suptitle(title, fontsize=11)
