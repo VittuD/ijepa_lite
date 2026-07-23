@@ -6,7 +6,9 @@ and a Gaussian target signal derived from z-scored per-patch reconstruction
 errors. Target patches with median error get target=1; tails (too easy or
 too hard) get target→0.
 
-patch_loss must be pre-detached by the caller (enforces gradient isolation).
+The caller controls whether patch_loss is detached. The current pretraining
+runtime supplies the live reconstruction tensor; changing that boundary alters
+the training objective and must be handled as an explicit scientific change.
 """
 from __future__ import annotations
 
@@ -79,7 +81,7 @@ class GoldilocksLoss(nn.Module):
         self,
         p_tgt:      torch.Tensor,  # (B, N)  — full soft scores from masker
         tgt_idx:    torch.Tensor,  # (B, K)  — hard-selected target indices
-        patch_loss: torch.Tensor,  # (B, K) or (B, K, D) — detached recon errors
+        patch_loss: torch.Tensor,  # (B, K) or (B, K, D) reconstruction errors
     ) -> torch.Tensor:             # scalar
         if patch_loss.dim() == 3:
             patch_loss = patch_loss.mean(-1)          # (B, K)

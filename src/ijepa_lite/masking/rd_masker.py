@@ -48,15 +48,30 @@ p_ign → 1   : β · ign_tax penalises; prior_bs always positive
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ijepa_lite.masking.base import LatentMasker, MaskOutput
+from ijepa_lite.masking.base import (
+    LatentMasker,
+    MaskOutput,
+    MaskPartition,
+    ThreeWayAssignment,
+)
 from ijepa_lite.masking.registry import register
 from ijepa_lite.losses.rd_loss import RateDistSurpriseLoss
+
+
+@dataclass(frozen=True)
+class RateDistObjectiveState:
+    lambda_ctx: torch.Tensor
+    alpha: torch.Tensor
+    beta: torch.Tensor
+    lambda_tgt: torch.Tensor
+    ema_full: Optional[torch.Tensor]
 
 
 @register("rd_3way")
@@ -228,13 +243,9 @@ class RateDist3WayMasker(LatentMasker):
             target_idx           : (B, ntgt)  ntgt ≥ ntgt_min
             context_soft         : (B, N)     p_ctx
             target_soft          : (B, N)     p_tgt
-            aux["lambda"]        : (B,)
-            aux["alpha"]         : (B,)
-            aux["beta"]          : (B,)
-            aux["lambda_tgt"]    : (B,)
-            aux["p_ign"]         : (B, N)     with grad — needed for β ign_tax
-            aux["logits"]        : (B, N, 3)  detached — for diagnostics
-            aux["ema_full"]      : (B, N, D)  — passed to aux_loss for surprise
+            assignment           : three-way context/target/ignore probabilities
+            objective_state      : rates and full EMA tokens used by aux_loss
+            diagnostics          : detached logits and scalar logging values
         """
         B = tokens.shape[0]
         device = tokens.device
@@ -305,18 +316,25 @@ class RateDist3WayMasker(LatentMasker):
         _, ctx_idx = torch.topk(p_ctx_masked, nctx, dim=-1, sorted=False)
 
         return MaskOutput(
-            context_idx=ctx_idx,
-            target_idx=tgt_idx,
-            context_soft=p_ctx,
-            target_soft=p_tgt,
-            aux={
+            partition=MaskPartition(context_idx=ctx_idx, target_idx=tgt_idx),
+            assignment=ThreeWayAssignment(
+                context=p_ctx,
+                target=p_tgt,
+                ignore=p_ign,
+            ),
+            objective_state=RateDistObjectiveState(
+                lambda_ctx=lam,
+                alpha=alpha,
+                beta=beta,
+                lambda_tgt=lam_tgt,
+                ema_full=ema_full,
+            ),
+            diagnostics={
                 "lambda":      lam,
                 "alpha":       alpha,
                 "beta":        beta,
                 "lambda_tgt":  lam_tgt,
-                "p_ign":       p_ign,           # NOT detached — needed for β gradient
-                "logits":      logits.detach(), # pre-Gumbel, for diagnostics
-                "ema_full":    ema_full,        # (B, N, D) — used in aux_loss
+                "logits":      logits.detach(),
             },
         )
 
@@ -339,22 +357,29 @@ class RateDist3WayMasker(LatentMasker):
         already captures prediction difficulty as a scalar). It remains in the
         signature for interface compatibility and future curriculum work.
         """
-        p_ctx    = mask_output.context_soft          # (B, N)
-        p_tgt    = mask_output.target_soft           # (B, N)
-        p_ign    = mask_output.aux["p_ign"]          # (B, N) — with grad
-        lam      = mask_output.aux["lambda"]         # (B,)
-        alpha    = mask_output.aux["alpha"]          # (B,)
-        beta     = mask_output.aux["beta"]           # (B,)
-        lam_tgt  = mask_output.aux["lambda_tgt"]    # (B,)
-        ema_full = mask_output.aux.get("ema_full")   # (B, N, D) or None
+        if not isinstance(mask_output.assignment, ThreeWayAssignment):
+            raise TypeError("RateDist3WayMasker requires ThreeWayAssignment.")
+        if not isinstance(mask_output.objective_state, RateDistObjectiveState):
+            raise TypeError("RateDist3WayMasker requires RateDistObjectiveState.")
+
+        assignment = mask_output.assignment
+        state = mask_output.objective_state
+        p_ctx = assignment.context
+        p_tgt = assignment.target
+        p_ign = assignment.ignore
+        lam = state.lambda_ctx
+        alpha = state.alpha
+        beta = state.beta
+        lam_tgt = state.lambda_tgt
+        ema_full = state.ema_full
 
         if ema_full is None:
             # Unit test / fallback — rate terms only, no surprise
             R_ctx = p_ctx.sum(dim=-1).mean() / self.num_patches
             R_tgt = p_tgt.sum(dim=-1).mean() / self.num_patches
-            mask_output.aux["surprise_mean"] = 0.0
-            mask_output.aux["R"] = float(R_ctx.item())
-            mask_output.aux["ign_rate"] = 0.0
+            mask_output.diagnostics["surprise_mean"] = 0.0
+            mask_output.diagnostics["R"] = float(R_ctx.item())
+            mask_output.diagnostics["ign_rate"] = 0.0
             return (reconstruction_loss
                     + lam.mean() * self.num_patches * R_ctx
                     + lam_tgt.mean() * self.num_patches * R_tgt)
@@ -371,10 +396,9 @@ class RateDist3WayMasker(LatentMasker):
             lam_tgt=lam_tgt,
         )
 
-        # Write back into aux for mask_diagnostics to pick up
-        mask_output.aux["surprise_mean"] = float(surprise.item())
-        mask_output.aux["R"] = float(R_ctx.item())
-        mask_output.aux["ign_rate"] = float(ign_rate.item())
+        mask_output.diagnostics["surprise_mean"] = float(surprise.item())
+        mask_output.diagnostics["R"] = float(R_ctx.item())
+        mask_output.diagnostics["ign_rate"] = float(ign_rate.item())
 
         return total
 

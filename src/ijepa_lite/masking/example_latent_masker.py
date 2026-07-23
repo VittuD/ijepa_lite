@@ -27,7 +27,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ijepa_lite.masking.base import LatentMasker, MaskOutput
+from ijepa_lite.masking.base import (
+    LatentMasker,
+    MaskOutput,
+    MaskPartition,
+    TwoWayAssignment,
+)
 from ijepa_lite.masking.registry import register
 
 
@@ -136,11 +141,12 @@ class GumbelTopKMasker(LatentMasker):
         _, ctx_idx = torch.topk(ctx_scores, self.nctx, dim=-1, sorted=False)  # (B, nctx)
 
         return MaskOutput(
-            context_idx=ctx_idx,
-            target_idx=tgt_idx,
-            context_soft=ctx_scores,    # (B, N) — carries gradient to score_head
-            target_soft=soft_scores,    # (B, N) — carries gradient to score_head
-            aux={"logits": logits.detach()},
+            partition=MaskPartition(context_idx=ctx_idx, target_idx=tgt_idx),
+            assignment=TwoWayAssignment(
+                context=ctx_scores,
+                target=soft_scores,
+            ),
+            diagnostics={"logits": logits.detach()},
         )
 
     # ------------------------------------------------------------------
@@ -167,10 +173,10 @@ class GumbelTopKMasker(LatentMasker):
         Override this method in a subclass to implement different gradient
         routing strategies without changing forward().
         """
-        if mask_output.target_soft is None:
+        if not isinstance(mask_output.assignment, TwoWayAssignment):
             return reconstruction_loss.new_zeros(())
 
-        soft = mask_output.target_soft  # (B, N)
+        soft = mask_output.assignment.target
         # Shannon entropy over patch-selection distribution, averaged over batch
         entropy = -(soft * (soft + 1e-10).log()).sum(dim=-1).mean()
 

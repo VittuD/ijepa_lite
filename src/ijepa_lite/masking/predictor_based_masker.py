@@ -41,7 +41,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ijepa_lite.masking.base import LatentMasker, MaskOutput
+from ijepa_lite.masking.base import (
+    LatentMasker,
+    MaskOutput,
+    MaskPartition,
+    TwoWayAssignment,
+)
 from ijepa_lite.masking.registry import register
 
 
@@ -210,11 +215,12 @@ class PredictorBasedMasker(LatentMasker):
         _, ctx_idx = torch.topk(ctx_scores, self.nctx, dim=-1, sorted=False)
 
         return MaskOutput(
-            context_idx=ctx_idx,
-            target_idx=tgt_idx,
-            context_soft=ctx_scores,
-            target_soft=soft_scores,
-            aux={"logits": logits.detach()},
+            partition=MaskPartition(context_idx=ctx_idx, target_idx=tgt_idx),
+            assignment=TwoWayAssignment(
+                context=ctx_scores,
+                target=soft_scores,
+            ),
+            diagnostics={"logits": logits.detach()},
         )
 
     # ------------------------------------------------------------------
@@ -227,10 +233,10 @@ class PredictorBasedMasker(LatentMasker):
         reconstruction_loss: torch.Tensor,
         patch_loss=None,  # accepted but not used; kept for interface consistency
     ) -> torch.Tensor:
-        if mask_output.target_soft is None:
+        if not isinstance(mask_output.assignment, TwoWayAssignment):
             return reconstruction_loss.new_zeros(())
 
-        soft = mask_output.target_soft   # (B, N)
+        soft = mask_output.assignment.target
         entropy = -(soft * (soft + 1e-10).log()).sum(dim=-1).mean()
         return -self.entropy_coeff * entropy
 

@@ -2,47 +2,113 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Generic, Optional, TypeVar
 
 import torch
 import torch.nn as nn
 
 
+@dataclass(frozen=True)
+class MaskPartition:
+    """Hard token partition consumed by the JEPA encoder and predictor."""
+
+    context_idx: torch.Tensor
+    target_idx: torch.Tensor
+    target_block_counts: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class TwoWayAssignment:
+    """Per-position context and target selection probabilities."""
+
+    context: torch.Tensor
+    target: torch.Tensor
+
+
+@dataclass(frozen=True)
+class ThreeWayAssignment:
+    """Categorical probabilities for context, target, and ignore roles."""
+
+    context: torch.Tensor
+    target: torch.Tensor
+    ignore: torch.Tensor
+
+
+@dataclass(frozen=True)
+class NWayAssignment:
+    """Categorical probabilities for context, target blocks, and ignore."""
+
+    probabilities: torch.Tensor
+
+    @property
+    def context(self) -> torch.Tensor:
+        return self.probabilities[..., 0]
+
+    @property
+    def targets(self) -> torch.Tensor:
+        return self.probabilities[..., 1:-1]
+
+    @property
+    def target(self) -> torch.Tensor:
+        return self.targets.sum(dim=-1)
+
+    @property
+    def ignore(self) -> torch.Tensor:
+        return self.probabilities[..., -1]
+
+
+@dataclass(frozen=True)
+class TargetScoreAssignment:
+    """Independent target scores, not a categorical role distribution."""
+
+    target: torch.Tensor
+
+
+MaskAssignment = (
+    TwoWayAssignment
+    | ThreeWayAssignment
+    | NWayAssignment
+    | TargetScoreAssignment
+)
+ObjectiveStateT = TypeVar("ObjectiveStateT")
+
+
 @dataclass
-class MaskOutput:
-    """
-    Unified output contract for all maskers, deterministic or learned.
+class MaskOutput(Generic[ObjectiveStateT]):
+    """Typed output shared by deterministic and learned maskers.
 
-    Hard indices
-    ------------
-    context_idx / target_idx are LongTensors used directly for token
-    gathering in the JEPA forward pass.  No gradients flow through them.
-
-    Soft scores  (learned maskers only)
-    ------------
-    context_soft / target_soft are floating-point score tensors over all N
-    patch positions.  For 2-way maskers (GumbelTopK, PredictorBased) these
-    are normalised selection probabilities.  For the 3-way RD masker these
-    are the categorical probabilities p_ctx and p_tgt respectively, with
-    p_ign stored in aux["p_ign"].
-
-    aux
-    ---
-    Open dict for diagnostics and intermediate values.
-    Keys set by RateDist3WayMasker:
-      "lambda"  : (B,) tensor — the λ sample used this step
-      "p_ign"   : (B, N) tensor — ignore-class probability (detached)
-      "logits"  : (B, N, 3) tensor — raw 3-way logits (detached)
-    Keys set by aux_loss (written in-place for metrics):
-      "D_soft"  : float — soft-weighted distortion
-      "R"       : float — expected context fraction
+    ``partition`` and ``assignment`` describe mask semantics. Objective inputs
+    needed by a learned masker live in its typed ``objective_state``. The open
+    ``diagnostics`` mapping is reserved for logging and visualization and must
+    not be required to compute the training objective.
     """
 
-    context_idx: torch.Tensor                        # (B, Nctx)            always
-    target_idx: torch.Tensor                         # (B, Ntgt)|(B, M, K)  always
-    context_soft: Optional[torch.Tensor] = None      # (B, N)               learned only
-    target_soft: Optional[torch.Tensor] = None       # (B, N)               learned only
-    aux: dict = field(default_factory=dict)
+    partition: MaskPartition
+    assignment: Optional[MaskAssignment] = None
+    objective_state: Optional[ObjectiveStateT] = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def context_idx(self) -> torch.Tensor:
+        return self.partition.context_idx
+
+    @property
+    def target_idx(self) -> torch.Tensor:
+        return self.partition.target_idx
+
+    @property
+    def context_soft(self) -> Optional[torch.Tensor]:
+        assignment = self.assignment
+        if isinstance(assignment, (TwoWayAssignment, ThreeWayAssignment, NWayAssignment)):
+            return assignment.context
+        return None
+
+    @property
+    def target_soft(self) -> Optional[torch.Tensor]:
+        assignment = self.assignment
+        if assignment is None:
+            return None
+        return assignment.target
 
 
 class CollateMasker(ABC):

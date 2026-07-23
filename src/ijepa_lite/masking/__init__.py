@@ -1,4 +1,13 @@
-from ijepa_lite.masking.base import CollateMasker, LatentMasker, MaskOutput
+from ijepa_lite.masking.base import (
+    CollateMasker,
+    LatentMasker,
+    MaskOutput,
+    MaskPartition,
+    NWayAssignment,
+    TargetScoreAssignment,
+    ThreeWayAssignment,
+    TwoWayAssignment,
+)
 from ijepa_lite.masking.block_mask import BlockMaskGenerator
 from ijepa_lite.masking.compressor import TokenCompressor
 from ijepa_lite.masking.metrics import mask_diagnostics
@@ -17,6 +26,11 @@ from ijepa_lite.masking.registry import build_latent_masker, register, registere
 __all__ = [
     # Core contracts
     "MaskOutput",
+    "MaskPartition",
+    "TwoWayAssignment",
+    "ThreeWayAssignment",
+    "NWayAssignment",
+    "TargetScoreAssignment",
     "CollateMasker",
     "LatentMasker",
     # Deterministic collate maskers

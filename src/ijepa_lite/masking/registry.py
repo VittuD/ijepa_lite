@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from typing import Any, Type
 
 from ijepa_lite.masking.base import LatentMasker
@@ -40,17 +41,24 @@ def register(name: str):
     return decorator
 
 
-def build_latent_masker(name: str, **kwargs: Any) -> LatentMasker:
+def build_latent_masker(
+    name: str,
+    *,
+    inferred_kwargs: Mapping[str, Any] | None = None,
+    **config_kwargs: Any,
+) -> LatentMasker:
     """
     Instantiate a registered LatentMasker by name.
 
-    Kwargs filtering
-    ----------------
-    build.py's auto_kwargs is intentionally a superset of what any single masker
-    needs — it includes predictor-compatible fields, loss-related fields, and
-    model-level fields.  Rather than requiring every masker to accept **kwargs,
-    this function inspects the constructor signature and silently drops any kwarg
-    that is not explicitly accepted.
+    Argument validation
+    -------------------
+    ``inferred_kwargs`` is intentionally allowed to be a superset of what a
+    single masker needs. Values inferred from model, predictor, and loss config
+    are filtered against the selected constructor.
+
+    Explicit ``config_kwargs`` are different: an unsupported field is almost
+    certainly a typo or an unimplemented feature and therefore raises. Explicit
+    values override inferred values when both provide the same constructor field.
 
     This means:
       - GumbelTopKMasker sees:     dim, num_patches, target_ratio, context_ratio,
@@ -62,8 +70,8 @@ def build_latent_masker(name: str, **kwargs: Any) -> LatentMasker:
     Raises
     ------
     ValueError  if name is not registered.
-    TypeError   if a *required* constructor argument (no default) is missing after
-                filtering — this is intentional and surfaces real config errors.
+    TypeError   if an explicit field is unsupported or a required constructor
+                argument is missing.
     """
     if name not in _REGISTRY:
         available = sorted(_REGISTRY.keys())
@@ -84,11 +92,23 @@ def build_latent_masker(name: str, **kwargs: Any) -> LatentMasker:
         for p in sig.parameters.values()
     )
 
-    filtered = kwargs if has_var_keyword else {
-        k: v for k, v in kwargs.items() if k in valid_params
-    }
+    inferred = dict(inferred_kwargs or {})
+    if has_var_keyword:
+        filtered_inferred = inferred
+    else:
+        filtered_inferred = {
+            key: value for key, value in inferred.items() if key in valid_params
+        }
 
-    return cls(**filtered)
+        unsupported = sorted(set(config_kwargs) - valid_params)
+        if unsupported:
+            raise TypeError(
+                f"LatentMasker name={name!r} does not accept explicit config "
+                f"field(s): {', '.join(unsupported)}. "
+                f"Accepted fields: {', '.join(sorted(valid_params))}."
+            )
+
+    return cls(**{**filtered_inferred, **config_kwargs})
 
 
 def registered_names() -> list[str]:

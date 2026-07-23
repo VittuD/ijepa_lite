@@ -5,7 +5,11 @@ from typing import Optional
 
 import torch
 
-from ijepa_lite.masking.base import MaskOutput
+from ijepa_lite.masking.base import (
+    MaskOutput,
+    NWayAssignment,
+    ThreeWayAssignment,
+)
 
 
 @torch.no_grad()
@@ -25,7 +29,7 @@ def mask_diagnostics(
     ----
     mask_output   : MaskOutput produced by any masker.
     num_patches   : Total patch positions N.
-    masker_loss   : Scalar aux loss from the latent masker, or None.
+    masker_loss   : Scalar auxiliary loss from the latent masker, or None.
     full          : When False, only compute cheap always-on metrics.
                     When True, also compute richer spatial and distributional
                     diagnostics.  Pass full=True only at log steps.
@@ -41,7 +45,7 @@ def mask_diagnostics(
     mask/target_ratio      ntgt / N.
     mask/masker_loss       Aux loss scalar (0.0 for deterministic maskers).
 
-    RD masker — always (keys present in aux after aux_loss):
+    RD masker — always (keys present in diagnostics after aux_loss):
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     mask/lambda            λ value used this step.
     mask/D_soft            Soft-weighted distortion D_soft.
@@ -64,7 +68,7 @@ def mask_diagnostics(
     mask/score_max_mean
     mask/topk_mass_ratio
 
-    Full diagnostics — 3-way RD masker (p_ign present in aux):
+    Full diagnostics — 3-way RD masker:
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     mask/entropy_ctx       Shannon entropy of p_ctx distribution.
     mask/entropy_tgt       Shannon entropy of p_tgt distribution.
@@ -77,7 +81,7 @@ def mask_diagnostics(
 
     ctx_idx = mask_output.context_idx   # (B, Nctx)
     tgt_idx = mask_output.target_idx    # (B, Ntgt) or (B, M, K)
-    tgt_counts = mask_output.aux.get("target_block_counts")
+    tgt_counts = mask_output.partition.target_block_counts
 
     nctx = ctx_idx.shape[1]
     if tgt_idx.dim() == 3 and tgt_counts is not None:
@@ -107,38 +111,38 @@ def mask_diagnostics(
             stats[f"mask/hard_tgt_{i}"] = float(count)
 
     # ------------------------------------------------------------------
-    # RD masker — read from aux (written by aux_loss in-place)
+    # RD masker — read from diagnostics (written by aux_loss in-place)
     # ------------------------------------------------------------------
-    aux = mask_output.aux
+    diagnostics = mask_output.diagnostics
 
-    if "max_total_tgt" in aux:
-        stats["mask/max_total_tgt"] = float(aux["max_total_tgt"])
-    if "max_tgt_per_block" in aux:
-        stats["mask/max_tgt_per_block"] = float(aux["max_tgt_per_block"])
-    if "max_total_hard" in aux:
-        stats["mask/max_total_hard"] = float(aux["max_total_hard"])
+    if "max_total_tgt" in diagnostics:
+        stats["mask/max_total_tgt"] = float(diagnostics["max_total_tgt"])
+    if "max_tgt_per_block" in diagnostics:
+        stats["mask/max_tgt_per_block"] = float(diagnostics["max_tgt_per_block"])
+    if "max_total_hard" in diagnostics:
+        stats["mask/max_total_hard"] = float(diagnostics["max_total_hard"])
 
-    if "lambda" in aux:
-        lam = aux["lambda"]
+    if "lambda" in diagnostics:
+        lam = diagnostics["lambda"]
         stats["mask/lambda"] = float(lam.mean().item()) if torch.is_tensor(lam) else float(lam)
 
-    if "alpha" in aux:
-        alpha = aux["alpha"]
+    if "alpha" in diagnostics:
+        alpha = diagnostics["alpha"]
         stats["mask/alpha"] = float(alpha.mean().item()) if torch.is_tensor(alpha) else float(alpha)
 
-    if "beta" in aux:
-        beta = aux["beta"]
+    if "beta" in diagnostics:
+        beta = diagnostics["beta"]
         stats["mask/beta"] = float(beta.mean().item()) if torch.is_tensor(beta) else float(beta)
 
-    if "lambda_tgt" in aux:
-        lam_tgt = aux["lambda_tgt"]
+    if "lambda_tgt" in diagnostics:
+        lam_tgt = diagnostics["lambda_tgt"]
         stats["mask/lambda_tgt"] = float(lam_tgt.mean().item()) if torch.is_tensor(lam_tgt) else float(lam_tgt)
 
-    if "D_soft" in aux:
-        stats["mask/D_soft"] = float(aux["D_soft"])
+    if "D_soft" in diagnostics:
+        stats["mask/D_soft"] = float(diagnostics["D_soft"])
 
-    if "R" in aux:
-        R = float(aux["R"])
+    if "R" in diagnostics:
+        R = float(diagnostics["R"])
         stats["mask/rate"] = R
         stats["mask/expected_nctx"] = R * num_patches
 
@@ -148,7 +152,12 @@ def mask_diagnostics(
     # Expected counts from soft probabilities
     p_tgt = mask_output.target_soft   # (B, N) or None
     p_ctx = mask_output.context_soft  # (B, N) or None
-    p_ign = aux.get("p_ign", None)    # (B, N) or None — 3-way masker only
+    assignment = mask_output.assignment
+    p_ign = (
+        assignment.ignore
+        if isinstance(assignment, (ThreeWayAssignment, NWayAssignment))
+        else None
+    )
 
     if p_ctx is not None:
         stats["mask/expected_nctx"] = float(p_ctx.sum(dim=-1).mean().item())
@@ -160,21 +169,21 @@ def mask_diagnostics(
         stats["mask/expected_nign"] = float(p_ign.sum(dim=-1).mean().item())
 
     # Surprise and ignore-tax metrics — always log when present
-    if "surprise_mean" in aux:
-        stats["mask/surprise_mean"] = float(aux["surprise_mean"])
-    if "cos_surprise_mean" in aux:
-        stats["mask/cos_surprise_mean"] = float(aux["cos_surprise_mean"])
-    if "sym_cos_surprise_mean" in aux:
-        stats["mask/sym_cos_surprise_mean"] = float(aux["sym_cos_surprise_mean"])
-    if "sketched_orthogonal_cos_surprise_mean" in aux:
+    if "surprise_mean" in diagnostics:
+        stats["mask/surprise_mean"] = float(diagnostics["surprise_mean"])
+    if "cos_surprise_mean" in diagnostics:
+        stats["mask/cos_surprise_mean"] = float(diagnostics["cos_surprise_mean"])
+    if "sym_cos_surprise_mean" in diagnostics:
+        stats["mask/sym_cos_surprise_mean"] = float(diagnostics["sym_cos_surprise_mean"])
+    if "sketched_orthogonal_cos_surprise_mean" in diagnostics:
         stats["mask/sketched_orthogonal_cos_surprise_mean"] = float(
-            aux["sketched_orthogonal_cos_surprise_mean"]
+            diagnostics["sketched_orthogonal_cos_surprise_mean"]
         )
-    if "sym_cos_surprise_tgt_to_ctx" in aux:
-        stats["mask/sym_cos_surprise_tgt_to_ctx"] = float(aux["sym_cos_surprise_tgt_to_ctx"])
-    if "sym_cos_surprise_ctx_to_tgt" in aux:
-        stats["mask/sym_cos_surprise_ctx_to_tgt"] = float(aux["sym_cos_surprise_ctx_to_tgt"])
-    for key, value in aux.items():
+    if "sym_cos_surprise_tgt_to_ctx" in diagnostics:
+        stats["mask/sym_cos_surprise_tgt_to_ctx"] = float(diagnostics["sym_cos_surprise_tgt_to_ctx"])
+    if "sym_cos_surprise_ctx_to_tgt" in diagnostics:
+        stats["mask/sym_cos_surprise_ctx_to_tgt"] = float(diagnostics["sym_cos_surprise_ctx_to_tgt"])
+    for key, value in diagnostics.items():
         if (
             key.startswith("cos_surprise/")
             or key.startswith("sym_cos_surprise_")
@@ -189,24 +198,24 @@ def mask_diagnostics(
         ):
             stats[f"mask/{key}"] = float(value)
 
-    if "ign_rate" in aux:
-        stats["mask/ign_rate"] = float(aux["ign_rate"])
+    if "ign_rate" in diagnostics:
+        stats["mask/ign_rate"] = float(diagnostics["ign_rate"])
 
-    if "mi_rate" in aux:
-        stats["mask/mi_rate"] = float(aux["mi_rate"])
+    if "mi_rate" in diagnostics:
+        stats["mask/mi_rate"] = float(diagnostics["mi_rate"])
 
-    if "entropy_conditional" in aux:
-        stats["mask/entropy_conditional"] = float(aux["entropy_conditional"])
+    if "entropy_conditional" in diagnostics:
+        stats["mask/entropy_conditional"] = float(diagnostics["entropy_conditional"])
 
-    if "entropy_marginal" in aux:
-        stats["mask/entropy_marginal"] = float(aux["entropy_marginal"])
+    if "entropy_marginal" in diagnostics:
+        stats["mask/entropy_marginal"] = float(diagnostics["entropy_marginal"])
 
-    if "floor_penalty" in aux:
-        stats["mask/floor_penalty"] = float(aux["floor_penalty"])
+    if "floor_penalty" in diagnostics:
+        stats["mask/floor_penalty"] = float(diagnostics["floor_penalty"])
 
     for _hard_key in ("hard_sampled_nctx", "hard_sampled_ntgt", "hard_sampled_nign"):
-        if _hard_key in aux:
-            stats[f"mask/{_hard_key}"] = float(aux[_hard_key])
+        if _hard_key in diagnostics:
+            stats[f"mask/{_hard_key}"] = float(diagnostics[_hard_key])
 
     for _rrg_key in (
         "warmup_random_multiblock_active",
@@ -226,9 +235,9 @@ def mask_diagnostics(
         "rrg_exec_ntgt_unique",
         "rrg_exec_nign",
     ):
-        if _rrg_key in aux:
-            stats[f"mask/{_rrg_key}"] = float(aux[_rrg_key])
-    for key, value in aux.items():
+        if _rrg_key in diagnostics:
+            stats[f"mask/{_rrg_key}"] = float(diagnostics[_rrg_key])
+    for key, value in diagnostics.items():
         if key.startswith("rrg_semantic_ntgt_block_") or key.startswith("rrg_exec_ntgt_block_"):
             if torch.is_tensor(value):
                 if value.numel() == 1:
@@ -236,46 +245,50 @@ def mask_diagnostics(
             else:
                 stats[f"mask/{key}"] = float(value)
 
-    if "role_alive_penalty" in aux:
-        stats["mask/role_alive_penalty"] = float(aux["role_alive_penalty"])
-    if "role_dead_frac" in aux:
-        stats["mask/role_dead_frac"] = float(aux["role_dead_frac"])
+    if "role_alive_penalty" in diagnostics:
+        stats["mask/role_alive_penalty"] = float(diagnostics["role_alive_penalty"])
+    if "role_dead_frac" in diagnostics:
+        stats["mask/role_dead_frac"] = float(diagnostics["role_dead_frac"])
 
     # Compositional masker — per-term sampled weights
-    if "weights" in aux and isinstance(aux["weights"], dict):
-        for wk, wv in aux["weights"].items():
+    if "weights" in diagnostics and isinstance(diagnostics["weights"], dict):
+        for wk, wv in diagnostics["weights"].items():
             stats[f"mask/weight/{wk}"] = float(wv)
 
     # Rate metrics from compositional terms
-    if "R_ctx" in aux:
-        stats["mask/R_ctx"] = float(aux["R_ctx"])
-    if "R_tgt" in aux:
-        stats["mask/R_tgt"] = float(aux["R_tgt"])
+    if "R_ctx" in diagnostics:
+        stats["mask/R_ctx"] = float(diagnostics["R_ctx"])
+    if "R_tgt" in diagnostics:
+        stats["mask/R_tgt"] = float(diagnostics["R_tgt"])
 
     # N-way masker metrics
-    if "cross_surprise_mean" in aux:
-        stats["mask/cross_surprise_mean"] = float(aux["cross_surprise_mean"])
-    if "full_cross_surprise_mean" in aux:
-        stats["mask/full_cross_surprise_mean"] = float(aux["full_cross_surprise_mean"])
-    if "cross_surprise_tgt" in aux:
-        stats["mask/cross_surprise_tgt"] = float(aux["cross_surprise_tgt"])
-    if "cross_surprise_ctx" in aux:
-        stats["mask/cross_surprise_ctx"] = float(aux["cross_surprise_ctx"])
-    if "nway_entropy_marginal" in aux:
-        stats["mask/nway_entropy_marginal"] = float(aux["nway_entropy_marginal"])
-    if "kl_marg" in aux:
-        stats["mask/kl_marg"] = float(aux["kl_marg"])
-    if "k_schedule" in aux:
-        stats["mask/k_schedule"] = float(aux["k_schedule"])
+    if "cross_surprise_mean" in diagnostics:
+        stats["mask/cross_surprise_mean"] = float(diagnostics["cross_surprise_mean"])
+    if "full_cross_surprise_mean" in diagnostics:
+        stats["mask/full_cross_surprise_mean"] = float(diagnostics["full_cross_surprise_mean"])
+    if "cross_surprise_tgt" in diagnostics:
+        stats["mask/cross_surprise_tgt"] = float(diagnostics["cross_surprise_tgt"])
+    if "cross_surprise_ctx" in diagnostics:
+        stats["mask/cross_surprise_ctx"] = float(diagnostics["cross_surprise_ctx"])
+    if "nway_entropy_marginal" in diagnostics:
+        stats["mask/nway_entropy_marginal"] = float(diagnostics["nway_entropy_marginal"])
+    if "kl_marg" in diagnostics:
+        stats["mask/kl_marg"] = float(diagnostics["kl_marg"])
+    if "k_schedule" in diagnostics:
+        stats["mask/k_schedule"] = float(diagnostics["k_schedule"])
 
     # Progressive KL masker
     for _pk in ("prog_kl/forward", "prog_kl/reverse", "prog_kl/loss", "prog_kl/n_active_tgt", "prog_kl/transition_alpha"):
-        if _pk in aux:
-            stats[f"mask/{_pk}"] = float(aux[_pk])
+        if _pk in diagnostics:
+            stats[f"mask/{_pk}"] = float(diagnostics[_pk])
 
     # Per-block target counts from N-way soft assignments
-    nway_soft = aux.get("soft")
-    if nway_soft is not None and torch.is_tensor(nway_soft) and nway_soft.shape[-1] > 3:
+    nway_soft = (
+        assignment.probabilities
+        if isinstance(assignment, NWayAssignment)
+        else None
+    )
+    if nway_soft is not None and nway_soft.shape[-1] > 3:
         M_nway = nway_soft.shape[-1] - 2
         masses = nway_soft[..., 1:M_nway + 1].sum(dim=1).mean(dim=0)  # (M_nway,)
         for k in range(M_nway):
@@ -287,8 +300,8 @@ def mask_diagnostics(
                 "p_tgt_score_std", "marginal_score_std",
                 "tgt_assignment_entropy",
                 "batch_iou", "batch_iou_random"):
-        if key in aux:
-            stats[f"mask/{key}"] = float(aux[key])
+        if key in diagnostics:
+            stats[f"mask/{key}"] = float(diagnostics[key])
 
     # Semantic PCA masker — algorithmic, no soft scores.
     for key in (
@@ -300,8 +313,8 @@ def mask_diagnostics(
         "target_ratio_actual",
         "context_ratio_actual",
     ):
-        if key in aux:
-            value = aux[key]
+        if key in diagnostics:
+            value = diagnostics[key]
             stats[f"mask/{key}"] = (
                 float(value.item()) if torch.is_tensor(value) else float(value)
             )
@@ -318,7 +331,7 @@ def mask_diagnostics(
     #   - score-error correlation: whether high-scoring patches are actually harder
     #   - z-score stats: properties of the normalised signal the loss sees
     # ------------------------------------------------------------------
-    if patch_loss is not None and "k_tgt" in aux:
+    if patch_loss is not None and "k_tgt" in diagnostics:
         pl = patch_loss.float()
         if pl.dim() == 3:
             pl = pl.mean(-1)  # (B, K)
@@ -430,7 +443,7 @@ def mask_diagnostics(
 
         # Per-patch 3-way categorical entropy, averaged over patches and batch.
         # Uses the 3-way soft from the stacked distribution (B, N, 3).
-        # Note: logits are in aux but we reconstruct from the soft values to
+        # Note: logits are in diagnostics but we reconstruct from the soft values to
         # avoid storing the full (B, N, 3) tensor after detach.
         soft_3way = torch.stack([p_ctx_f, p_tgt_f, p_ign_f], dim=-1)  # (B, N, 3)
         per_patch_H = -(soft_3way * (soft_3way + 1e-10).log()).sum(dim=-1)  # (B, N)

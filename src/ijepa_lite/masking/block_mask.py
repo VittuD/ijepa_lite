@@ -5,7 +5,7 @@ import random
 
 import torch
 
-from ijepa_lite.masking.base import CollateMasker, MaskOutput
+from ijepa_lite.masking.base import CollateMasker, MaskOutput, MaskPartition
 
 
 class BlockMaskGenerator(CollateMasker):
@@ -116,6 +116,8 @@ class BlockMaskGenerator(CollateMasker):
             tgt_list.append(tgt)
 
         return MaskOutput(
-            context_idx=torch.tensor(ctx_list, dtype=torch.long),  # (B, Nctx)
-            target_idx=torch.tensor(tgt_list, dtype=torch.long),   # (B, Ntgt)
+            partition=MaskPartition(
+                context_idx=torch.tensor(ctx_list, dtype=torch.long),
+                target_idx=torch.tensor(tgt_list, dtype=torch.long),
+            ),
         )

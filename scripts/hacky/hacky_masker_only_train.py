@@ -328,8 +328,10 @@ def main():
 
             acc["loss"]    += float(total_loss.detach())
             acc["recon"]   += float(recon_loss.detach())
-            acc["mi"]      += float(mask_output.aux.get("mi_rate", 0.0))
-            acc["surprise"] += float(mask_output.aux.get("surprise_mean", 0.0))
+            acc["mi"] += float(mask_output.diagnostics.get("mi_rate", 0.0))
+            acc["surprise"] += float(
+                mask_output.diagnostics.get("surprise_mean", 0.0)
+            )
             acc["sps"]     += spatial_pos_std(ctx_idx.detach(), tgt_idx.detach(), device)
             acc_n          += 1
 

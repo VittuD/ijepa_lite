@@ -46,6 +46,10 @@ class IJEPACollate:
             # Soft scores are None for all CollateMaskers — not added to batch.
             out["context_idx"] = mask_output.context_idx  # (B, Nctx)
             out["target_idx"] = mask_output.target_idx    # (B, Ntgt) or (B, M, K)
+            if mask_output.partition.target_block_counts is not None:
+                out["target_block_counts"] = (
+                    mask_output.partition.target_block_counts
+                )
 
         return out
 

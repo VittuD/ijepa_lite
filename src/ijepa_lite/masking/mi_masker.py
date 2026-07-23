@@ -16,6 +16,7 @@ to the loss weighting.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -23,8 +24,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ijepa_lite.losses.composite import CompositeMaskerLoss
-from ijepa_lite.masking.base import LatentMasker, MaskOutput
+from ijepa_lite.masking.base import (
+    LatentMasker,
+    MaskOutput,
+    MaskPartition,
+    NWayAssignment,
+    ThreeWayAssignment,
+)
 from ijepa_lite.masking.registry import register
+
+
+@dataclass(frozen=True)
+class MIObjectiveState:
+    weights: dict[str, float]
+    ema_full: Optional[torch.Tensor]
+    epoch: Optional[int] = None
+    total_epochs: Optional[int] = None
+    warmup_random_multiblock_active: bool = False
+    train_on_soft_assignments: bool = False
+    grad_anchor: Optional[torch.Tensor] = None
+    k: Optional[float] = None
+    n_active_tgt: Optional[int] = None
+    global_step: Optional[int] = None
 
 
 @register("mi_3way")
@@ -888,18 +909,32 @@ class MIRateMasker(LatentMasker):
         weights = self._sample_weights(tokens.device)
 
         return MaskOutput(
-            context_idx=ctx_idx,
-            target_idx=tgt_idx,
-            context_soft=p_ctx,
-            target_soft=p_tgt,
-            aux={
+            partition=MaskPartition(
+                context_idx=ctx_idx,
+                target_idx=tgt_idx,
+                target_block_counts=aux_counts.get("target_block_counts"),
+            ),
+            assignment=ThreeWayAssignment(
+                context=p_ctx,
+                target=p_tgt,
+                ignore=p_ign,
+            ),
+            objective_state=MIObjectiveState(
+                weights=weights,
+                ema_full=ema_full,
+                epoch=epoch,
+                total_epochs=self.total_epochs,
+                warmup_random_multiblock_active=bool(
+                    aux_counts.get("warmup_random_multiblock_active", 0.0)
+                ),
+                train_on_soft_assignments=(
+                    self.warmup_train_masker_on_soft_assignments
+                ),
+                grad_anchor=logits,
+            ),
+            diagnostics={
                 "weights":  weights,
-                "p_ign":    p_ign,
                 "logits":   logits.detach(),
-                "warmup_grad_anchor": logits,
-                "ema_full": ema_full,
-                "epoch": epoch,
-                "total_epochs": self.total_epochs,
                 "hard_assignment": self.hard_assignment,
                 "warmup_train_masker_on_soft_assignments": (
                     self.warmup_train_masker_on_soft_assignments
@@ -919,15 +954,22 @@ class MIRateMasker(LatentMasker):
         reconstruction_loss: torch.Tensor,
         patch_loss: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        p_ctx    = mask_output.context_soft
-        p_tgt    = mask_output.target_soft
-        p_ign    = mask_output.aux["p_ign"]
+        if not isinstance(mask_output.assignment, ThreeWayAssignment):
+            raise TypeError("MIRateMasker requires ThreeWayAssignment.")
+        if not isinstance(mask_output.objective_state, MIObjectiveState):
+            raise TypeError("MIRateMasker requires MIObjectiveState.")
 
-        if bool(mask_output.aux.get("warmup_random_multiblock_active", 0.0)):
-            if bool(mask_output.aux.get("warmup_train_masker_on_soft_assignments", False)):
+        assignment = mask_output.assignment
+        state = mask_output.objective_state
+        p_ctx = assignment.context
+        p_tgt = assignment.target
+        p_ign = assignment.ignore
+
+        if state.warmup_random_multiblock_active:
+            if state.train_on_soft_assignments:
                 pass
             else:
-                warmup_grad_anchor = mask_output.aux.get("warmup_grad_anchor")
+                warmup_grad_anchor = state.grad_anchor
                 if warmup_grad_anchor is None:
                     return reconstruction_loss
                 # Keep the learned masker branch in the autograd graph during
@@ -935,10 +977,10 @@ class MIRateMasker(LatentMasker):
                 # while still applying exactly zero update to that branch.
                 return reconstruction_loss + 0.0 * warmup_grad_anchor.sum()
 
-        weights  = mask_output.aux["weights"]
-        ema_full = mask_output.aux.get("ema_full")
-        epoch = mask_output.aux.get("epoch")
-        total_epochs = mask_output.aux.get("total_epochs")
+        weights = state.weights
+        ema_full = state.ema_full
+        epoch = state.epoch
+        total_epochs = state.total_epochs
 
         if ema_full is None:
             # Unit test fallback — compute only entropy terms
@@ -961,8 +1003,7 @@ class MIRateMasker(LatentMasker):
             **extra_kw,
         )
 
-        # Write logs into aux for metrics.py to pick up
-        mask_output.aux.update(logs)
+        mask_output.diagnostics.update(logs)
 
         return reconstruction_loss + total
 
@@ -1514,28 +1555,33 @@ class MINWayMasker(LatentMasker):
         weights = self._sample_weights(tokens.device)
 
         # target_soft = sum across blocks for backward compat metrics
-        aux = {
+        diagnostics = {
             "weights":      weights,
-            "p_ign":        p_ign,
-            "soft":         soft,
             "logits":       logits.detach(),
-            "ema_full":     ema_full,
             "n_active_tgt": n_active,
             "global_step":  getattr(self, "_global_step", 0),
-            "target_block_counts": target_block_counts,
             "max_total_tgt": self.max_total_tgt,
             "max_tgt_per_block": self.max_tgt_per_block,
             "max_total_hard": self.max_total_hard,
         }
         if self._k_enabled:
-            aux["k"] = self._current_k.item()
+            diagnostics["k"] = self._current_k.item()
 
         return MaskOutput(
-            context_idx=ctx_idx,       # (B, Nctx)
-            target_idx=tgt_idx,        # (B, M, K)
-            context_soft=p_ctx,        # (B, N)
-            target_soft=p_tgts.sum(-1),  # (B, N) — total target mass
-            aux=aux,
+            partition=MaskPartition(
+                context_idx=ctx_idx,
+                target_idx=tgt_idx,
+                target_block_counts=target_block_counts,
+            ),
+            assignment=NWayAssignment(probabilities=soft),
+            objective_state=MIObjectiveState(
+                weights=weights,
+                ema_full=ema_full,
+                k=self._current_k.item() if self._k_enabled else None,
+                n_active_tgt=n_active,
+                global_step=getattr(self, "_global_step", 0),
+            ),
+            diagnostics=diagnostics,
         )
 
     # ------------------------------------------------------------------
@@ -1548,12 +1594,19 @@ class MINWayMasker(LatentMasker):
         reconstruction_loss: torch.Tensor,
         patch_loss: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        p_ctx    = mask_output.context_soft
-        p_tgt    = mask_output.target_soft
-        p_ign    = mask_output.aux["p_ign"]
-        weights  = mask_output.aux["weights"]
-        ema_full = mask_output.aux.get("ema_full")
-        soft     = mask_output.aux.get("soft")
+        if not isinstance(mask_output.assignment, NWayAssignment):
+            raise TypeError("MINWayMasker requires NWayAssignment.")
+        if not isinstance(mask_output.objective_state, MIObjectiveState):
+            raise TypeError("MINWayMasker requires MIObjectiveState.")
+
+        assignment = mask_output.assignment
+        state = mask_output.objective_state
+        p_ctx = assignment.context
+        p_tgt = assignment.target
+        p_ign = assignment.ignore
+        weights = state.weights
+        ema_full = state.ema_full
+        soft = assignment.probabilities
 
         if ema_full is None:
             device = p_ctx.device
@@ -1562,13 +1615,13 @@ class MINWayMasker(LatentMasker):
             )
 
         extra_kw = {}
-        k = mask_output.aux.get("k")
+        k = state.k
         if k is not None:
             extra_kw["k"] = k
-        n_active = mask_output.aux.get("n_active_tgt")
+        n_active = state.n_active_tgt
         if n_active is not None:
             extra_kw["n_active_tgt"] = n_active
-        global_step = mask_output.aux.get("global_step")
+        global_step = state.global_step
         if global_step is not None:
             extra_kw["global_step"] = global_step
 
@@ -1582,6 +1635,6 @@ class MINWayMasker(LatentMasker):
             **extra_kw,
         )
 
-        mask_output.aux.update(logs)
+        mask_output.diagnostics.update(logs)
 
         return reconstruction_loss + total

@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from ijepa_lite.masking.base import LatentMasker, MaskOutput
+from ijepa_lite.masking.base import LatentMasker, MaskOutput, MaskPartition
 from ijepa_lite.masking.registry import register
 
 
@@ -67,9 +67,11 @@ class _BaseRandomSplitMasker(LatentMasker):
         target_idx = shuffled[:, self.nctx :]
 
         return MaskOutput(
-            context_idx=context_idx,
-            target_idx=target_idx,
-            aux={
+            partition=MaskPartition(
+                context_idx=context_idx,
+                target_idx=target_idx,
+            ),
+            diagnostics={
                 "random_split_upper_half_only": float(self.upper_half_only),
                 "random_split_candidates": float(n_candidates),
                 "target_ratio_actual": float(self.ntgt / self.num_patches),

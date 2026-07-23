@@ -220,10 +220,11 @@ def _build_latent_masker(
     )
     latent_dict.pop("name", None)
 
-    # Config overrides auto-inferred values
-    merged_kwargs = {**auto_kwargs, **latent_dict}
-
-    return build_latent_masker(name, **merged_kwargs)
+    return build_latent_masker(
+        name,
+        inferred_kwargs=auto_kwargs,
+        **latent_dict,
+    )
 
 
 # ------------------------------------------------------------------

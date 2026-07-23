@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch
 
-from ijepa_lite.masking.base import LatentMasker, MaskOutput
+from ijepa_lite.masking.base import LatentMasker, MaskOutput, MaskPartition
 from ijepa_lite.masking.registry import register
 
 
@@ -85,9 +85,11 @@ class SemanticPCAMasker(LatentMasker):
         context_idx = self._select_context_batched(order, target_idx)
 
         return MaskOutput(
-            context_idx=context_idx,
-            target_idx=target_idx,
-            aux={
+            partition=MaskPartition(
+                context_idx=context_idx,
+                target_idx=target_idx,
+            ),
+            diagnostics={
                 "pca_dim": float(self.pca_dim),
                 "pca_requested_dim": float(self.requested_pca_dim),
                 "pca_power_iterations": float(self.power_iterations),

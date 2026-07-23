@@ -7,13 +7,19 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from ijepa_lite.losses.context_loss import context_loss
-from ijepa_lite.masking.base import CollateMasker, LatentMasker, MaskOutput
+from ijepa_lite.masking.base import (
+    CollateMasker,
+    LatentMasker,
+    MaskOutput,
+    MaskPartition,
+)
 from ijepa_lite.masking.compressor import TokenCompressor
-from ijepa_lite.masking.metrics import mask_diagnostics
 from ijepa_lite.models.ema import ema_update
+from ijepa_lite.models.pretrain_runtime import (
+    PretrainStepRequest,
+    run_pretraining_step,
+)
 
 
 class IJEPAModel(nn.Module):
@@ -35,7 +41,7 @@ class IJEPAModel(nn.Module):
           2. Compresses them via token_compressor.
           3. Runs latent_masker(compressed_tokens) → MaskOutput  [grads flow here].
           4. Uses hard indices for the standard JEPA forward.
-          5. Adds latent_masker.aux_loss() to the reconstruction loss to route
+          5. Evaluates latent_masker.aux_loss() to route
              gradients back to masker and compressor parameters.
         The EMA encoder runs once per step — its output is reused for both masking and targets.
 
@@ -231,180 +237,14 @@ class IJEPAModel(nn.Module):
             "ctx_tokens_all"       : (B, Nctx, D) context tokens (if compute_agreement)
             "tgt_tokens_all"       : (B, Nctx, D) target tokens at same positions
         """
-        # ------------------------------------------------------------------
-        # Step 1: Resolve MaskOutput
-        #
-        # Latent masker path: _resolve_latent_masks runs the EMA encoder once
-        # and returns both the MaskOutput and the raw ema_tokens (B, N, D).
-        # We reuse those tokens directly as tgt_tokens_all — no second forward.
-        #
-        # Deterministic path: tgt_tokens_all is produced here as usual.
-        # ------------------------------------------------------------------
-        cached_full_tokens: Optional[torch.Tensor] = None
-
-        if self.latent_masker is not None:
-            mask_output, cached_full_tokens = self._resolve_latent_masks(images, epoch=epoch)
-        else:
-            mask_output = self._resolve_collate_masks(masks, images)
-
-        ctx_idx = mask_output.context_idx  # (B, Nctx)
-        tgt_idx = mask_output.target_idx   # (B, Ntgt) or (B, M, K)
-        target_block_counts = mask_output.aux.get("target_block_counts")
-
-        # ------------------------------------------------------------------
-        # Step 2: Context encoder (masked, gradients flow)
-        # ------------------------------------------------------------------
-        ctx_tokens = self.context_encoder(images, keep_idx=ctx_idx)  # (B, Nctx, D)
-        b = images.shape[0]
-        d = ctx_tokens.shape[-1]
-
-        # ------------------------------------------------------------------
-        # Step 3: Target token bank — reuse cached full-view tokens if available,
-        # otherwise run the appropriate full-view encoder now. Layer norm is
-        # applied in both cases so target semantics match the current vanilla path.
-        # ------------------------------------------------------------------
-        if cached_full_tokens is not None:
-            full_tokens = cached_full_tokens
-        else:
-            full_tokens = self._encode_full_view_tokens(images)
-
-        raw_tgt_tokens_all = F.layer_norm(full_tokens, (full_tokens.shape[-1],))
-        if self._uses_projected_prediction_space():
-            tgt_tokens_all = self.sigreg_loss.project_tokens(full_tokens)
-        else:
-            tgt_tokens_all = raw_tgt_tokens_all
-
-        # Optional encoder-agreement diagnostic (re-uses already-computed tensors)
-        ctx_tokens_all: Optional[torch.Tensor] = None
-        tgt_at_ctx: Optional[torch.Tensor] = None
-        if compute_agreement:
-            ctx_tokens_all = ctx_tokens.detach()
-            tgt_at_ctx = raw_tgt_tokens_all.gather(
-                1, ctx_idx.unsqueeze(-1).expand(-1, -1, raw_tgt_tokens_all.shape[-1])
-            ).detach()
-
-        # ------------------------------------------------------------------
-        # Step 4: Predictor + loss (single-block or multi-block)
-        # ------------------------------------------------------------------
-        if tgt_idx.dim() == 2:
-            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx = (
-                self._forward_single_block(
-                    ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d
-                )
-            )
-        elif tgt_idx.dim() == 3:
-            reconstruction_loss, pred, tgt_tokens, patch_loss, pred_ctx = (
-                self._forward_multi_block(
-                    ctx_tokens, ctx_idx, tgt_idx, tgt_tokens_all, b, d,
-                    target_block_counts=target_block_counts,
-                )
-            )
-        else:
-            raise ValueError(
-                f"Unsupported target_idx.dim()={tgt_idx.dim()}, expected 2 or 3."
-            )
-
-        # ------------------------------------------------------------------
-        # Step 5: Masker auxiliary loss and total loss assembly
-        #
-        # owns_loss=False (default, 2-way entropy maskers):
-        #   total = reconstruction_loss + aux_loss()
-        # owns_loss=True (RateDist3WayMasker):
-        #   aux_loss() returns D_soft + λ·N·R as the complete objective.
-        #   reconstruction_loss (unweighted mean) is preserved for monitoring.
-        # ------------------------------------------------------------------
-        if self.latent_masker is not None:
-            masker_aux = self.latent_masker.aux_loss(
-                mask_output, reconstruction_loss, patch_loss=patch_loss
-            )
-            if self.latent_masker.owns_loss:
-                total_loss = masker_aux
-            else:
-                total_loss = reconstruction_loss + masker_aux
-        else:
-            masker_aux = reconstruction_loss.new_zeros(())
-            total_loss = reconstruction_loss
-
-        model_stats: dict[str, float] = {}
-        sigreg_weight = self._get_sigreg_weight(epoch)
-        if self.sigreg_loss is not None and sigreg_weight > 0.0:
-            sigreg_val, sigreg_logs = self.sigreg_loss.forward_projected(
-                tgt_tokens_all, full_tokens
-            )
-            total_loss = total_loss + sigreg_weight * sigreg_val
-            model_stats.update(sigreg_logs)
-            model_stats["sigreg/weight"] = float(sigreg_weight)
-            model_stats["sigreg/weight_start"] = float(self.sigreg_weight_start)
-            model_stats["sigreg/weight_end"] = float(self.sigreg_weight_end)
-            model_stats["sigreg/weight_schedule_id"] = {
-                "constant": 0.0,
-                "linear": 1.0,
-                "cosine": 2.0,
-            }[self.sigreg_weight_schedule]
-            model_stats["sigreg/loss_weighted"] = float(
-                (sigreg_weight * sigreg_val).detach().item()
-            )
-
-        # ------------------------------------------------------------------
-        # Step 5b: Context loss (V-JEPA 2.1-style visible token supervision)
-        # ------------------------------------------------------------------
-        ctx_loss_val = None
-        if pred_ctx is not None:
-            if tgt_idx.dim() == 3:
-                tgt_idx_flat = self._flatten_multi_block_target_idx(
-                    tgt_idx, b, target_block_counts
-                )
-            else:
-                tgt_idx_flat = tgt_idx
-            tgt_at_ctx_pos = tgt_tokens_all.gather(
-                1, ctx_idx.unsqueeze(-1).expand(-1, -1, tgt_tokens_all.shape[-1])
-            )
-            pred_ctx_loss = self._project_prediction_tokens(pred_ctx)
-            alpha = self._ctx_alpha(epoch)
-            ctx_l = context_loss(
-                pred_ctx_loss, tgt_at_ctx_pos, ctx_idx, tgt_idx_flat,
-                self.grid_size, self.loss_fn,
-                gamma=self.ctx_loss_gamma, alpha=alpha,
-            )
-            ctx_loss_val = float(ctx_l.detach().item())
-            total_loss = total_loss + self.ctx_loss_weight * ctx_l
-
-        # ------------------------------------------------------------------
-        # Step 6: Mask diagnostics
-        # mask_diagnostics() always returns the cheap always-on metrics.
-        # Full diagnostics (coverage, IoU, entropy, etc.) are gated on
-        # compute_mask_metrics so they only run at log steps.
-        # Note: for RD masker, aux_loss writes D_soft and R into mask_output.aux
-        # before mask_diagnostics runs, so they are picked up automatically.
-        # ------------------------------------------------------------------
-        num_patches = tgt_tokens_all.shape[1]
-        mask_stats = mask_diagnostics(
-            mask_output,
-            num_patches=num_patches,
-            masker_loss=masker_aux,
-            full=compute_mask_metrics,
-            patch_loss=patch_loss,
+        request = PretrainStepRequest(
+            images=images,
+            masks=masks,
+            compute_agreement=compute_agreement,
+            compute_mask_metrics=compute_mask_metrics,
+            epoch=epoch,
         )
-
-        # ------------------------------------------------------------------
-        # Output
-        # ------------------------------------------------------------------
-        out: Dict = {
-            "loss": total_loss,
-            "reconstruction_loss": reconstruction_loss,
-            "pred": pred.detach(),
-            "target": tgt_tokens.detach(),
-            "patch_loss": patch_loss.detach(),   # (B, K) — for diagnostics / curriculum
-            "mask_stats": mask_stats,
-            "model_stats": model_stats,
-            "ctx_loss": ctx_loss_val,
-        }
-        if self.sigreg_loss is not None and sigreg_weight > 0.0:
-            out["sigreg_loss_weighted"] = sigreg_weight * sigreg_val
-        if compute_agreement:
-            out["ctx_tokens_all"] = ctx_tokens_all
-            out["tgt_tokens_all"] = tgt_at_ctx
-        return out
+        return run_pretraining_step(self, request).as_dict()
 
     def _encode_full_view_tokens(self, images: torch.Tensor) -> torch.Tensor:
         if self.target_mode == "shared":
@@ -487,13 +327,39 @@ class IJEPAModel(nn.Module):
                 )
             generated = self._mask_generator(batch_size=images.shape[0])
             return MaskOutput(
-                context_idx=generated.context_idx.to(images.device, non_blocking=True),
-                target_idx=generated.target_idx.to(images.device, non_blocking=True),
+                partition=MaskPartition(
+                    context_idx=generated.context_idx.to(
+                        images.device, non_blocking=True
+                    ),
+                    target_idx=generated.target_idx.to(
+                        images.device, non_blocking=True
+                    ),
+                    target_block_counts=(
+                        generated.partition.target_block_counts.to(
+                            images.device, non_blocking=True
+                        )
+                        if generated.partition.target_block_counts is not None
+                        else None
+                    ),
+                ),
             )
 
         return MaskOutput(
-            context_idx=masks["context_idx"].to(images.device, non_blocking=True),
-            target_idx=masks["target_idx"].to(images.device, non_blocking=True),
+            partition=MaskPartition(
+                context_idx=masks["context_idx"].to(
+                    images.device, non_blocking=True
+                ),
+                target_idx=masks["target_idx"].to(
+                    images.device, non_blocking=True
+                ),
+                target_block_counts=(
+                    masks["target_block_counts"].to(
+                        images.device, non_blocking=True
+                    )
+                    if "target_block_counts" in masks
+                    else None
+                ),
+            ),
         )
 
     # ------------------------------------------------------------------

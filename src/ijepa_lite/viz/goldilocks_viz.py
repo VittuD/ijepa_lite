@@ -4,7 +4,7 @@ Reusable rendering utilities for masker visualization.
 Supports two masker styles:
 - **Goldilocks / 2-way**: middle panel = cold→hot heatmap of p_tgt.
 - **MI / 3-way**: middle panel = soft 3-way overlay (ctx=blue, tgt=red, ign=grey
-  blended by soft probabilities).  Detected via ``p_ign`` in ``mask_out.aux``.
+  blended by soft probabilities).
 
 Extracted from hacky_visualize_goldilocks.py so that both the standalone
 script and the VizCallback can share the same logic.
@@ -18,6 +18,8 @@ from typing import Optional
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
+
+from ijepa_lite.masking.base import NWayAssignment, ThreeWayAssignment
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -1137,11 +1139,21 @@ def visualize_split(
         tgt_idx = mask_out.target_idx
         p_tgt = mask_out.target_soft
         p_ctx = mask_out.context_soft
-        p_ign = mask_out.aux.get("p_ign")
-        soft_nway = mask_out.aux.get("soft")  # (B, N, M+2) for N-way
-        rrg_ctx_seed_idx = mask_out.aux.get("rrg_ctx_seed_idx")
-        rrg_tgt_seed_idx = mask_out.aux.get("rrg_tgt_seed_idx")
-        rrg_tgt_seed_idx_blocks = mask_out.aux.get("rrg_tgt_seed_idx_blocks")
+        assignment = mask_out.assignment
+        p_ign = (
+            assignment.ignore
+            if isinstance(assignment, (ThreeWayAssignment, NWayAssignment))
+            else None
+        )
+        soft_nway = (
+            assignment.probabilities
+            if isinstance(assignment, NWayAssignment)
+            else None
+        )
+        diagnostics = mask_out.diagnostics
+        rrg_ctx_seed_idx = diagnostics.get("rrg_ctx_seed_idx")
+        rrg_tgt_seed_idx = diagnostics.get("rrg_tgt_seed_idx")
+        rrg_tgt_seed_idx_blocks = diagnostics.get("rrg_tgt_seed_idx_blocks")
 
         # Detect masker type on first batch
         if masker_type is None:

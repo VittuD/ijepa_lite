@@ -28,7 +28,12 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from ijepa_lite.masking.base import LatentMasker, MaskOutput
+from ijepa_lite.masking.base import (
+    LatentMasker,
+    MaskOutput,
+    MaskPartition,
+    TargetScoreAssignment,
+)
 from ijepa_lite.masking.registry import register
 from ijepa_lite.losses.goldilocks_loss import GoldilocksLoss
 
@@ -308,9 +313,9 @@ class GoldilocksTeacherMasker(LatentMasker):
         target_idx   : (B, K_tgt)
         context_soft : None
         target_soft  : (B, N) — full soft scores, stored for aux_loss
-        aux["k_tgt"] : int
-        aux["k_ctx"] : int
-        aux + content-adaptivity metrics
+        diagnostics["k_tgt"] : int
+        diagnostics["k_ctx"] : int
+        diagnostics + content-adaptivity metrics
         """
         B, N, D = ema_full.shape
         device = ema_full.device
@@ -338,11 +343,9 @@ class GoldilocksTeacherMasker(LatentMasker):
         aux_metrics = _content_adaptivity_metrics(p_tgt, tgt_idx, N)
 
         return MaskOutput(
-            context_idx=ctx_idx,
-            target_idx=tgt_idx,
-            context_soft=None,
-            target_soft=p_tgt,    # full (B, N), stored for aux_loss
-            aux={"k_tgt": K_tgt, "k_ctx": K_ctx, **aux_metrics},
+            partition=MaskPartition(context_idx=ctx_idx, target_idx=tgt_idx),
+            assignment=TargetScoreAssignment(target=p_tgt),
+            diagnostics={"k_tgt": K_tgt, "k_ctx": K_ctx, **aux_metrics},
         )
 
     # ------------------------------------------------------------------
@@ -358,14 +361,20 @@ class GoldilocksTeacherMasker(LatentMasker):
         """
         Returns reconstruction_loss + β · L_goldilocks.
 
-        patch_loss must already be detached (enforced in ijepa.py).
+        patch_loss is used exactly as supplied by the pretraining runtime. The
+        current runtime supplies the live reconstruction tensor; changing that
+        stop-gradient boundary is a scientific change, not part of this refactor.
         Falls back to reconstruction_loss alone when patch_loss is unavailable.
         """
         if patch_loss is None:
             return reconstruction_loss
+        if not isinstance(mask_output.assignment, TargetScoreAssignment):
+            raise TypeError(
+                "GoldilocksTeacherMasker requires TargetScoreAssignment."
+            )
 
         L_goldilocks = self.goldilocks_loss(
-            mask_output.target_soft,
+            mask_output.assignment.target,
             mask_output.target_idx,
             patch_loss,
         )

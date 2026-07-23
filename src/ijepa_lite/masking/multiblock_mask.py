@@ -20,7 +20,7 @@ import random
 
 import torch
 
-from ijepa_lite.masking.base import CollateMasker, MaskOutput
+from ijepa_lite.masking.base import CollateMasker, MaskOutput, MaskPartition
 
 
 class MultiBlockMaskGenerator(CollateMasker):
@@ -372,6 +372,8 @@ class MultiBlockMaskGenerator(CollateMasker):
         ctx_tensor = torch.tensor(all_ctx, dtype=torch.long)    # (B, Nctx)
 
         return MaskOutput(
-            context_idx=ctx_tensor,
-            target_idx=tgt_tensor,
+            partition=MaskPartition(
+                context_idx=ctx_tensor,
+                target_idx=tgt_tensor,
+            ),
         )
